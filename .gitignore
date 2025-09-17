@@ -1,0 +1,116 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# Dependencies
+node_modules/
+**/node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Testing
+/coverage
+test-results/
+playwright-report/
+.nyc_output
+
+# Next.js
+.next/
+**/.next/
+/out/
+**/out/
+
+# Production
+/build
+/dist
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# Environment files (can opt-in for committing if needed)
+.env*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Vercel
+.vercel
+.vercel.json
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+
+# AI Service Configuration
+*.key
+.secrets/
+
+# Turbopack cache
+.turbo/
+
+# Backup files
+*.backup
+*.bak
+*.orig
+
+# Package manager lock files (optional - keep what you prefer)
+# yarn.lock
+# pnpm-lock.yaml
+
+# Lighthouse CI
+.lighthouseci/
+
+# Bundle analyzer
+.analyze/
+
+# PWA files
+**/public/sw.js
+**/public/workbox-*.js
+**/public/worker-*.js
+**/public/sw.js.map
+**/public/workbox-*.js.map
+**/public/worker-*.js.map
+
+# AI Generated Content (optional)
+generated/
+ai-outputs/
+
+# Database files (for future backend)
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker files (for future deployment)
+docker-compose.override.yml
+
+# Temporary folders
+tmp/
+temp/
+.local
