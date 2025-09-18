@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Artmancer",
-  description: "AI-powered art generation platform",
+  description: "AI-powered photo editing platform with background removal, image extension, and intelligent editing tools",
   icons: {
     icon: [
       { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },

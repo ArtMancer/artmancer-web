@@ -45,18 +45,18 @@ body {
 /* Dotted background pattern */
 .dots-pattern {
   background-image: radial-gradient(
-    circle at 1px 1px,
-    rgba(106, 13, 173, 0.15) 1px,
-    transparent 0
+    circle at 50px 50px,
+    rgba(157, 78, 221, 0.25) 1px,
+    transparent 0.5
   );
   background-size: 20px 20px;
 }
 
 .dots-pattern-small {
   background-image: radial-gradient(
-    circle at 1px 1px,
-    rgba(106, 13, 173, 0.1) 1px,
-    transparent 0
+    circle at 20px 20px,
+    rgba(157, 78, 221, 0.18) 1px,
+    transparent 0.5
   );
   background-size: 24px 24px;
 }
