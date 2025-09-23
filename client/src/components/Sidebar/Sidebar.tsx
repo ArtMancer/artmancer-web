@@ -1,37 +1,55 @@
+import React from 'react';
+
 interface SidebarProps {
   isOpen: boolean;
+  width?: number; // Optional width for resizable functionality
   uploadedImage: string | null;
   isMaskingMode: boolean;
   maskBrushSize: number;
+  isResizing?: boolean; // For resize handle styling
   onImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveImage: () => void;
   onToggleMaskingMode: () => void;
   onClearMask: () => void;
   onMaskBrushSizeChange: (size: number) => void;
+  onResizeStart?: (e: React.MouseEvent) => void; // Resize handle handler
+  onWidthChange?: (width: number) => void; // For keyboard resize
 }
 
 export default function Sidebar({
   isOpen,
+  width = 320, // Default width
   uploadedImage,
   isMaskingMode,
   maskBrushSize,
+  isResizing = false,
   onImageUpload,
   onRemoveImage,
   onToggleMaskingMode,
   onClearMask,
-  onMaskBrushSizeChange
+  onMaskBrushSizeChange,
+  onResizeStart,
+  onWidthChange
 }: SidebarProps) {
   return (
     <div
-      className={`bg-[var(--secondary-bg)] transition-all duration-300 flex-shrink-0 ${
-        isOpen
-          ? "lg:w-80 w-full h-64 lg:h-auto"
-          : "w-0 lg:w-0 h-0 lg:h-auto overflow-hidden"
-      } flex flex-col lg:flex-col overflow-hidden`}
+      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col overflow-hidden fixed right-0 z-30 ${
+        isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
+      }`}
+      style={{
+        top: '0', // Start from the very top
+        width: `${width}px`,
+        height: '100vh', // Full viewport height
+        paddingTop: '4rem', // Account for header height with padding
+        transform: isOpen ? 'translateX(0)' : `translateX(${width}px)`,
+        transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease',
+        transformOrigin: 'right center',
+        willChange: 'transform, opacity'
+      }}
     >
-      {/* Customize Header */}
+      {/* Customize Header - no extra top padding */}
       {isOpen && (
-        <div className="p-4 border-b border-[var(--primary-bg)]">
+        <div className="px-4 pb-2 border-b border-[var(--primary-bg)]">
           <div className="flex items-center justify-between w-full">
             <span className="text-[var(--text-primary)] font-medium">
               Customize
@@ -40,9 +58,9 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Customize Content */}
+      {/* Customize Content - minimal spacing */}
       {isOpen && (
-        <div className="flex-1 p-4 space-y-4 lg:space-y-6 overflow-y-auto max-h-52 lg:max-h-none">
+        <div className="flex-1 px-4 pt-2 pb-4 space-y-4 lg:space-y-6 overflow-y-auto">
           {/* Image Upload Section */}
           <div>
             <h3 className="text-[var(--text-primary)] font-medium mb-2 lg:mb-3 text-sm lg:text-base">
@@ -206,6 +224,46 @@ export default function Sidebar({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Resize Handle - Attached to sidebar for smooth movement */}
+      {isOpen && onResizeStart && (
+        <div
+          className={`absolute top-0 left-0 w-3 h-full cursor-col-resize z-10 transition-all duration-150 ${
+            isResizing 
+              ? 'bg-[var(--primary-accent)] opacity-100' 
+              : 'bg-transparent hover:bg-[var(--primary-accent)] hover:opacity-60'
+          }`}
+          style={{ 
+            transform: 'translateX(-50%)', // Center on the left edge
+            willChange: isResizing ? 'background-color' : 'auto'
+          }}
+          onMouseDown={onResizeStart}
+          onTouchStart={(e) => {
+            // Touch support for mobile
+            const touch = e.touches[0];
+            if (touch) {
+              onResizeStart(e as any);
+            }
+          }}
+          role="separator"
+          aria-label="Resize sidebar"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            // Keyboard accessibility
+            if (e.key === 'ArrowLeft' && onWidthChange) {
+              e.preventDefault();
+              onWidthChange(Math.max(280, width - 10));
+              // Save to localStorage
+              localStorage.setItem('sidebarWidth', String(Math.max(280, width - 10)));
+            } else if (e.key === 'ArrowRight' && onWidthChange) {
+              e.preventDefault();
+              onWidthChange(Math.min(600, width + 10));
+              // Save to localStorage
+              localStorage.setItem('sidebarWidth', String(Math.min(600, width + 10)));
+            }
+          }}
+        />
       )}
     </div>
   );
