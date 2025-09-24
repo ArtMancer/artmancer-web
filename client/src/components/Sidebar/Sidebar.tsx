@@ -1,4 +1,4 @@
-import React from 'react';
+import React from "react";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -29,38 +29,37 @@ export default function Sidebar({
   onClearMask,
   onMaskBrushSizeChange,
   onResizeStart,
-  onWidthChange
+  onWidthChange,
 }: SidebarProps) {
   return (
     <div
-      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col overflow-hidden fixed right-0 z-30 ${
+      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 ${
         isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
       }`}
       style={{
-        top: '0', // Start from the very top
         width: `${width}px`,
-        height: '100vh', // Full viewport height
-        paddingTop: '4rem', // Account for header height with padding
-        transform: isOpen ? 'translateX(0)' : `translateX(${width}px)`,
-        transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease',
-        transformOrigin: 'right center',
-        willChange: 'transform, opacity'
+        height: "100vh",
+        transform: isOpen ? "translateX(0)" : `translateX(${width}px)`,
+        transition:
+          "transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease",
+        transformOrigin: "right center",
+        willChange: "transform, opacity",
+        overflowX: "hidden", // Prevent horizontal overflow
+        overflowY: "hidden", // Let inner content handle vertical scrolling
       }}
     >
-      {/* Customize Header - no extra top padding */}
+      {/* Customize Content - Scrollable with proper height */}
       {isOpen && (
-        <div className="px-4 pb-2 border-b border-[var(--primary-bg)]">
-          <div className="flex items-center justify-between w-full">
-            <span className="text-[var(--text-primary)] font-medium">
-              Customize
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Customize Content - minimal spacing */}
-      {isOpen && (
-        <div className="flex-1 px-4 pt-2 pb-4 space-y-4 lg:space-y-6 overflow-y-auto">
+        <div
+          className="flex-1 px-4 pt-2 pb-4 space-y-4 lg:space-y-6"
+          style={{
+            overflow: "hidden auto", // Enable vertical scrolling
+            height: "calc(100% - 3rem)", // Full sidebar height minus customize header (~3rem)
+            minHeight: 0, // Allow flexbox to shrink
+            scrollbarWidth: "thin", // Firefox
+            scrollbarColor: "var(--primary-accent) var(--secondary-bg)", // Firefox
+          }}
+        >
           {/* Image Upload Section */}
           <div>
             <h3 className="text-[var(--text-primary)] font-medium mb-2 lg:mb-3 text-sm lg:text-base">
@@ -99,9 +98,7 @@ export default function Sidebar({
             <div className="space-y-1 lg:space-y-2 text-sm lg:text-base">
               <label className="flex items-center">
                 <input type="radio" name="style" className="mr-2" />
-                <span className="text-[var(--text-secondary)]">
-                  Realistic
-                </span>
+                <span className="text-[var(--text-secondary)]">Realistic</span>
               </label>
               <label className="flex items-center">
                 <input
@@ -110,15 +107,11 @@ export default function Sidebar({
                   className="mr-2"
                   defaultChecked
                 />
-                <span className="text-[var(--text-secondary)]">
-                  Fantasy
-                </span>
+                <span className="text-[var(--text-secondary)]">Fantasy</span>
               </label>
               <label className="flex items-center">
                 <input type="radio" name="style" className="mr-2" />
-                <span className="text-[var(--text-secondary)]">
-                  Abstract
-                </span>
+                <span className="text-[var(--text-secondary)]">Abstract</span>
               </label>
             </div>
           </div>
@@ -147,11 +140,11 @@ export default function Sidebar({
                   disabled={!uploadedImage}
                   className={`px-3 py-2 rounded text-sm font-medium transition-colors ${
                     isMaskingMode
-                      ? 'bg-[var(--highlight-accent)] text-white'
-                      : 'bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white disabled:bg-gray-600 disabled:cursor-not-allowed'
+                      ? "bg-[var(--highlight-accent)] text-white"
+                      : "bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white disabled:bg-gray-600 disabled:cursor-not-allowed"
                   }`}
                 >
-                  {isMaskingMode ? 'Exit Masking' : 'Start Masking'}
+                  {isMaskingMode ? "Exit Masking" : "Start Masking"}
                 </button>
                 {isMaskingMode && (
                   <button
@@ -162,7 +155,7 @@ export default function Sidebar({
                   </button>
                 )}
               </div>
-              
+
               {isMaskingMode && (
                 <div>
                   <label className="block text-[var(--text-secondary)] text-sm mb-2">
@@ -173,19 +166,20 @@ export default function Sidebar({
                     min="5"
                     max="50"
                     value={maskBrushSize}
-                    onChange={(e) => onMaskBrushSizeChange(parseInt(e.target.value))}
+                    onChange={(e) =>
+                      onMaskBrushSizeChange(parseInt(e.target.value))
+                    }
                     className="w-full accent-[var(--primary-accent)]"
                   />
                 </div>
               )}
-              
+
               <p className="text-xs text-[var(--text-secondary)]">
-                {!uploadedImage 
+                {!uploadedImage
                   ? "Upload an image first to use masking"
-                  : isMaskingMode 
-                    ? "Draw on the image to create mask areas. Red areas will be regenerated."
-                    : "Enable masking mode to draw mask areas directly on the image."
-                }
+                  : isMaskingMode
+                  ? "Draw on the image to create mask areas. Red areas will be regenerated."
+                  : "Enable masking mode to draw mask areas directly on the image."}
               </p>
             </div>
           </div>
@@ -230,13 +224,13 @@ export default function Sidebar({
       {isOpen && onResizeStart && (
         <div
           className={`absolute top-0 left-0 w-3 h-full cursor-col-resize z-10 transition-all duration-150 ${
-            isResizing 
-              ? 'bg-[var(--primary-accent)] opacity-100' 
-              : 'bg-transparent hover:bg-[var(--primary-accent)] hover:opacity-60'
+            isResizing
+              ? "bg-[var(--primary-accent)] opacity-100"
+              : "bg-transparent hover:bg-[var(--primary-accent)] hover:opacity-60"
           }`}
-          style={{ 
-            transform: 'translateX(-50%)', // Center on the left edge
-            willChange: isResizing ? 'background-color' : 'auto'
+          style={{
+            transform: "translateX(-50%)", // Center on the left edge
+            willChange: isResizing ? "background-color" : "auto",
           }}
           onMouseDown={onResizeStart}
           onTouchStart={(e) => {
@@ -251,16 +245,22 @@ export default function Sidebar({
           tabIndex={0}
           onKeyDown={(e) => {
             // Keyboard accessibility
-            if (e.key === 'ArrowLeft' && onWidthChange) {
+            if (e.key === "ArrowLeft" && onWidthChange) {
               e.preventDefault();
               onWidthChange(Math.max(280, width - 10));
               // Save to localStorage
-              localStorage.setItem('sidebarWidth', String(Math.max(280, width - 10)));
-            } else if (e.key === 'ArrowRight' && onWidthChange) {
+              localStorage.setItem(
+                "sidebarWidth",
+                String(Math.max(280, width - 10))
+              );
+            } else if (e.key === "ArrowRight" && onWidthChange) {
               e.preventDefault();
               onWidthChange(Math.min(600, width + 10));
               // Save to localStorage
-              localStorage.setItem('sidebarWidth', String(Math.min(600, width + 10)));
+              localStorage.setItem(
+                "sidebarWidth",
+                String(Math.min(600, width + 10))
+              );
             }
           }}
         />

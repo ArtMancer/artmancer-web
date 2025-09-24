@@ -60,3 +60,23 @@ body {
   );
   background-size: 24px 24px;
 }
+
+/* Custom scrollbar styles */
+*::-webkit-scrollbar {
+  width: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--primary-bg);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--primary-accent);
+  border-radius: 4px;
+  border: 1px solid var(--secondary-bg);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--highlight-accent);
+}
