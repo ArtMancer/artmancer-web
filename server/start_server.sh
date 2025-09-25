@@ -28,13 +28,23 @@ fi
 echo "📦 Installing dependencies..."
 uv sync
 
+# Load environment variables from .env file
+if [ -f ".env" ]; then
+    export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)
+fi
+
+# Set defaults if not specified in .env
+HOST=${HOST:-0.0.0.0}
+PORT=${PORT:-8000}
+DEBUG=${DEBUG:-True}
+
 # Start the server
 echo "🌐 Starting FastAPI server..."
-echo "📋 Server will be available at: http://localhost:8000"
-echo "📚 API docs will be available at: http://localhost:8000/docs"
-echo "🔗 ReDoc docs will be available at: http://localhost:8000/redoc"
+echo "📋 Server will be available at: http://localhost:${PORT}"
+echo "📚 API docs will be available at: http://localhost:${PORT}/docs"
+echo "🔗 ReDoc docs will be available at: http://localhost:${PORT}/redoc"
 echo ""
 echo "Press Ctrl+C to stop the server"
 echo ""
 
-uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn main:app --reload --host ${HOST} --port ${PORT}

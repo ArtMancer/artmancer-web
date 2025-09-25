@@ -1,17 +1,34 @@
 import Image from "next/image";
 import { MdSettings, MdPerson, MdMenu } from "react-icons/md";
+import { useState } from "react";
 
 interface HeaderProps {
-  onSummon: () => void;
+  onSummon: (prompt: string) => void;
   isCustomizeOpen: boolean;
   onToggleCustomize: () => void;
+  isGenerating?: boolean;
 }
 
 export default function Header({ 
   onSummon, 
   isCustomizeOpen, 
-  onToggleCustomize 
+  onToggleCustomize,
+  isGenerating = false
 }: HeaderProps) {
+  const [prompt, setPrompt] = useState("");
+
+  const handleSubmit = () => {
+    if (prompt.trim()) {
+      onSummon(prompt.trim());
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
   return (
     <header className="p-4 border-b border-[var(--secondary-bg)] flex-shrink-0 bg-[var(--primary-bg)]">
       <div className="w-full flex items-center justify-between gap-4">
@@ -23,6 +40,7 @@ export default function Header({
             width={180}
             height={48}
             className="h-12 w-auto"
+            style={{ height: '48px', width: 'auto' }}
             priority
           />
         </div>
@@ -32,13 +50,18 @@ export default function Header({
           <input
             type="text"
             placeholder="Describe the edits you want to make..."
-            className="flex-1 px-4 py-3 bg-transparent border-2 border-[var(--primary-accent)] rounded-lg text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--highlight-accent)] focus:outline-none transition-colors text-sm h-12"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isGenerating}
+            className="flex-1 px-4 py-3 bg-transparent border-2 border-[var(--primary-accent)] rounded-lg text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--highlight-accent)] focus:outline-none transition-colors text-sm h-12 disabled:opacity-50"
           />
           <button
-            onClick={onSummon}
-            className="px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12"
+            onClick={handleSubmit}
+            disabled={isGenerating || !prompt.trim()}
+            className="px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Edit!
+            {isGenerating ? 'Generating...' : 'Edit!'}
           </button>
         </div>
 

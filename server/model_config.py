@@ -1,89 +1,93 @@
 """
-Model configuration presets for different use cases
+Model configuration presets for Qwen Image Edit pipeline
 """
 
 # Model presets with optimized settings for different scenarios
 MODEL_PRESETS = {
     "creative": {
-        "model": "gemini-2.5-flash-image-preview",
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "top_k": 40,
+        "model": "Qwen/Qwen-Image-Edit-2509",
+        "true_cfg_scale": 4.0,
+        "num_inference_steps": 40,
+        "guidance_scale": 1.0,
         "description": "High creativity, varied outputs",
     },
     "balanced": {
-        "model": "gemini-2.5-flash-image-preview",
-        "temperature": 0.7,
-        "top_p": 0.8,
-        "top_k": 20,
-        "description": "Balanced creativity and consistency",
+        "model": "Qwen/Qwen-Image-Edit-2509",
+        "true_cfg_scale": 3.5,
+        "num_inference_steps": 35,
+        "guidance_scale": 1.0,
+        "description": "Balanced creativity and quality",
     },
     "precise": {
-        "model": "gemini-2.5-flash-image-preview",
-        "temperature": 0.3,
-        "top_p": 0.6,
-        "top_k": 10,
-        "description": "More consistent, less random outputs",
+        "model": "Qwen/Qwen-Image-Edit-2509",
+        "true_cfg_scale": 2.5,
+        "num_inference_steps": 30,
+        "guidance_scale": 1.0,
+        "description": "More controlled, precise edits",
     },
     "artistic": {
-        "model": "gemini-2.5-flash-image-preview",
-        "temperature": 1.2,
-        "top_p": 0.9,
-        "top_k": 50,
+        "model": "Qwen/Qwen-Image-Edit-2509",
+        "true_cfg_scale": 5.0,
+        "num_inference_steps": 50,
+        "guidance_scale": 1.2,
         "description": "Maximum creativity for artistic works",
     },
-    "technical": {
-        "model": "gemini-1.5-pro",
-        "temperature": 0.2,
-        "top_p": 0.5,
-        "top_k": 5,
-        "description": "Technical accuracy focused",
+    "fast": {
+        "model": "Qwen/Qwen-Image-Edit-2509",
+        "true_cfg_scale": 3.0,
+        "num_inference_steps": 20,
+        "guidance_scale": 1.0,
+        "description": "Fast generation with good quality",
     },
 }
 
-# Available Gemini models
+# Available Qwen models
 AVAILABLE_MODELS = [
-    "gemini-2.5-flash-image-preview",
-    "gemini-2.0-flash-thinking-exp-1219",
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "Qwen/Qwen-Image-Edit-2509",
+    "Qwen/Qwen-Image-Edit",
 ]
 
 # Default settings
 DEFAULT_SETTINGS = {
-    "model": "gemini-2.5-flash-image-preview",
-    "temperature": 0.7,
-    "top_p": 0.8,
-    "top_k": 20,
-    "max_output_tokens": 2048,
+    "model": "Qwen/Qwen-Image-Edit-2509",
+    "true_cfg_scale": 4.0,
+    "num_inference_steps": 40,
+    "guidance_scale": 1.0,
+    "negative_prompt": "",
+    "num_images_per_prompt": 1,
 }
 
 # Model-specific capabilities and limits
 MODEL_INFO = {
-    "gemini-2.5-flash-image-preview": {
+    "Qwen/Qwen-Image-Edit-2509": {
+        "supports_image_editing": True,
         "supports_image_generation": True,
-        "max_tokens": 8192,
-        "best_for": ["image generation", "creative tasks", "multimodal content"],
+        "supports_multi_image": True,
+        "max_inference_steps": 100,
+        "min_inference_steps": 10,
+        "best_for": ["multi-image editing", "composition", "style transfer", "object modification"],
+        "requires_input_image": True,
+        "output_format": "PIL.Image",
+        "version": "2509",
+        "recommended_settings": {
+            "true_cfg_scale": 4.0,
+            "num_inference_steps": 40,
+            "guidance_scale": 1.0
+        }
     },
-    "gemini-2.0-flash-thinking-exp-1219": {
-        "supports_image_generation": False,
-        "max_tokens": 32768,
-        "best_for": ["complex reasoning", "analysis", "step-by-step thinking"],
-    },
-    "gemini-2.0-flash-exp": {
+    "Qwen/Qwen-Image-Edit": {
+        "supports_image_editing": True,
         "supports_image_generation": True,
-        "max_tokens": 8192,
-        "best_for": ["experimental features", "latest capabilities"],
-    },
-    "gemini-1.5-flash": {
-        "supports_image_generation": False,
-        "max_tokens": 1048576,
-        "best_for": ["long context", "document analysis", "fast responses"],
-    },
-    "gemini-1.5-pro": {
-        "supports_image_generation": False,
-        "max_tokens": 2097152,
-        "best_for": ["complex tasks", "reasoning", "analysis"],
+        "supports_multi_image": False,
+        "max_inference_steps": 100,
+        "min_inference_steps": 10,
+        "best_for": ["single image editing", "style transfer", "object modification", "background changes"],
+        "requires_input_image": True,
+        "output_format": "PIL.Image",
+        "version": "original",
+        "recommended_settings": {
+            "true_cfg_scale": 4.0,
+            "num_inference_steps": 50
+        }
     },
 }

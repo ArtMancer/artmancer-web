@@ -6,11 +6,30 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.117.1",
-    "google-genai>=1.38.0",
     "pillow>=10.0.0",
     "python-multipart>=0.0.9",
     "pydantic>=2.0.0",
     "uvicorn[standard]>=0.30.0",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+    "diffusers>=0.35.1",
+    "transformers>=4.56.2",
+    "accelerate>=1.10.1",
+    "hf-xet>=1.1.10",
+    "huggingface-hub[cli]>=0.35.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
