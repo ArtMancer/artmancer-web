@@ -1,4 +1,6 @@
 // API service for ArtMancer backend integration
+// *** DEMO MODE ACTIVE - ALL API CALLS ARE MOCKED WITH DUMMY DATA ***
+// To re-enable real API calls, uncomment the code in makeRequest() method
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 export interface ModelSettings {
@@ -50,6 +52,8 @@ class ApiService {
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
+    // COMMENTED OUT REAL API CALLS - USING DUMMY DATA FOR DEMO
+    /*
     const url = `${this.baseUrl}${endpoint}`;
     
     try {
@@ -123,6 +127,134 @@ class ApiService {
       // Re-throw other errors (including our formatted API errors)
       throw error;
     }
+    */
+
+    // DUMMY DATA FOR DEMO PURPOSES - NO REAL API CALLS
+    console.log(`[DEMO MODE] Simulating API call to: ${endpoint}`);
+    
+    // Simulate network delay
+    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+    
+    return this.getDummyResponse<T>(endpoint, options);
+  }
+
+  private getDummyResponse<T>(endpoint: string, options: RequestInit = {}): T {
+    // Generate dummy responses based on endpoint
+    if (endpoint === '/api/health') {
+      return {
+        success: true,
+        status: 'healthy',
+        service: 'ArtMancer API (Demo Mode)',
+        gemini_client: 'connected'
+      } as T;
+    }
+
+    if (endpoint === '/api/models') {
+      return {
+        success: true,
+        models: [
+          { name: 'gemini-pro-vision', info: { description: 'Google Gemini Pro Vision Model' } },
+          { name: 'stable-diffusion-xl', info: { description: 'Stable Diffusion XL Model' } },
+          { name: 'midjourney-v6', info: { description: 'Midjourney Version 6 Model' } }
+        ],
+        default: 'gemini-pro-vision'
+      } as T;
+    }
+
+    if (endpoint === '/api/presets') {
+      return {
+        success: true,
+        presets: {
+          'portrait': { description: 'Portrait photography style', settings: { guidance_scale: 7.5 } },
+          'landscape': { description: 'Landscape photography style', settings: { guidance_scale: 8.0 } },
+          'artistic': { description: 'Artistic illustration style', settings: { guidance_scale: 10.0 } }
+        },
+        default_preset: 'portrait'
+      } as T;
+    }
+
+    if (endpoint === '/api/generate' || endpoint.startsWith('/api/generate/preset/')) {
+      const requestBody = options.body ? JSON.parse(options.body as string) : {};
+      const prompt = requestBody.prompt || 'sample prompt';
+      
+      // Generate a dummy base64 image (1x1 pixel placeholder)
+      const dummyImageBase64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      
+      return {
+        success: true,
+        prompt: prompt,
+        model_used: 'gemini-pro-vision',
+        settings_used: {
+          guidance_scale: 7.5,
+          num_inference_steps: 20,
+          generator_seed: Math.floor(Math.random() * 1000000)
+        },
+        generated_text: `Generated art for: "${prompt}" - This is a demo response showing how the UI works!`,
+        image_base64: dummyImageBase64,
+        image_url: '/placeholder-image.png',
+        generation_time: 2.5,
+        preset_used: endpoint.includes('/preset/') ? endpoint.split('/').pop() : undefined,
+        preset_description: endpoint.includes('/preset/') ? 'Demo preset description' : undefined
+      } as T;
+    }
+
+    if (endpoint === '/api/generate/batch') {
+      const requestBody = options.body ? JSON.parse(options.body as string) : [];
+      const requests = Array.isArray(requestBody) ? requestBody : [requestBody];
+      
+      return {
+        success: true,
+        batch_id: `batch_${Date.now()}`,
+        total_requests: requests.length,
+        results: requests.map((_, index) => ({
+          index,
+          success: true,
+          result: {
+            success: true,
+            prompt: `Batch request ${index + 1}`,
+            model_used: 'gemini-pro-vision',
+            settings_used: { guidance_scale: 7.5 },
+            generated_text: `Batch generated art ${index + 1} - Demo mode`,
+            image_base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+            generation_time: 2.0
+          }
+        }))
+      } as T;
+    }
+
+    if (endpoint === '/api/config') {
+      return {
+        success: true,
+        config: {
+          available_formats: ['base64', 'url', 'both'],
+          max_prompt_length: 1000,
+          supported_models: ['gemini-pro-vision', 'stable-diffusion-xl', 'midjourney-v6'],
+          model_info: {
+            'gemini-pro-vision': { description: 'Google Gemini Pro Vision Model' },
+            'stable-diffusion-xl': { description: 'Stable Diffusion XL Model' },
+            'midjourney-v6': { description: 'Midjourney Version 6 Model' }
+          },
+          available_presets: ['portrait', 'landscape', 'artistic'],
+          default_settings: {
+            guidance_scale: 7.5,
+            num_inference_steps: 20,
+            generator_seed: -1
+          },
+          preset_descriptions: {
+            'portrait': 'Portrait photography style',
+            'landscape': 'Landscape photography style',
+            'artistic': 'Artistic illustration style'
+          }
+        }
+      } as T;
+    }
+
+    // Default response for unknown endpoints
+    return {
+      success: true,
+      message: `Demo response for ${endpoint}`,
+      data: null
+    } as T;
   }
 
   // Health check

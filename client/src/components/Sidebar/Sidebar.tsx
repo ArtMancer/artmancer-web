@@ -33,7 +33,7 @@ export default function Sidebar({
 }: SidebarProps) {
   return (
     <div
-      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 ${
+      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 sidebar-scrollable ${
         isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
       }`}
       style={{
@@ -45,19 +45,17 @@ export default function Sidebar({
         transformOrigin: "right center",
         willChange: "transform, opacity",
         overflowX: "hidden", // Prevent horizontal overflow
-        overflowY: "hidden", // Let inner content handle vertical scrolling
+        overflowY: "auto", // Enable vertical scrolling on the main container
+        paddingRight: "4px", // Space for scrollbar
       }}
     >
-      {/* Customize Content - Scrollable with proper height */}
+      {/* Customize Content - Scrollable content */}
       {isOpen && (
         <div
           className="flex-1 px-4 pt-2 pb-4 space-y-4 lg:space-y-6"
           style={{
-            overflow: "hidden auto", // Enable vertical scrolling
-            height: "calc(100% - 3rem)", // Full sidebar height minus customize header (~3rem)
-            minHeight: 0, // Allow flexbox to shrink
-            scrollbarWidth: "thin", // Firefox
-            scrollbarColor: "var(--primary-accent) var(--secondary-bg)", // Firefox
+            minHeight: "100%", // Ensure content takes full height to enable scrolling
+            paddingBottom: "2rem", // Extra padding at bottom for better scroll experience
           }}
         >
           {/* Image Upload Section */}
