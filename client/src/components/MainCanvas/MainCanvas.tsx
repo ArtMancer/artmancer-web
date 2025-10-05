@@ -1,5 +1,5 @@
-import { useRef, useCallback, useEffect } from "react";
-import { MdClose, MdRefresh } from "react-icons/md";
+import { useRef, useCallback, useEffect, useState } from "react";
+import { MdRefresh } from "react-icons/md";
 import Toolbox from "../Toolbox";
 import StatusBar from "../StatusBar";
 
@@ -17,7 +17,6 @@ interface CanvasProps {
   isMaskingMode: boolean;
   isMaskDrawing: boolean;
   maskBrushSize: number;
-  lastDrawPoint: { x: number; y: number } | null;
   
   // Toolbox state
   originalImage: string | null;
@@ -64,7 +63,6 @@ export default function Canvas({
   isMaskingMode,
   isMaskDrawing,
   maskBrushSize,
-  lastDrawPoint,
   originalImage,
   modifiedImage,
   comparisonSlider,
@@ -91,6 +89,138 @@ export default function Canvas({
   onResetViewportZoom,
   onToggleHelp
 }: CanvasProps) {
+  const [isDraggingSeparator, setIsDraggingSeparator] = useState(false);
+  const [isHovering, setIsHovering] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const comparisonContainerRef = useRef<HTMLDivElement>(null);
+
+  // Update dimensions when image container changes
+  useEffect(() => {
+    if (!imageContainerRef.current) return;
+    
+    const updateDimensions = () => {
+      const rect = imageContainerRef.current?.getBoundingClientRect();
+      if (rect) {
+        setDimensions({ width: rect.width, height: rect.height });
+      }
+    };
+    
+    updateDimensions();
+    const resizeObserver = new ResizeObserver(updateDimensions);
+    resizeObserver.observe(imageContainerRef.current);
+    
+    return () => resizeObserver.disconnect();
+  }, [imageContainerRef]);
+
+  // Enhanced separator dragging with better pointer handling
+  const handleSeparatorMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingSeparator(true);
+    
+    // Prevent text selection during drag
+    document.body.style.userSelect = 'none';
+    document.body.style.webkitUserSelect = 'none';
+  }, []);
+
+  const handleSeparatorMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDraggingSeparator || !imageContainerRef.current) return;
+    
+    const container = imageContainerRef.current;
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    
+    onComparisonSliderChange(percentage);
+  }, [isDraggingSeparator, imageContainerRef, onComparisonSliderChange]);
+
+  const handleSeparatorMouseUp = useCallback(() => {
+    setIsDraggingSeparator(false);
+    
+    // Restore text selection
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+  }, []);
+
+  // Touch support for mobile devices
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!imageContainerRef.current) return;
+    
+    const container = imageContainerRef.current;
+    const rect = container.getBoundingClientRect();
+    const x = e.touches[0].clientX - rect.left;
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    
+    onComparisonSliderChange(percentage);
+    setIsDraggingSeparator(true);
+  }, [imageContainerRef, onComparisonSliderChange]);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!isDraggingSeparator || !imageContainerRef.current) return;
+    
+    e.preventDefault(); // Prevent scrolling
+    
+    const container = imageContainerRef.current;
+    const rect = container.getBoundingClientRect();
+    const x = e.touches[0].clientX - rect.left;
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    
+    onComparisonSliderChange(percentage);
+  }, [isDraggingSeparator, imageContainerRef, onComparisonSliderChange]);
+
+  const handleTouchEnd = useCallback(() => {
+    setIsDraggingSeparator(false);
+  }, []);
+
+  // Hover support for desktop
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isHovering || isDraggingSeparator || !imageContainerRef.current) return;
+    
+    const container = imageContainerRef.current;
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    
+    onComparisonSliderChange(percentage);
+  }, [isHovering, isDraggingSeparator, imageContainerRef, onComparisonSliderChange]);
+
+  // Keyboard support
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!originalImage || !modifiedImage) return;
+    
+    let increment = 0;
+    
+    switch (e.key) {
+      case 'ArrowLeft':
+        increment = -5;
+        break;
+      case 'ArrowRight':
+        increment = 5;
+        break;
+      default:
+        return;
+    }
+    
+    e.preventDefault();
+    const newValue = Math.max(0, Math.min(100, comparisonSlider + increment));
+    onComparisonSliderChange(newValue);
+  }, [originalImage, modifiedImage, comparisonSlider, onComparisonSliderChange]);
+
+  // Add global mouse event listeners for separator dragging
+  useEffect(() => {
+    if (isDraggingSeparator) {
+      document.addEventListener('mousemove', handleSeparatorMouseMove);
+      document.addEventListener('mouseup', handleSeparatorMouseUp);
+      document.body.style.cursor = 'col-resize';
+      
+      return () => {
+        document.removeEventListener('mousemove', handleSeparatorMouseMove);
+        document.removeEventListener('mouseup', handleSeparatorMouseUp);
+        document.body.style.cursor = '';
+      };
+    }
+  }, [isDraggingSeparator, handleSeparatorMouseMove, handleSeparatorMouseUp]);
+
   return (
     <div
       ref={containerRef}
@@ -134,7 +264,9 @@ export default function Canvas({
         onMouseUp={uploadedImage ? (isMaskingMode ? onMaskMouseUp : undefined) : undefined}
         onMouseLeave={uploadedImage ? (isMaskingMode ? onMaskMouseUp : undefined) : undefined}
         onClick={uploadedImage && !isMaskingMode ? onImageClick : undefined}
-        >
+        onKeyDown={originalImage && modifiedImage ? handleKeyDown : undefined}
+        tabIndex={originalImage && modifiedImage ? 0 : undefined}
+      >
           {uploadedImage ? (
             <div className="relative w-full h-full overflow-hidden">
               <div
@@ -145,42 +277,118 @@ export default function Canvas({
                   willChange: "transform",
                 }}
               >
-                <img
-                  ref={imageRef}
-                  src={uploadedImage}
-                  alt="Uploaded reference"
-                  className="w-full h-full object-contain rounded-lg pointer-events-none"
-                  draggable={false}
-                />
-              </div>
+                {/* Image display - either single image or comparison view */}
+                {originalImage && modifiedImage && originalImage !== modifiedImage ? (
+                  /* Comparison view with cropping behavior */
+                  <div className="relative w-full h-full">
+                    {/* Original Image (left side) - normal color, user's input */}
+                    <div className="absolute inset-0">
+                      <img
+                        ref={imageRef}
+                        src={originalImage}
+                        alt="Original image"
+                        className="w-full h-full object-contain pointer-events-none"
+                        draggable={false}
+                      />
+                      {/* Original image indicator - only show when there's enough space */}
+                      {comparisonSlider > 15 && (
+                        <div className="absolute top-2 left-2 bg-blue-600 text-white px-2 py-1 rounded text-xs font-medium shadow-lg z-10">
+                          ORIGINAL
+                        </div>
+                      )}
+                    </div>
 
-              {/* Control buttons */}
-              <div className="absolute top-2 right-2 flex gap-1 z-10">
-                <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onRemoveImage();
-                  }}
-                  className="bg-red-500/90 hover:bg-red-600 text-white rounded-full w-8 h-8 flex items-center justify-center transition-all duration-200 backdrop-blur-sm"
-                  title="Remove image"
-                >
-                  <MdClose size={14} />
-                </button>
+                    {/* Modified Image Container (right side) - grayscale, AI edited */}
+                    <div 
+                      className="absolute inset-0 overflow-hidden"
+                      style={{ 
+                        left: `${comparisonSlider}%`,
+                        width: `${100 - comparisonSlider}%`
+                      }}
+                    >
+                      {modifiedImage ? (
+                        <>
+                          <img
+                            src={modifiedImage}
+                            alt="Modified image"
+                            className="w-full h-full object-contain pointer-events-none"
+                            style={{ 
+                              filter: 'grayscale(100%)',
+                              width: `${100 / (100 - comparisonSlider) * 100}%`,
+                              marginLeft: `${-comparisonSlider / (100 - comparisonSlider) * 100}%`
+                            }}
+                            draggable={false}
+                          />
+                          {/* Modified image indicator - only show when there's enough space */}
+                          {(100 - comparisonSlider) > 15 && (
+                            <div className="absolute top-2 right-2 bg-gray-500 text-white px-2 py-1 rounded text-xs font-medium shadow-lg z-10">
+                              AI EDITED
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        /* Placeholder for when modified image is loading or doesn't exist */
+                        (100 - comparisonSlider) > 30 && (
+                          <div className="absolute inset-0 bg-gray-200 flex items-center justify-center">
+                            <div className="text-center text-gray-600">
+                              <div className="text-2xl mb-2">🤖</div>
+                              <div className="text-sm font-semibold mb-1">AI Processing...</div>
+                              <div className="text-xs">Modified image will appear here</div>
+                            </div>
+                          </div>
+                        )
+                      )}
+                    </div>
+                    
+                    {/* Separator line with drag functionality */}
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg z-20 cursor-col-resize"
+                      style={{
+                        left: `${comparisonSlider}%`,
+                        transform: 'translateX(-50%)',
+                      }}
+                      onMouseDown={handleSeparatorMouseDown}
+                    >
+                      {/* Separator handle - expanded hit area */}
+                      <div 
+                        className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-6 h-6 bg-white rounded-full shadow-lg flex items-center justify-center cursor-col-resize hover:scale-110 transition-transform"
+                        onMouseDown={handleSeparatorMouseDown}
+                      >
+                        <div className="w-2 h-2 bg-[var(--primary-accent)] rounded-full"></div>
+                      </div>
+                      
+                      {/* Invisible wider hit area for easier dragging */}
+                      <div 
+                        className="absolute top-0 bottom-0 w-4 left-1/2 transform -translate-x-1/2 cursor-col-resize"
+                        onMouseDown={handleSeparatorMouseDown}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  /* Single image view */
+                  <img
+                    ref={imageRef}
+                    src={uploadedImage}
+                    alt="Uploaded reference"
+                    className="w-full h-full object-contain rounded-lg pointer-events-none"
+                    draggable={false}
+                  />
+                )}
+                
+                {/* Mask overlay - now inside the transform div */}
+                {isMaskingMode && (
+                  <canvas
+                    ref={maskCanvasRef}
+                    className="absolute inset-0"
+                    style={{ 
+                      pointerEvents: "auto",
+                      width: "100%",
+                      height: "100%",
+                      zIndex: 10
+                    }}
+                  />
+                )}
               </div>
-              
-              {/* Mask overlay */}
-              {isMaskingMode && (
-                <canvas
-                  ref={maskCanvasRef}
-                  className="absolute inset-0"
-                  style={{ 
-                    pointerEvents: "none",
-                    width: "100%",
-                    height: "100%"
-                  }}
-                />
-              )}
 
               {/* Click hint overlay - doesn't interfere with mouse events */}
               {!isMaskingMode && (
@@ -214,8 +422,7 @@ export default function Canvas({
             className="hidden"
             id="image-upload"
           />
-
-      </div>
+        </div>
 
       {/* Toolbox Component */}
       <Toolbox

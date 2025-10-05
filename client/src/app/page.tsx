@@ -5,6 +5,8 @@ import Header from "@/components/Header";
 import Sidebar from "@/components/Sidebar";
 import HelpBox from "@/components/HelpBox";
 import Canvas from "@/components/MainCanvas";
+import NotificationComponent from "@/components/Notification";
+import type { NotificationType } from "@/components/Notification";
 import {
   useImageUpload,
   useViewportControls,
@@ -20,6 +22,24 @@ export default function Home() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  
+  // Enhanced notification state
+  const [notificationType, setNotificationType] = useState<NotificationType>('success');
+  const [notificationMessage, setNotificationMessage] = useState<string>('');
+  const [isNotificationVisible, setIsNotificationVisible] = useState(false);
+  
+  // AI Task state
+  const [aiTask, setAiTask] = useState<'white-balance' | 'object-insert' | 'object-removal'>('object-removal');
+  const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  
+  // Advanced options state
+  const [negativePrompt, setNegativePrompt] = useState<string>('');
+  const [guidanceScale, setGuidanceScale] = useState<number>(3.5);
+  const [imageWidth, setImageWidth] = useState<number>(1024);
+  const [imageHeight, setImageHeight] = useState<number>(1024);
+  const [inferenceSteps, setInferenceSteps] = useState<number>(50);
+  const [numImages, setNumImages] = useState<number>(1);
+  const [cfgScale, setCfgScale] = useState<number>(1.0);
   
   // Notification timeout refs
   const notificationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -45,22 +65,37 @@ export default function Home() {
     }
   }, []);
 
+  const handleCloseNotification = useCallback(() => {
+    setIsNotificationVisible(false);
+    clearNotificationTimeout();
+    setSuccess(null);
+    setError(null);
+  }, [clearNotificationTimeout]);
+
   const setNotificationWithTimeout = useCallback((
-    type: 'success' | 'error',
+    type: NotificationType,
     message: string,
-    timeoutMs: number = 30000 // 30 seconds default
+    timeoutMs: number = 5000
   ) => {
     clearNotificationTimeout();
     
+    // Set new notification
+    setNotificationType(type);
+    setNotificationMessage(message);
+    setIsNotificationVisible(true);
+    
+    // Legacy state for backward compatibility
     if (type === 'success') {
       setSuccess(message);
       setError(null);
-    } else {
+    } else if (type === 'error') {
       setError(message);
       setSuccess(null);
     }
     
+    // Auto-hide timer
     notificationTimeoutRef.current = setTimeout(() => {
+      setIsNotificationVisible(false);
       if (type === 'success') {
         setSuccess(null);
       } else {
@@ -73,6 +108,7 @@ export default function Home() {
     clearNotificationTimeout();
     setSuccess(null);
     setError(null);
+    setIsNotificationVisible(false);
   }, [clearNotificationTimeout]);
 
   // Custom hooks
@@ -115,18 +151,50 @@ export default function Home() {
     imageRef
   } = useImageTransform();
 
+  // Reference image handling for AI tasks
+  const handleReferenceImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files[0]) {
+      const file = event.target.files[0]
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        if (e.target && typeof e.target.result === 'string') {
+          setReferenceImage(e.target.result)
+          setError(null)
+        }
+      }
+      reader.readAsDataURL(file)
+    }
+  }
+  
+  const handleRemoveReferenceImage = () => {
+    setReferenceImage(null)
+  }
+  
+  const handleAiTaskChange = (task: 'white-balance' | 'object-insert' | 'object-removal') => {
+    setAiTask(task)
+    // Clear reference image when switching away from object-insert
+    if (task !== 'object-insert') {
+      setReferenceImage(null)
+    }
+  }
+
   const {
     isMaskingMode,
     isMaskDrawing,
     maskBrushSize,
-    lastDrawPoint,
     maskCanvasRef,
     setMaskBrushSize,
     toggleMaskingMode,
     clearMask,
+    resetMaskHistory,
     handleMaskMouseDown,
     handleMaskMouseMove,
-    handleMaskMouseUp
+    handleMaskMouseUp,
+    maskHistoryIndex,
+    maskHistoryLength,
+    undoMask,
+    redoMask,
+    hasMaskContent
   } = useMasking(uploadedImage, imageDimensions, imageContainerRef, transform, viewportZoom);
 
   const {
@@ -138,12 +206,17 @@ export default function Home() {
     initializeHistory
   } = useImageHistory();
 
-  // Additional state for comparison
   const [comparisonSlider, setComparisonSlider] = useState(50);
-  
-  // For now, use uploadedImage for both original and modified
-  const originalImage = uploadedImage;
-  const modifiedImage = uploadedImage;
+  const [originalImage, setOriginalImage] = useState<string | null>(null);
+  const [modifiedImageForComparison, setModifiedImageForComparison] = useState<string | null>(null);
+
+  // Initialize history when a new image is uploaded
+  useEffect(() => {
+    if (uploadedImage && !originalImage && !modifiedImageForComparison) {
+      // This is a fresh upload, initialize history
+      initializeHistory(uploadedImage);
+    }
+  }, [uploadedImage, originalImage, modifiedImageForComparison, initializeHistory]);
   
   // Simple download handler
   const handleDownload = () => {
@@ -157,6 +230,68 @@ export default function Home() {
     document.body.removeChild(link);
   };
 
+  // Create wrapped image upload handler that initializes history
+  const handleImageUploadWrapper = (event: React.ChangeEvent<HTMLInputElement>) => {
+    // First clear any existing state including mask history
+    setOriginalImage(null);
+    setModifiedImageForComparison(null);
+    setComparisonSlider(50);
+    resetMaskHistory();
+    
+    // Handle the upload
+    handleImageUpload(event);
+    
+    // Initialize history for the new image - we'll do this in a useEffect
+  };
+
+  // Handle image removal
+  const handleRemoveImage = () => {
+    removeImage();
+    setOriginalImage(null);
+    setModifiedImageForComparison(null);
+    setComparisonSlider(50);
+    resetMaskHistory();
+  };
+
+  // Handle return to original image
+  const handleReturnToOriginal = () => {
+    if (originalImage) {
+      setUploadedImage(originalImage);
+      setModifiedImage(originalImage);
+      setModifiedImageForComparison(null);
+      setComparisonSlider(50);
+      resetMaskHistory();
+      clearMask();
+      setNotificationWithTimeout('success', 'Returned to original image');
+    }
+  };
+
+  // Advanced options handlers
+  const handleNegativePromptChange = (value: string) => {
+    setNegativePrompt(value);
+  };
+
+  const handleGuidanceScaleChange = (value: number) => {
+    setGuidanceScale(value);
+  };
+
+  const handleImageSizeChange = (width: number, height: number) => {
+    setImageWidth(width);
+    setImageHeight(height);
+  };
+
+  const handleInferenceStepsChange = (value: number) => {
+    setInferenceSteps(value);
+  };
+
+  const handleNumImagesChange = (value: number) => {
+    setNumImages(value);
+  };
+
+  const handleCfgScaleChange = (value: number) => {
+    setCfgScale(value);
+  };
+
   // Handle image generation
   const handleEdit = async (prompt: string) => {
     try {
@@ -168,12 +303,16 @@ export default function Home() {
         return;
       }
       
+      // Store the original image before editing
+      setOriginalImage(uploadedImage);
+      
       const result = await generateImage(prompt, uploadedImage);
       
       if (result && result.image_base64) {
         const imageData = `data:image/png;base64,${result.image_base64}`;
         setUploadedImage(imageData);
         setModifiedImage(imageData);
+        setModifiedImageForComparison(imageData); // Set the modified image for comparison
         
         // Add to history
         addToHistory(imageData);
@@ -353,41 +492,15 @@ export default function Home() {
           </div>
         )}
 
-        {/* Success Display */}
-        {success && (
-          <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-green-500/90 text-white px-4 py-2 rounded-lg shadow-lg z-50 max-w-md text-center">
-            <div className="flex items-center justify-between">
-              <span className="text-sm">{success}</span>
-              <button
-                onClick={() => {
-                  clearNotificationTimeout();
-                  setSuccess(null);
-                }}
-                className="ml-2 text-white/80 hover:text-white"
-              >
-                ×
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Error Display */}
-        {error && (
-          <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-red-500/90 text-white px-4 py-2 rounded-lg shadow-lg z-50 max-w-md text-center">
-            <div className="flex items-center justify-between">
-              <span className="text-sm">{error}</span>
-              <button
-                onClick={() => {
-                  clearNotificationTimeout();
-                  setError(null);
-                }}
-                className="ml-2 text-white/80 hover:text-white"
-              >
-                ×
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Refined Notification Component */}
+        <NotificationComponent
+          type={notificationType}
+          message={notificationMessage}
+          isVisible={isNotificationVisible}
+          onClose={handleCloseNotification}
+          duration={5000}
+          position="top"
+        />
 
         {/* Left Side - Canvas */}
         <Canvas
@@ -399,9 +512,8 @@ export default function Home() {
           isMaskingMode={isMaskingMode}
           isMaskDrawing={isMaskDrawing}
           maskBrushSize={maskBrushSize}
-          lastDrawPoint={lastDrawPoint}
           originalImage={originalImage}
-          modifiedImage={modifiedImage}
+          modifiedImage={modifiedImageForComparison}
           comparisonSlider={comparisonSlider}
           historyIndex={historyIndex}
           historyStackLength={historyStack.length}
@@ -410,8 +522,8 @@ export default function Home() {
           containerRef={containerRef}
           maskCanvasRef={maskCanvasRef}
           imageRef={imageRef}
-          onImageUpload={handleImageUpload}
-          onRemoveImage={removeImage}
+          onImageUpload={handleImageUploadWrapper}
+          onRemoveImage={handleRemoveImage}
           onImageClick={handleImageClick}
           onWheel={handleWheel}
           onMaskMouseDown={handleMaskMouseDown}
@@ -441,13 +553,39 @@ export default function Home() {
           uploadedImage={uploadedImage}
           isMaskingMode={isMaskingMode}
           maskBrushSize={maskBrushSize}
-          onImageUpload={handleImageUpload}
-          onRemoveImage={removeImage}
+          referenceImage={referenceImage}
+          aiTask={aiTask}
+          onImageUpload={handleImageUploadWrapper}
+          onRemoveImage={handleRemoveImage}
           onToggleMaskingMode={toggleMaskingMode}
           onClearMask={clearMask}
           onMaskBrushSizeChange={setMaskBrushSize}
+          maskHistoryIndex={maskHistoryIndex}
+          maskHistoryLength={maskHistoryLength}
+          onMaskUndo={undoMask}
+          onMaskRedo={redoMask}
+          hasMaskContent={hasMaskContent}
+          onReferenceImageUpload={handleReferenceImageUpload}
+          onRemoveReferenceImage={handleRemoveReferenceImage}
+          onAiTaskChange={handleAiTaskChange}
           onResizeStart={handleResizeStart}
           onWidthChange={setSidebarWidth}
+          originalImage={originalImage}
+          modifiedImage={modifiedImageForComparison}
+          onReturnToOriginal={handleReturnToOriginal}
+          negativePrompt={negativePrompt}
+          guidanceScale={guidanceScale}
+          imageWidth={imageWidth}
+          imageHeight={imageHeight}
+          inferenceSteps={inferenceSteps}
+          numImages={numImages}
+          cfgScale={cfgScale}
+          onNegativePromptChange={handleNegativePromptChange}
+          onGuidanceScaleChange={handleGuidanceScaleChange}
+          onImageSizeChange={handleImageSizeChange}
+          onInferenceStepsChange={handleInferenceStepsChange}
+          onNumImagesChange={handleNumImagesChange}
+          onCfgScaleChange={handleCfgScaleChange}
         />
       </main>
     </div>
