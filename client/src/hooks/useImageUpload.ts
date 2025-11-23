@@ -97,6 +97,7 @@ export function useImageUpload() {
     removeImage,
     handleImageClick,
     setUploadedImage,
-    setModifiedImage
+    setModifiedImage,
+    setImageDimensions
   };
 }

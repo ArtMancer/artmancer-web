@@ -1,4 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { detectEdges, floodFill, getNearbyEdges } from "../utils/edgeDetection";
+import { apiService } from "../services/api";
 
 // Command Pattern Interface
 interface Command {
@@ -126,14 +128,14 @@ class CommandHistory {
     if (this.currentIndex < this.commands.length - 1) {
       this.commands = this.commands.slice(0, this.currentIndex + 1);
     }
-    
+
     // Add new command
     this.commands.push(command);
     this.currentIndex = this.commands.length - 1;
-    
+
     // Execute the command after adding to history
     command.execute();
-    
+
     // Limit history size
     if (this.commands.length > this.maxHistorySize) {
       this.commands.shift();
@@ -213,13 +215,37 @@ export function useMasking(
   imageDimensions: { width: number; height: number } | null,
   imageContainerRef: React.RefObject<HTMLDivElement | null>,
   transform: { scale: number },
-  viewportZoom: number
+  viewportZoom: number,
+  imageRef?: React.RefObject<HTMLImageElement | null>,
+  onNotification?: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void
 ) {
   // Masking state
   const [isMaskingMode, setIsMaskingMode] = useState(false);
   const [isMaskDrawing, setIsMaskDrawing] = useState(false);
-  const [maskBrushSize, setMaskBrushSize] = useState(5);
+  const [maskBrushSize, setMaskBrushSize] = useState(40);
+  const [maskToolType, setMaskToolType] = useState<'brush' | 'box'>('brush');
+  const [enableEdgeDetection, setEnableEdgeDetection] = useState(false);
+  const [enableFloodFill, setEnableFloodFill] = useState(false);
+  const [edgeMask, setEdgeMask] = useState<ImageData | null>(null);
   
+  // Box drawing state
+  const boxStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const boxCurrentPosRef = useRef<{ x: number; y: number } | null>(null);
+  
+  // Smart masking state
+  const [enableSmartMasking, setEnableSmartMasking] = useState(false);
+  const [smartMaskImageId, setSmartMaskImageId] = useState<string | null>(null);
+  const [isSmartMaskLoading, setIsSmartMaskLoading] = useState(false);
+  
+  // Store stroke points for smart masking
+  const strokePointsRef = useRef<Array<{ x: number; y: number }>>([]);
+  const smartMaskDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Track click-only mode detection
+  const strokeStartTimeRef = useRef<number>(0);
+  const strokeStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const strokeMovementRef = useRef<number>(0); // Total movement distance in pixels
+
   // Command Pattern for undo/redo
   const commandHistory = useRef(new CommandHistory(20));
   const [historyState, setHistoryState] = useState({
@@ -229,9 +255,10 @@ export function useMasking(
     historyLength: 0,
     currentIndex: -1
   });
-  
+
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const edgeOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Helper function to update history state
   const updateHistoryState = useCallback(() => {
@@ -243,10 +270,62 @@ export function useMasking(
       historyLength: history.getHistoryLength(),
       currentIndex: history.getCurrentIndex()
     };
-    
+
     console.log('🔄 Updating history state:', newState);
     setHistoryState(newState);
   }, []);
+
+  // Generate edge mask from image
+  const generateEdgeMask = useCallback(async (): Promise<ImageData | null> => {
+    if (!imageRef?.current || !imageDimensions) return null;
+
+    try {
+      // Create a temporary canvas to draw the image
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = imageDimensions.width;
+      tempCanvas.height = imageDimensions.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      if (!tempCtx) return null;
+
+      // Draw the image to the canvas
+      tempCtx.drawImage(imageRef.current, 0, 0, imageDimensions.width, imageDimensions.height);
+
+      // Use detectEdges function from utils
+      const edgeData = detectEdges(tempCanvas, 50); // threshold = 50
+      return edgeData;
+    } catch (error) {
+      console.error('Error generating edge mask:', error);
+      return null;
+    }
+  }, [imageRef, imageDimensions]);
+
+  // Generate edge mask when enableEdgeDetection is true and image is available
+  useEffect(() => {
+    if (!enableEdgeDetection || !uploadedImage || !imageDimensions || !imageRef?.current) {
+      setEdgeMask(null);
+      return;
+    }
+
+    let isCancelled = false;
+    
+    // Generate edge mask asynchronously
+    generateEdgeMask().then((mask) => {
+      if (!isCancelled) {
+        setEdgeMask(mask);
+        console.log('✅ Edge mask generated:', mask ? 'success' : 'failed');
+      }
+    }).catch((error) => {
+      if (!isCancelled) {
+        console.error('Error generating edge mask:', error);
+        setEdgeMask(null);
+      }
+    });
+    
+    return () => {
+      isCancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enableEdgeDetection, uploadedImage, imageDimensions?.width, imageDimensions?.height, imageRef?.current]);
 
   // Reset mask history when uploaded image changes
   useEffect(() => {
@@ -254,6 +333,12 @@ export function useMasking(
     updateHistoryState();
     setIsMaskingMode(false);
     setIsMaskDrawing(false);
+    setEdgeMask(null); // Clear edge mask when image changes
+    setSmartMaskImageId(null); // Clear smart mask image ID
+    strokePointsRef.current = []; // Clear stroke points
+    if (smartMaskDebounceTimerRef.current) {
+      clearTimeout(smartMaskDebounceTimerRef.current);
+    }
   }, [uploadedImage, updateHistoryState]);
 
   // Clear command history when exiting masking mode
@@ -264,7 +349,7 @@ export function useMasking(
       console.log('Exiting masking mode - clearing command history');
       commandHistory.current.clear();
       updateHistoryState();
-      
+
       // Also clear the canvas when exiting masking mode
       const canvas = maskCanvasRef.current;
       if (canvas) {
@@ -287,6 +372,12 @@ export function useMasking(
       return;
     }
 
+    // Set canvas size if image dimensions are available
+    if (imageDimensions) {
+      canvas.width = imageDimensions.width;
+      canvas.height = imageDimensions.height;
+    }
+
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       console.log('Could not get canvas context');
@@ -298,22 +389,30 @@ export function useMasking(
     ctx.lineCap = 'butt';  // Sharp line ends instead of round
     ctx.lineJoin = 'miter';  // Sharp corners instead of round
     ctx.globalCompositeOperation = 'source-over';
-    
+    ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
+
     // Disable anti-aliasing for maximum hardness (crisp edges)
     ctx.imageSmoothingEnabled = false;
-    
+
     // Set initial drawing properties
-    ctx.lineWidth = 5; // Default line width
+    if (imageDimensions) {
+      const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
+      const brushSize = (maskBrushSize / 100) * (baseImageSize / 10);
+      ctx.lineWidth = brushSize;
+    } else {
+      ctx.lineWidth = 5; // Default line width
+    }
     ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
     ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-    
+
     ctxRef.current = ctx;
     console.log('Canvas context initialized with:', {
+      canvasSize: `${canvas.width}x${canvas.height}`,
       lineWidth: ctx.lineWidth,
       strokeStyle: ctx.strokeStyle,
       fillStyle: ctx.fillStyle
     });
-  }, []);
+  }, [imageDimensions, maskBrushSize]);
 
   // Update canvas drawing properties when brush settings change
   useEffect(() => {
@@ -333,6 +432,8 @@ export function useMasking(
       baseImageSize
     });
 
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
     ctx.lineWidth = brushSize;
     ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
     ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
@@ -357,7 +458,7 @@ export function useMasking(
         canvasSize: `${canvas.width}x${canvas.height}`,
         contextExists: !!ctx
       });
-      
+
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
       let hasContent = false;
@@ -365,7 +466,7 @@ export function useMasking(
       let nonZeroPixels = 0;
       let rgbPixels = 0;
       let alphaPixels = 0;
-      
+
       // Check if canvas has any visible content (RGB or alpha > 0)
       for (let i = 0; i < data.length; i += 4) {
         pixelsChecked++;
@@ -373,7 +474,7 @@ export function useMasking(
         const g = data[i + 1];
         const b = data[i + 2];
         const a = data[i + 3];
-        
+
         if (r > 0 || g > 0 || b > 0) {
           rgbPixels++;
           hasContent = true;
@@ -382,10 +483,10 @@ export function useMasking(
           alphaPixels++;
           hasContent = true;
         }
-        
+
         if (hasContent && pixelsChecked > 1000) break; // Early exit after finding content
       }
-      
+
       console.log('🔍 Canvas content detection:', {
         totalPixels: data.length / 4,
         pixelsChecked,
@@ -396,7 +497,7 @@ export function useMasking(
         fillStyle: ctx.fillStyle,
         samplePixel: `rgba(${data[0]}, ${data[1]}, ${data[2]}, ${data[3]})`
       });
-      
+
       return { imageData, hasContent };
     } catch (error) {
       console.error('Failed to capture canvas state:', error);
@@ -404,77 +505,872 @@ export function useMasking(
     }
   }, []);
 
+  // Helper functions for smart masking
+  const calculateBoundingBox = useCallback((points: Array<{ x: number; y: number }>): [number, number, number, number] | null => {
+    if (points.length === 0) return null;
+    
+    let minX = points[0].x;
+    let minY = points[0].y;
+    let maxX = points[0].x;
+    let maxY = points[0].y;
+    
+    for (const point of points) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+    
+    return [minX, minY, maxX, maxY];
+  }, []);
+
+  const samplePointsFromStroke = useCallback(
+    (points: Array<{ x: number; y: number }>, maxPoints: number = 10): Array<[number, number]> => {
+      if (points.length === 0) return [];
+      if (points.length <= maxPoints) {
+        return points.map(p => [p.x, p.y]);
+      }
+      
+      // Sample evenly distributed points
+      const step = Math.floor(points.length / maxPoints);
+      const sampled: Array<[number, number]> = [];
+      
+      for (let i = 0; i < points.length; i += step) {
+        sampled.push([points[i].x, points[i].y]);
+        if (sampled.length >= maxPoints) break;
+      }
+      
+      // Always include first and last point
+      if (sampled.length > 0) {
+        sampled[0] = [points[0].x, points[0].y];
+        sampled[sampled.length - 1] = [points[points.length - 1].x, points[points.length - 1].y];
+      }
+      
+      return sampled;
+    },
+    []
+  );
+
+  const scaleCoordinatesToOriginal = useCallback(
+    (
+      coords: { bbox?: [number, number, number, number]; points?: Array<[number, number]> },
+      canvasElement: HTMLCanvasElement,
+      imageElement: HTMLImageElement | null
+    ): { bbox?: [number, number, number, number]; points?: Array<[number, number]> } => {
+      if (!imageElement || !imageDimensions) {
+        return coords;
+      }
+
+      // Canvas coordinates are already in imageDimensions space
+      // But we need to scale to naturalWidth/naturalHeight if they differ
+      const naturalWidth = imageElement.naturalWidth;
+      const naturalHeight = imageElement.naturalHeight;
+      
+      // If dimensions match, no scaling needed
+      if (naturalWidth === imageDimensions.width && naturalHeight === imageDimensions.height) {
+        return coords;
+      }
+      
+      // Calculate scale factors from imageDimensions to natural dimensions
+      const scaleX = naturalWidth / imageDimensions.width;
+      const scaleY = naturalHeight / imageDimensions.height;
+      
+      // Scale coordinates with bounds checking
+      const scaleCoord = (x: number, y: number): [number, number] => {
+        const scaledX = x * scaleX;
+        const scaledY = y * scaleY;
+        const clampedX = Math.max(0, Math.min(scaledX, naturalWidth - 1));
+        const clampedY = Math.max(0, Math.min(scaledY, naturalHeight - 1));
+        
+        // Log warning if coordinates were clamped
+        if (scaledX !== clampedX || scaledY !== clampedY) {
+          console.warn('Coordinates clamped to image bounds:', {
+            original: [x, y],
+            scaled: [scaledX, scaledY],
+            clamped: [clampedX, clampedY],
+            naturalSize: [naturalWidth, naturalHeight]
+          });
+        }
+        
+        return [clampedX, clampedY];
+      };
+      
+      const result: { bbox?: [number, number, number, number]; points?: Array<[number, number]> } = {};
+      
+      if (coords.bbox) {
+        const [xMin, yMin, xMax, yMax] = coords.bbox;
+        const [scaledXMin, scaledYMin] = scaleCoord(xMin, yMin);
+        const [scaledXMax, scaledYMax] = scaleCoord(xMax, yMax);
+        
+        // Ensure bbox is valid (min < max)
+        const finalXMin = Math.min(scaledXMin, scaledXMax);
+        const finalYMin = Math.min(scaledYMin, scaledYMax);
+        const finalXMax = Math.max(scaledXMin, scaledXMax);
+        const finalYMax = Math.max(scaledYMin, scaledYMax);
+        
+        result.bbox = [finalXMin, finalYMin, finalXMax, finalYMax];
+      }
+      
+      if (coords.points) {
+        result.points = coords.points.map(([x, y]) => scaleCoord(x, y));
+      }
+      
+      return result;
+    },
+    [imageDimensions]
+  );
+
   const getCanvasCoordinates = useCallback((e: React.MouseEvent) => {
     const canvas = maskCanvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
+    if (!canvas || !imageDimensions) return { x: 0, y: 0 };
 
-    // Get the canvas bounding rect (includes CSS transform scaling)
+    // Get the canvas bounding rect
+    // Note: Canvas is inside TransformLayer which applies transform.scale
+    // The bounding rect already accounts for the transform applied by CSS
     const canvasRect = canvas.getBoundingClientRect();
-    
-    // Calculate the mouse position relative to the canvas
-    // The canvasRect already accounts for the CSS transform scale
+
+    // Calculate the mouse position relative to the canvas CSS size
+    // The canvas CSS size = imageDimensions * displayScale
+    // But the canvas internal size = imageDimensions (no displayScale)
     const relativeX = (e.clientX - canvasRect.left) / canvasRect.width;
     const relativeY = (e.clientY - canvasRect.top) / canvasRect.height;
-    
+
     // Convert to canvas internal coordinates
-    const x = relativeX * canvas.width;
-    const y = relativeY * canvas.height;
+    // Canvas internal resolution = imageDimensions (no displayScale)
+    // CSS size = imageDimensions * displayScale
+    // Transform is applied at TransformLayer level, bounding rect already accounts for it
+    const x = relativeX * imageDimensions.width;
+    const y = relativeY * imageDimensions.height;
+
+    console.log('📍 Canvas coordinates:', {
+      mouseX: e.clientX,
+      mouseY: e.clientY,
+      canvasLeft: canvasRect.left,
+      canvasTop: canvasRect.top,
+      canvasWidth: canvasRect.width,
+      canvasHeight: canvasRect.height,
+      relativeX,
+      relativeY,
+      finalX: x,
+      finalY: y,
+      canvasInternalWidth: canvas.width,
+      canvasInternalHeight: canvas.height,
+      imageDimensions,
+    });
 
     return { x, y };
-  }, []);
+  }, [imageDimensions]);
 
   // Store initial state when starting to draw (for command creation)
   const initialDrawState = useRef<CanvasState | null>(null);
 
+  // Auto detect edge and fill after stroke
+  const autoDetectAndFillAfterStroke = useCallback(async () => {
+    const canvas = maskCanvasRef.current;
+    const ctx = ctxRef.current;
+    const edgeCanvas = edgeOverlayCanvasRef.current;
+    if (!canvas || !ctx || !imageRef?.current || !imageDimensions) return;
+
+    // Only proceed if edge detection or flood fill is enabled
+    if (!enableEdgeDetection && !enableFloodFill) {
+      // Clear edge overlay if disabled
+      if (edgeCanvas) {
+        const edgeCtx = edgeCanvas.getContext('2d');
+        if (edgeCtx) {
+          edgeCtx.clearRect(0, 0, edgeCanvas.width, edgeCanvas.height);
+        }
+      }
+      return;
+    }
+
+    try {
+      // Get current mask data
+      const maskData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      
+      // Find all pixels that have mask (red pixels with alpha > 0)
+      const maskPixels: Array<{ x: number; y: number }> = [];
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          // Check if pixel has mask (red channel > 0 and alpha > 0)
+          if (maskData.data[idx] > 0 && maskData.data[idx + 3] > 0) {
+            maskPixels.push({ x, y });
+          }
+        }
+      }
+
+      if (maskPixels.length === 0) return;
+
+      // Create temporary canvas for edge detection in masked region
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = imageDimensions.width;
+      tempCanvas.height = imageDimensions.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      if (!tempCtx) return;
+
+      // Draw the image
+      tempCtx.drawImage(imageRef.current, 0, 0, imageDimensions.width, imageDimensions.height);
+      
+      // Detect edges in the image
+      const detectedEdges = detectEdges(tempCanvas, 50);
+      if (!detectedEdges) return;
+
+      // Initialize edge overlay canvas
+      if (edgeCanvas) {
+        edgeCanvas.width = imageDimensions.width;
+        edgeCanvas.height = imageDimensions.height;
+        const edgeCtx = edgeCanvas.getContext('2d');
+        if (!edgeCtx) return;
+
+        // Clear previous edge overlay
+        edgeCtx.clearRect(0, 0, edgeCanvas.width, edgeCanvas.height);
+
+        // Draw edges only in masked regions (yellow/cyan overlay)
+        const edgeData = detectedEdges.data;
+        const edgeImageData = edgeCtx.createImageData(edgeCanvas.width, edgeCanvas.height);
+        
+        for (const { x, y } of maskPixels) {
+          const edgeIdx = (y * edgeCanvas.width + x) * 4;
+          const edgeValue = edgeData[edgeIdx];
+          
+          if (edgeValue > 128) {
+            // Draw edge in yellow/cyan color
+            const pixelIdx = (y * edgeCanvas.width + x) * 4;
+            edgeImageData.data[pixelIdx] = 255;     // R - Yellow
+            edgeImageData.data[pixelIdx + 1] = 255; // G
+            edgeImageData.data[pixelIdx + 2] = 0;   // B
+            edgeImageData.data[pixelIdx + 3] = 150; // A - Semi-transparent
+          }
+        }
+        
+        edgeCtx.putImageData(edgeImageData, 0, 0);
+      }
+
+      // If flood fill is enabled, fill mask to edges
+      if (enableFloodFill && detectedEdges) {
+        // Get image data for flood fill
+        const imageData = tempCtx.getImageData(0, 0, imageDimensions.width, imageDimensions.height);
+        
+        // For each mask pixel, perform flood fill to edge
+        // We'll use the center of the mask region as starting point
+        if (maskPixels.length > 0) {
+          const centerX = Math.floor(
+            maskPixels.reduce((sum, p) => sum + p.x, 0) / maskPixels.length
+          );
+          const centerY = Math.floor(
+            maskPixels.reduce((sum, p) => sum + p.y, 0) / maskPixels.length
+          );
+
+          const fillColor = { r: 255, g: 0, b: 0, a: 128 };
+          const filledData = floodFill(
+            imageData,
+            centerX,
+            centerY,
+            fillColor,
+            detectedEdges,
+            10 // tolerance
+          );
+
+          // Merge filled data with existing mask
+          const currentMaskData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < filledData.data.length; i += 4) {
+            // If filled pixel has mask, add to current mask
+            if (filledData.data[i] > 0 || filledData.data[i + 3] > 0) {
+              currentMaskData.data[i] = 255; // R
+              currentMaskData.data[i + 1] = 0; // G
+              currentMaskData.data[i + 2] = 0; // B
+              currentMaskData.data[i + 3] = Math.max(
+                currentMaskData.data[i + 3],
+                filledData.data[i + 3]
+              ); // A
+            }
+          }
+          ctx.putImageData(currentMaskData, 0, 0);
+        }
+      }
+    } catch (error) {
+      console.error('Error in auto detect and fill:', error);
+    }
+  }, [imageRef, imageDimensions, enableEdgeDetection, enableFloodFill]);
+
   const startDrawing = useCallback((e: React.MouseEvent) => {
     if (!isMaskingMode || !uploadedImage || !imageDimensions) return;
     
+    // Lock canvas if smart mask is loading
+    if (isSmartMaskLoading) return;
+
     e.preventDefault();
     e.stopPropagation();
-    
+
     // Capture initial state before drawing for command creation
     initialDrawState.current = captureCanvasState();
     console.log('🎨 Starting stroke - Initial state captured:', {
       hasContent: initialDrawState.current.hasContent,
       timestamp: new Date().toLocaleTimeString()
     });
-    
+
     const { x, y } = getCanvasCoordinates(e);
     const ctx = ctxRef.current;
     if (!ctx) return;
 
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    setIsMaskDrawing(true);
-  }, [isMaskingMode, uploadedImage, imageDimensions, getCanvasCoordinates, captureCanvasState]);
+    // Ensure opacity and composite operation are set correctly before starting to draw
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
+    // Ensure strokeStyle with opacity is set (should already be set, but ensure it)
+    if (!ctx.strokeStyle || ctx.strokeStyle === 'rgba(0, 0, 0, 0)') {
+      ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+    }
+
+    if (maskToolType === 'box') {
+      // Box mode: store start position
+      boxStartPosRef.current = { x, y };
+      boxCurrentPosRef.current = { x, y };
+      setIsMaskDrawing(true);
+    } else {
+      // Brush mode: start path
+      // Reset stroke tracking for smart masking
+      if (enableSmartMasking) {
+        strokePointsRef.current = [{ x, y }];
+        strokeStartTimeRef.current = Date.now();
+        strokeStartPosRef.current = { x, y };
+        strokeMovementRef.current = 0;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      setIsMaskDrawing(true);
+    }
+  }, [isMaskingMode, uploadedImage, imageDimensions, getCanvasCoordinates, captureCanvasState, enableSmartMasking, isSmartMaskLoading, maskToolType]);
 
   const draw = useCallback((e: React.MouseEvent) => {
     if (!isMaskDrawing || !isMaskingMode) return;
     
+    // Lock canvas if smart mask is loading
+    if (isSmartMaskLoading) return;
+
     e.preventDefault();
-    
+
     const { x, y } = getCanvasCoordinates(e);
     const ctx = ctxRef.current;
-    if (!ctx) {
-      console.log('No context available for drawing');
+    const canvas = maskCanvasRef.current;
+    if (!ctx || !canvas) {
       return;
     }
 
-    console.log('Drawing to:', { x, y }, 'with lineWidth:', ctx.lineWidth);
-    ctx.lineTo(x, y);
-    ctx.stroke();
-  }, [isMaskDrawing, isMaskingMode, getCanvasCoordinates]);
+    if (maskToolType === 'box') {
+      // Box mode: draw preview box
+      boxCurrentPosRef.current = { x, y };
+      
+      // Restore canvas state and draw preview box
+      if (initialDrawState.current.imageData) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.putImageData(initialDrawState.current.imageData, 0, 0);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      
+      // Draw preview box
+      if (boxStartPosRef.current) {
+        const startX = boxStartPosRef.current.x;
+        const startY = boxStartPosRef.current.y;
+        const width = x - startX;
+        const height = y - startY;
+        
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1.0;
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+        ctx.lineWidth = 2;
+        
+        ctx.fillRect(startX, startY, width, height);
+        ctx.strokeRect(startX, startY, width, height);
+      }
+    } else {
+      // Brush mode: continue drawing path
+      // Ensure opacity and composite operation are set correctly before drawing
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
+      // Ensure strokeStyle with opacity is set (should already be set, but ensure it)
+      if (!ctx.strokeStyle || ctx.strokeStyle === 'rgba(0, 0, 0, 0)') {
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+      }
+
+      // Store stroke points and track movement for smart masking
+      if (enableSmartMasking) {
+        strokePointsRef.current.push({ x, y });
+        
+        // Calculate movement distance from start position
+        if (strokeStartPosRef.current) {
+          const dx = x - strokeStartPosRef.current.x;
+          const dy = y - strokeStartPosRef.current.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          strokeMovementRef.current = Math.max(strokeMovementRef.current, distance);
+        }
+      }
+
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+  }, [isMaskDrawing, isMaskingMode, getCanvasCoordinates, enableSmartMasking, isSmartMaskLoading, maskToolType]);
+
+  // Helper function to convert binary mask (white/black) to red transparent mask
+  const convertBinaryMaskToRedTransparent = useCallback((
+    binaryMaskImage: HTMLImageElement,
+    width: number,
+    height: number
+  ): ImageData => {
+    // Create temporary canvas to process the mask
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) throw new Error('Failed to get canvas context');
+
+    // Draw the binary mask onto temp canvas
+    tempCtx.drawImage(binaryMaskImage, 0, 0, width, height);
+    
+    // Get image data
+    const imageData = tempCtx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    
+    // Convert binary mask to red transparent
+    // White pixels (255, 255, 255) → rgba(255, 0, 0, 0.5)
+    // Black pixels (0, 0, 0) → transparent (rgba(0, 0, 0, 0))
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const a = data[i + 3];
+      
+      // Check if pixel is white (mask area) or black (non-mask area)
+      // Use grayscale value to determine
+      const grayscale = (r + g + b) / 3;
+      
+      if (grayscale > 128 && a > 0) {
+        // White pixel (mask area) → red transparent
+        data[i] = 255;     // R
+        data[i + 1] = 0;   // G
+        data[i + 2] = 0;   // B
+        data[i + 3] = 128; // A (0.5 opacity = 128/255)
+      } else {
+        // Black pixel or transparent → fully transparent
+        data[i] = 0;       // R
+        data[i + 1] = 0;   // G
+        data[i + 2] = 0;   // B
+        data[i + 3] = 0;   // A (fully transparent)
+      }
+    }
+    
+    return imageData;
+  }, []);
+
+  // Function to merge smart mask into canvas
+  const mergeSmartMask = useCallback(async (maskBase64: string) => {
+    const canvas = maskCanvasRef.current;
+    const ctx = ctxRef.current;
+    if (!canvas || !ctx) return;
+
+    try {
+      // Create image from base64 mask
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+        img.src = `data:image/png;base64,${maskBase64}`;
+      });
+
+      // Get current composite operation (preserve user's mode)
+      const currentComposite = ctx.globalCompositeOperation;
+      
+      // Convert binary mask to red transparent mask
+      const redTransparentMask = convertBinaryMaskToRedTransparent(
+        img,
+        canvas.width,
+        canvas.height
+      );
+      
+      // Use source-over to add mask (giống như stroke)
+      // This preserves existing mask content and adds new smart mask on top
+      ctx.globalCompositeOperation = 'source-over';
+      
+      // Draw converted mask onto canvas
+      ctx.putImageData(redTransparentMask, 0, 0);
+      
+      // Restore original composite operation
+      ctx.globalCompositeOperation = currentComposite;
+      
+      console.log('✅ Smart mask merged into canvas as red transparent');
+    } catch (error) {
+      console.error('Failed to merge smart mask:', error);
+      throw error; // Re-throw to allow error handling upstream
+    }
+  }, [convertBinaryMaskToRedTransparent]);
+
+  // Function to generate smart mask from box
+  const generateSmartMaskFromBox = useCallback(async (bbox: [number, number, number, number]) => {
+    if (!enableSmartMasking || !uploadedImage || !imageDimensions || !imageRef?.current) return;
+    
+    setIsSmartMaskLoading(true);
+    
+    try {
+      // Scale bbox to original image dimensions
+      const scaledCoords = scaleCoordinatesToOriginal(
+        { bbox },
+        maskCanvasRef.current!,
+        imageRef.current
+      );
+      
+      if (!scaledCoords.bbox) {
+        console.error('Failed to scale bbox coordinates');
+        return;
+      }
+      
+      // Call API with bbox
+      const imageToSend = smartMaskImageId ? null : uploadedImage;
+      const result = await apiService.generateSmartMask(
+        imageToSend,
+        smartMaskImageId,
+        scaledCoords.bbox,
+        undefined, // No points for box mode
+        10, // dilate_amount
+        false // use_blur
+      );
+      
+      if (result.success && result.mask_base64) {
+        // Save image_id if returned
+        if (result.image_id && !smartMaskImageId) {
+          setSmartMaskImageId(result.image_id);
+        }
+        
+        // Merge mask into canvas
+        await mergeSmartMask(result.mask_base64);
+        
+        // Update command history
+        const canvas = maskCanvasRef.current;
+        if (canvas && initialDrawState.current) {
+          const currentState = captureCanvasState();
+          const drawCommand = new CanvasDrawCommand(canvas, initialDrawState.current, currentState);
+          commandHistory.current.executeCommand(drawCommand);
+          updateHistoryState();
+          initialDrawState.current = null;
+        }
+        
+        // Show success notification
+        if (onNotification) {
+          onNotification('success', 'Smart mask generated successfully');
+        }
+      } else {
+        const errorMsg = result.error || 'Smart mask generation failed';
+        console.error('Smart mask generation failed:', errorMsg);
+        if (onNotification) {
+          onNotification('error', errorMsg);
+        }
+      }
+    } catch (error: any) {
+      console.error('Error generating smart mask from box:', error);
+      let errorMessage = 'Failed to generate smart mask';
+      
+      // Parse error message (may be JSON stringified from API service)
+      let parsedError: any = null;
+      if (error?.message) {
+        try {
+          parsedError = JSON.parse(error.message);
+        } catch {
+          // Not JSON, use as is
+          parsedError = { error: error.message };
+        }
+      }
+      
+      // Check for "No masks found" error - this is a normal case, show friendly message
+      const errorText = parsedError?.error || error?.message || '';
+      if (errorText.includes('No masks found') || errorText.includes('did not generate')) {
+        // This is a normal case, not a real error - just show info message
+        if (onNotification) {
+          onNotification('info', 'FastSAM không detect được gì với vị trí mask, hãy chọn vị trí khác hay vật thể khác');
+        }
+        return; // Don't show error, just return silently
+      }
+      
+      // Provide user-friendly error messages for other errors
+      if (errorText.includes('Network') || errorText.includes('fetch')) {
+        errorMessage = 'Network error. Please check your connection and try again.';
+      } else if (errorText.includes('timeout')) {
+        errorMessage = 'Request timed out. Please try again.';
+      } else if (parsedError?.error) {
+        errorMessage = parsedError.error;
+      } else if (error?.message) {
+        errorMessage = error.message;
+      }
+      
+      if (onNotification) {
+        onNotification('error', errorMessage);
+      }
+    } finally {
+      setIsSmartMaskLoading(false);
+    }
+  }, [
+    enableSmartMasking,
+    uploadedImage,
+    imageDimensions,
+    imageRef,
+    smartMaskImageId,
+    scaleCoordinatesToOriginal,
+    mergeSmartMask,
+    captureCanvasState,
+    updateHistoryState,
+    onNotification
+  ]);
+
+  // Function to generate smart mask from stroke
+  const generateSmartMaskFromStroke = useCallback(async () => {
+    if (!enableSmartMasking || !uploadedImage || !imageDimensions || !imageRef?.current) return;
+    
+    const points = strokePointsRef.current;
+    if (points.length === 0) return;
+
+    setIsSmartMaskLoading(true);
+    
+    try {
+      // For single point (click-only), use point mode directly
+      // For multiple points (stroke), calculate bbox and sample points
+      const isSinglePoint = points.length === 1;
+      const bbox = isSinglePoint ? null : calculateBoundingBox(points);
+      const sampledPoints = isSinglePoint 
+        ? [[points[0].x, points[0].y]] 
+        : samplePointsFromStroke(points, 10);
+      
+      // Determine whether to use bbox or points mode
+      let usePoints = isSinglePoint;
+      let scaledCoords: { bbox?: [number, number, number, number]; points?: Array<[number, number]> } = {};
+      
+      if (!isSinglePoint && bbox) {
+        const [xMin, yMin, xMax, yMax] = bbox;
+        const bboxWidth = xMax - xMin;
+        const bboxHeight = yMax - yMin;
+        
+        // If bbox is too small (< 10x10px), use point mode instead
+        if (bboxWidth < 10 || bboxHeight < 10) {
+          usePoints = true;
+        } else {
+          // Use bbox mode - scale coordinates to original image dimensions
+          scaledCoords = scaleCoordinatesToOriginal(
+            { bbox, points: sampledPoints },
+            maskCanvasRef.current!,
+            imageRef.current
+          );
+        }
+      }
+      
+      if (usePoints && sampledPoints.length > 0) {
+        // Use point mode - scale points to original image dimensions
+        scaledCoords = scaleCoordinatesToOriginal(
+          { points: sampledPoints },
+          maskCanvasRef.current!,
+          imageRef.current
+        );
+      }
+      
+      // Call API
+      const imageToSend = smartMaskImageId ? null : uploadedImage;
+      const result = await apiService.generateSmartMask(
+        imageToSend,
+        smartMaskImageId,
+        scaledCoords.bbox,
+        scaledCoords.points,
+        10, // dilate_amount
+        false // use_blur
+      );
+      
+      if (result.success && result.mask_base64) {
+        // Save image_id if returned
+        if (result.image_id && !smartMaskImageId) {
+          setSmartMaskImageId(result.image_id);
+        }
+        
+        // Merge mask into canvas
+        await mergeSmartMask(result.mask_base64);
+        
+        // Update command history
+        const canvas = maskCanvasRef.current;
+        if (canvas && initialDrawState.current) {
+          const currentState = captureCanvasState();
+          const drawCommand = new CanvasDrawCommand(canvas, initialDrawState.current, currentState);
+          commandHistory.current.executeCommand(drawCommand);
+          updateHistoryState();
+          initialDrawState.current = null;
+        }
+        
+        // Show success notification
+        if (onNotification) {
+          onNotification('success', 'Smart mask generated successfully');
+        }
+      } else {
+        const errorMsg = result.error || 'Smart mask generation failed';
+        console.error('Smart mask generation failed:', errorMsg);
+        if (onNotification) {
+          onNotification('error', errorMsg);
+        }
+      }
+    } catch (error: any) {
+      console.error('Error generating smart mask:', error);
+      let errorMessage = 'Failed to generate smart mask';
+      
+      // Parse error message (may be JSON stringified from API service)
+      let parsedError: any = null;
+      if (error?.message) {
+        try {
+          parsedError = JSON.parse(error.message);
+        } catch {
+          // Not JSON, use as is
+          parsedError = { error: error.message };
+        }
+      }
+      
+      // Check for "No masks found" error - this is a normal case, show friendly message
+      const errorText = parsedError?.error || error?.message || '';
+      if (errorText.includes('No masks found') || errorText.includes('did not generate')) {
+        // This is a normal case, not a real error - just show info message
+        if (onNotification) {
+          onNotification('info', 'FastSAM không detect được gì với vị trí mask, hãy chọn vị trí khác hay vật thể khác');
+        }
+        return; // Don't show error, just return silently
+      }
+      
+      // Provide user-friendly error messages for other errors
+      if (errorText.includes('Network') || errorText.includes('fetch')) {
+        errorMessage = 'Network error. Please check your connection and try again.';
+      } else if (errorText.includes('timeout')) {
+        errorMessage = 'Request timed out. Please try again.';
+      } else if (parsedError?.error) {
+        errorMessage = parsedError.error;
+      } else if (error?.message) {
+        errorMessage = error.message;
+      }
+      
+      if (onNotification) {
+        onNotification('error', errorMessage);
+      }
+    } finally {
+      setIsSmartMaskLoading(false);
+      strokePointsRef.current = [];
+    }
+  }, [
+    enableSmartMasking,
+    uploadedImage,
+    imageDimensions,
+    imageRef,
+    smartMaskImageId,
+    calculateBoundingBox,
+    samplePointsFromStroke,
+    scaleCoordinatesToOriginal,
+    mergeSmartMask,
+    captureCanvasState,
+    updateHistoryState,
+    onNotification
+  ]);
 
   const stopDrawing = useCallback(() => {
-    console.log('Stopping drawing operation');
-    
     const ctx = ctxRef.current;
     const canvas = maskCanvasRef.current;
-    
+
+    if (maskToolType === 'box') {
+      // Box mode: handle box drawing
+      if (canvas && ctx && boxStartPosRef.current && boxCurrentPosRef.current) {
+        const startX = boxStartPosRef.current.x;
+        const startY = boxStartPosRef.current.y;
+        const endX = boxCurrentPosRef.current.x;
+        const endY = boxCurrentPosRef.current.y;
+        
+        // Calculate box dimensions
+        const width = endX - startX;
+        const height = endY - startY;
+        
+        // Only process if box has meaningful size
+        if (Math.abs(width) > 2 && Math.abs(height) > 2) {
+          // Calculate bbox [xMin, yMin, xMax, yMax]
+          const xMin = Math.min(startX, endX);
+          const yMin = Math.min(startY, endY);
+          const xMax = Math.max(startX, endX);
+          const yMax = Math.max(startY, endY);
+          const bbox: [number, number, number, number] = [xMin, yMin, xMax, yMax];
+          
+          // Handle smart masking for box
+          if (enableSmartMasking) {
+            // Generate smart mask from box bbox
+            console.log('📦 Box detected, generating smart mask from bbox:', bbox);
+            generateSmartMaskFromBox(bbox);
+            
+            // Don't fill box manually - smart mask will be merged
+            // Reset box state
+            boxStartPosRef.current = null;
+            boxCurrentPosRef.current = null;
+            setIsMaskDrawing(false);
+            return;
+          } else {
+            // No smart masking: fill the box manually
+            // Restore canvas state and fill box
+            if (initialDrawState.current.imageData) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.putImageData(initialDrawState.current.imageData, 0, 0);
+            }
+            
+            // Fill box with mask
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = 1.0;
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+            ctx.fillRect(xMin, yMin, xMax - xMin, yMax - yMin);
+            
+            // Save to command history
+            if (initialDrawState.current) {
+              const currentState = captureCanvasState();
+              const drawCommand = new CanvasDrawCommand(canvas, initialDrawState.current, currentState);
+              commandHistory.current.executeCommand(drawCommand);
+              updateHistoryState();
+              initialDrawState.current = null;
+            }
+          }
+        }
+      }
+      
+      // Reset box state
+      boxStartPosRef.current = null;
+      boxCurrentPosRef.current = null;
+      setIsMaskDrawing(false);
+      return;
+    }
+
+    // Brush mode: continue with existing logic
     if (ctx) {
       ctx.closePath();
     }
-    
+
+    // Handle smart masking
+    if (enableSmartMasking && strokePointsRef.current.length > 0) {
+      // Detect click-only mode (single click without significant drag)
+      const strokeDuration = Date.now() - strokeStartTimeRef.current;
+      const isClickOnly = strokeDuration < 100 && strokeMovementRef.current < 5; // < 100ms and < 5px movement
+      
+      // Clear existing debounce timer
+      if (smartMaskDebounceTimerRef.current) {
+        clearTimeout(smartMaskDebounceTimerRef.current);
+      }
+      
+      if (isClickOnly) {
+        // Click-only: generate mask immediately without debounce
+        console.log('🖱️ Click-only detected, generating mask immediately');
+        generateSmartMaskFromStroke();
+      } else {
+        // Stroke mode: debounce smart mask generation (400ms)
+        smartMaskDebounceTimerRef.current = setTimeout(() => {
+          generateSmartMaskFromStroke();
+        }, 400);
+      }
+      
+      // Don't save stroke as command yet - will be saved after smart mask is merged
+      setIsMaskDrawing(false);
+      return;
+    }
+
     // Create and execute draw command if we have initial state and canvas
     if (canvas && initialDrawState.current) {
       // Capture current state after drawing
@@ -484,36 +1380,66 @@ export function useMasking(
         currentState: { hasContent: currentState.hasContent },
         timestamp: new Date().toLocaleTimeString()
       });
-      
+
       const drawCommand = new CanvasDrawCommand(canvas, initialDrawState.current, currentState);
       commandHistory.current.executeCommand(drawCommand);
       updateHistoryState();
-      
+
       console.log('✅ Stroke saved successfully:', commandHistory.current.getHistoryInfo());
       initialDrawState.current = null;
+
+      // Normalize opacity after drawing to ensure consistent visual appearance
+      // This prevents opacity accumulation when strokes overlap
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          // Get current image data
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imageData.data;
+          
+          // Normalize opacity: any pixel with alpha > 0 should be set to rgba(255, 0, 0, 0.5)
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 0) {
+              // Pixel has been drawn - normalize to consistent opacity
+              data[i] = 255;     // R
+              data[i + 1] = 0;   // G
+              data[i + 2] = 0;   // B
+              data[i + 3] = 128; // A (0.5 opacity = 128/255)
+            }
+          }
+          
+          // Put normalized data back
+          ctx.putImageData(imageData, 0, 0);
+        }
+      }
+
+      // Auto detect edge and fill after stroke
+      if (enableEdgeDetection || enableFloodFill) {
+        setTimeout(() => {
+          autoDetectAndFillAfterStroke();
+        }, 50); // Small delay to ensure canvas is updated
+      }
     }
-    
+
     setIsMaskDrawing(false);
-  }, [updateHistoryState]);
+  }, [updateHistoryState, enableEdgeDetection, enableFloodFill, autoDetectAndFillAfterStroke, enableSmartMasking, generateSmartMaskFromStroke, generateSmartMaskFromBox, maskToolType, captureCanvasState]);
 
   // Handle canvas resizing when image dimensions change  
   useEffect(() => {
-    if (!maskCanvasRef.current || !imageContainerRef.current || !imageDimensions) return;
-    
+    if (!maskCanvasRef.current || !imageDimensions) return;
+
     const canvas = maskCanvasRef.current;
     const container = imageContainerRef.current;
-    
+
     const resizeCanvas = () => {
-      const containerRect = container.getBoundingClientRect();
-      
-      // Set canvas internal resolution to match the container size
-      // This makes the canvas fill the entire div
-      const newWidth = containerRect.width;
-      const newHeight = containerRect.height;
-      
+      // Use actual image dimensions, not container size
+      // This ensures mask matches the original image size when exported
+      const newWidth = imageDimensions.width;
+      const newHeight = imageDimensions.height;
+
       // Check if canvas dimensions are changing
       const dimensionsChanged = canvas.width !== newWidth || canvas.height !== newHeight;
-      
+
       // Store canvas content before resize if dimensions are changing
       let imageData = null;
       if (dimensionsChanged && canvas.width > 0 && canvas.height > 0) {
@@ -526,14 +1452,14 @@ export function useMasking(
           }
         }
       }
-      
-      // Set canvas internal resolution to match the full container size
+
+      // Set canvas internal resolution to match the actual image dimensions
       canvas.width = newWidth;
       canvas.height = newHeight;
-      
+
       // Canvas positioning is handled by CSS (absolute inset-0 inside transform div)
       // Canvas now fills the entire parent div automatically
-      
+
       // Always re-initialize context settings after canvas resize
       const ctx = canvas.getContext('2d');
       if (ctx) {
@@ -541,10 +1467,11 @@ export function useMasking(
         ctx.lineCap = 'butt';  // Sharp line ends
         ctx.lineJoin = 'miter';  // Sharp corners
         ctx.globalCompositeOperation = 'source-over';
-        
+        ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
+
         // Disable anti-aliasing for maximum hardness (crisp edges)
         ctx.imageSmoothingEnabled = false;
-        
+
         // Apply current drawing properties
         if (imageDimensions) {
           const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
@@ -555,7 +1482,7 @@ export function useMasking(
           ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
           ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
         }
-        
+
         // Restore canvas content if it was saved and dimensions changed
         if (imageData && dimensionsChanged) {
           try {
@@ -564,22 +1491,25 @@ export function useMasking(
             console.warn('Could not restore canvas content:', e);
           }
         }
-        
+
         ctxRef.current = ctx;
       }
     };
-    
-    // Initial resize
-    const timer = setTimeout(resizeCanvas, 100);
-    
+
+    // Initial resize - try immediately, then retry after a short delay
+    resizeCanvas();
+    const timer = setTimeout(resizeCanvas, 50);
+    const timer2 = setTimeout(resizeCanvas, 200);
+
     // Listen for window resize
     window.addEventListener('resize', resizeCanvas);
-    
+
     return () => {
       clearTimeout(timer);
+      clearTimeout(timer2);
       window.removeEventListener('resize', resizeCanvas);
     };
-  }, [uploadedImage, transform.scale, imageDimensions, imageContainerRef, isMaskingMode]);
+  }, [uploadedImage, transform.scale, imageDimensions, isMaskingMode, maskBrushSize]);
 
   // Canvas scaling is handled by the container, no separate zoom effect needed
   // useEffect(() => {
@@ -613,26 +1543,26 @@ export function useMasking(
   const clearMask = useCallback(() => {
     const canvas = maskCanvasRef.current;
     if (!canvas) return;
-    
+
     // Capture current state before clearing
     const currentState = captureCanvasState();
-    
+
     // Optimization: Don't create clear command if canvas is already empty
     if (!currentState.hasContent) {
       console.log('🚫 Clear skipped - canvas already empty');
       return;
     }
-    
+
     console.log('🧹 Saving clear operation as command:', {
       previousState: { hasContent: currentState.hasContent },
       timestamp: new Date().toLocaleTimeString()
     });
-    
+
     // Create and execute clear command
     const clearCommand = new CanvasClearCommand(canvas, currentState);
     commandHistory.current.executeCommand(clearCommand);
     updateHistoryState();
-    
+
     console.log('✅ Clear command saved:', commandHistory.current.getHistoryInfo());
   }, [captureCanvasState, updateHistoryState]);
 
@@ -642,7 +1572,7 @@ export function useMasking(
     updateHistoryState();
     setIsMaskingMode(false);
     setIsMaskDrawing(false);
-    
+
     // Clear the canvas if it exists
     const canvas = maskCanvasRef.current;
     if (canvas) {
@@ -655,24 +1585,24 @@ export function useMasking(
 
   const toggleMaskingMode = useCallback(() => {
     const wasInMaskingMode = isMaskingMode;
-    
+
     console.log('Toggling masking mode:', {
       currentMode: isMaskingMode,
       willEnterMode: !isMaskingMode,
       historyLength: commandHistory.current.getHistoryLength()
     });
-    
+
     setIsMaskingMode(!isMaskingMode);
-    
+
     if (wasInMaskingMode) {
       // Exiting masking mode
       console.log('Exiting masking mode - preparing for history clear');
       setIsMaskDrawing(false);
-      
+
       // Clear command history immediately for responsive UI
       commandHistory.current.clear();
       updateHistoryState();
-      
+
       // Clear the canvas content
       const canvas = maskCanvasRef.current;
       if (canvas) {
@@ -690,12 +1620,71 @@ export function useMasking(
     }
   }, [isMaskingMode, updateHistoryState]);
 
+  // Hàm chuyển đổi Mask đỏ/trong suốt (UI) thành Mask Đen/Trắng chuẩn cho AI
+  // Quy ước: TRẮNG = vùng cần sửa (mask area), ĐEN = vùng giữ nguyên (keep area)
+  const getFinalMask = useCallback(async (): Promise<string | null> => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || !imageDimensions) return null;
+
+    // 1. Tạo canvas tạm để xử lý với kích thước đúng (bằng imageDimensions)
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = imageDimensions.width;
+    tempCanvas.height = imageDimensions.height;
+    const ctx = tempCanvas.getContext('2d');
+    if (!ctx) return null;
+
+    // 2. Tô nền ĐEN (Vùng giữ nguyên - không sửa)
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+    // 3. Lấy dữ liệu pixel từ canvas vẽ hiện tại (đang là màu đỏ trong suốt cho UI)
+    const originalCtx = canvas.getContext('2d');
+    if (!originalCtx) return null;
+
+    // Canvas đã có kích thước = imageDimensions, nên không cần scale
+    const imageData = originalCtx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+
+    // 4. Xử lý Binary Mask: Chuyển vùng có vẽ (alpha > 0) thành TRẮNG (vùng cần sửa)
+    // Tạo ImageData mới cho canvas tạm
+    const newImageData = ctx.createImageData(tempCanvas.width, tempCanvas.height);
+    const newData = newImageData.data;
+
+    // Canvas size đã match imageDimensions, nên copy trực tiếp
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3]; // Lấy độ trong suốt của nét vẽ hiện tại
+
+      if (alpha > 0) {
+        // Có nét vẽ -> Set thành TRẮNG (255, 255, 255, 255) = Vùng cần sửa
+        newData[i] = 255;     // R
+        newData[i + 1] = 255; // G
+        newData[i + 2] = 255; // B
+        newData[i + 3] = 255; // Alpha
+      } else {
+        // Không vẽ -> Giữ nguyên màu ĐEN (0, 0, 0, 255) = Vùng giữ nguyên
+        newData[i] = 0;
+        newData[i + 1] = 0;
+        newData[i + 2] = 0;
+        newData[i + 3] = 255; // Alpha nền luôn phải là 255
+      }
+    }
+
+    // 5. Đưa dữ liệu đã chuẩn hóa vào canvas tạm
+    ctx.putImageData(newImageData, 0, 0);
+
+    // 6. Xuất ra base64 string (PNG format)
+    return tempCanvas.toDataURL('image/png');
+  }, [imageDimensions]);
+
   return {
     isMaskingMode,
     isMaskDrawing,
     maskBrushSize,
+    maskToolType,
     maskCanvasRef,
+    edgeOverlayCanvasRef,
     setMaskBrushSize,
+    setMaskToolType,
     handleMaskMouseDown: startDrawing,
     handleMaskMouseMove: draw,
     handleMaskMouseUp: stopDrawing,
@@ -709,6 +1698,19 @@ export function useMasking(
     redoMask,
     hasMaskContent: historyState.hasContent,
     canUndo: historyState.canUndo,
-    canRedo: historyState.canRedo
+    canRedo: historyState.canRedo,
+    // Export final mask (Black/White binary mask for AI)
+    getFinalMask,
+    // Edge detection and flood fill
+    enableEdgeDetection,
+    enableFloodFill,
+    setEnableEdgeDetection,
+    setEnableFloodFill,
+    // Smart masking
+    enableSmartMasking,
+    setEnableSmartMasking,
+    isSmartMaskLoading,
+    generateSmartMaskFromBox,
+    generateSmartMaskFromBox,
   };
 }

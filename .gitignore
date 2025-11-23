@@ -285,3 +285,9 @@ server/redoc-static/
 server/*.db
 server/*.sqlite
 server/*.sqlite3
+/server/visualizations
+.safetensors
+/data
+*.safetensors
+*.pt
+/.cursor/plans

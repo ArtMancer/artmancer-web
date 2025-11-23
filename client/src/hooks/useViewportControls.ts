@@ -66,28 +66,63 @@ export function useViewportControls(
   }, [imageDimensions, displayScale, calculateOptimalZoom]);
 
   // Zoom functionality - zooms the viewport
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  // Use native event listener to allow preventDefault
+  const handleWheelNative = useCallback((e: WheelEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     
     // Use 5% increments instead of multiplicative factors
     const zoomIncrement = 0.05; // 5% increment
-    const currentZoom = viewportZoom;
-    
-    let newZoom;
-    if (e.deltaY > 0) {
-      // Zoom out
-      newZoom = currentZoom - zoomIncrement;
-    } else {
-      // Zoom in
-      newZoom = currentZoom + zoomIncrement;
-    }
-    
-    // Clamp to bounds and round to nearest 5%
-    newZoom = Math.max(0.05, Math.min(3, newZoom));
-    newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
-    
-    setViewportZoom(newZoom);
-  }, [viewportZoom]);
+    setViewportZoom(prevZoom => {
+      let newZoom;
+      if (e.deltaY > 0) {
+        // Zoom out
+        newZoom = prevZoom - zoomIncrement;
+      } else {
+        // Zoom in
+        newZoom = prevZoom + zoomIncrement;
+      }
+      
+      // Clamp to bounds and round to nearest 5%
+      newZoom = Math.max(0.05, Math.min(3, newZoom));
+      newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
+      return newZoom;
+    });
+  }, []);
+
+  // React event handler for compatibility (won't preventDefault but will still work)
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    // Don't call preventDefault here - use native listener instead
+    // Use 5% increments instead of multiplicative factors
+    const zoomIncrement = 0.05; // 5% increment
+    setViewportZoom(prevZoom => {
+      let newZoom;
+      if (e.deltaY > 0) {
+        // Zoom out
+        newZoom = prevZoom - zoomIncrement;
+      } else {
+        // Zoom in
+        newZoom = prevZoom + zoomIncrement;
+      }
+      
+      // Clamp to bounds and round to nearest 5%
+      newZoom = Math.max(0.05, Math.min(3, newZoom));
+      newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
+      return newZoom;
+    });
+  }, []);
+
+  // Register native wheel event listener with passive: false
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    container.addEventListener('wheel', handleWheelNative, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', handleWheelNative);
+    };
+  }, [handleWheelNative]);
 
   // Viewport zoom functions
   const zoomViewportIn = useCallback(() => {

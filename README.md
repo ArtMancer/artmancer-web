@@ -128,7 +128,7 @@ Create a `.env.local` file in the `client` directory:
 
 ```env
 # API Configuration (Future)
-NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_URL=http://localhost:8080
 
 # AI Service Configuration (Future)
 OPENAI_API_KEY=your_openai_key_here

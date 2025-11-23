@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider, LanguageProvider } from "@/contexts";
+import MuiThemeProviderWrapper from "@/components/MuiThemeProvider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -15,7 +16,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Artmancer",
-  description: "AI-powered photo editing platform with background removal, image extension, and intelligent editing tools",
+  description:
+    "AI-powered photo editing platform with background removal, image extension, and intelligent editing tools",
   icons: {
     icon: [
       { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
@@ -42,7 +44,7 @@ export default function RootLayout({
       >
         <ThemeProvider>
           <LanguageProvider>
-            {children}
+            <MuiThemeProviderWrapper>{children}</MuiThemeProviderWrapper>
           </LanguageProvider>
         </ThemeProvider>
       </body>

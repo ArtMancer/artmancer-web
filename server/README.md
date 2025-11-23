@@ -1,6 +1,6 @@
 # ArtMancer Web - Server
 
-FastAPI server for Gemini-powered image generation with customizable model settings.
+FastAPI backend for local Qwen image-editing with mask-aware conditioning.
 
 ## Setup
 
@@ -10,51 +10,42 @@ FastAPI server for Gemini-powered image generation with customizable model setti
 uv sync
 ```
 
-2. Set up environment variables:
+2. Create `.env` (if not present) and point `MODEL_FILE` to your safetensors checkpoint:
+
+```
+MODEL_FILE=./qwen_2509_object_insertion_512_000002750.safetensors
+```
+
+3. Start the server:
 
 ```bash
-cp .env.example .env
+uv run uvicorn main:app --host 0.0.0.0 --port 8003
 ```
 
-3. Add your Gemini API key to the `.env` file:
-
-```
-GEMINI_API_KEY=your_actual_api_key_here
-```
-
-## Running the Server
-
-Development mode with auto-reload:
+or use the helper script:
 
 ```bash
-uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Or using the built-in runner:
-
-```bash
-uv run python main.py
+./start_server.sh
 ```
 
 ## API Endpoints
 
-- `GET /api/health` - Health check
-- `GET /api/models` - Available Gemini models
-- `GET /api/config` - API configuration
-- `POST /api/generate` - Generate single image
-- `POST /api/generate/batch` - Generate multiple images
+- `GET /api/health` – Device + pipeline status
+- `POST /api/generate` – Edit an image using prompt + mask with 3 conditional inputs (mask/background/object)
+- `POST /api/clear-cache` – Release GPU / CPU memory
 
-## API Documentation
+## Request requirements
 
-Once running, visit:
-
-- Interactive docs: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- `input_image`: base64 original image from frontend
+- `mask_image`: base64 mask coming from frontend
+- The backend splits the original/mask into:
+  - mask RGB
+  - background (original minus mask)
+  - foreground (mask * original)
+  which are passed to the Qwen model as conditional inputs.
 
 ## Environment Variables
 
-- `GEMINI_API_KEY` - Your Gemini API key (required)
-- `HOST` - Server host (default: 0.0.0.0)
-- `PORT` - Server port (default: 8000)
-- `DEBUG` - Debug mode (default: True)
-- `ALLOWED_ORIGINS` - CORS allowed origins (default: localhost:3000,3001)
+- `MODEL_FILE` – path to the `.safetensors` checkpoint (default: `./qwen_2509_object_insertion_512_000002750.safetensors`)
+- `HOST`, `PORT`, `DEBUG` – optional overrides for server process
+- `ALLOWED_ORIGINS` – comma-separated list for CORS (defaults to `http://localhost:3000`)

@@ -1,24 +1,31 @@
 [project]
 name = "server"
 version = "0.1.0"
-description = "ArtMancer Web Server - Gemini API Integration"
+description = "ArtMancer Web Server - Local Qwen Image Editing API"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi[standard]>=0.117.1",
-    "pillow>=10.0.0",
-    "python-multipart>=0.0.9",
-    "pydantic>=2.0.0",
-    "uvicorn[standard]>=0.30.0",
-    "python-dotenv>=1.0.0",
-    "requests>=2.31.0",
-    "torch>=2.8.0",
-    "torchvision>=0.23.0",
-    "diffusers>=0.35.1",
-    "transformers>=4.56.2",
-    "accelerate>=1.10.1",
-    "hf-xet>=1.1.10",
-    "huggingface-hub[cli]>=0.35.1",
+  "fastapi[standard]>=0.117.1",
+  "pillow>=10.0.0",
+  "python-multipart>=0.0.9",
+  "pydantic>=2.0.0",
+  "pydantic-settings>=2.6.0",
+  "uvicorn[standard]>=0.30.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+  "torch>=2.8.0",
+  "torchvision>=0.23.0",
+  "diffusers>=0.35.1",
+  "transformers>=4.56.2",
+  "accelerate>=1.10.1",
+  "hf-xet>=1.1.10",
+  "huggingface-hub[cli]>=0.35.1",
+  "numpy>=1.24.0",
+  "safetensors>=0.4.0",
+  "torchmetrics>=1.0.0",
+  "scikit-image>=0.21.0",
+  "ultralytics>=8.0.0",
+  "opencv-python-headless>=4.11.0.86",
 ]
 
 [[tool.uv.index]]
@@ -33,3 +40,4 @@ torch = [
 torchvision = [
   { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+diffusers = { git = "https://github.com/huggingface/diffusers" }

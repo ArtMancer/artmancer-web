@@ -1,3 +1,5 @@
+# Deprecated placeholder kept for backward compatibility.
+# Actual configuration is handled in app/core/config.py
 """
 Model configuration presets for Qwen Image Edit pipeline
 """
