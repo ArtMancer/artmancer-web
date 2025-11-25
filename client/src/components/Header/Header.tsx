@@ -18,9 +18,9 @@ interface HeaderProps {
   onToggleCustomize: () => void;
   isGenerating?: boolean;
   isEvaluating?: boolean;
-  appMode?: "inference" | "evaluation";
-  onAppModeChange?: (mode: "inference" | "evaluation") => void;
-  aiTask?: "white-balance" | "object-insert" | "object-removal";
+  appMode?: "inference" | "benchmark";
+  onAppModeChange?: (mode: "inference" | "benchmark") => void;
+  aiTask?: "white-balance" | "object-insert" | "object-removal" | "evaluation";
   onCancel?: () => void;
 }
 
@@ -84,11 +84,16 @@ export default function Header({
   }, [isSettingsOpen, isClosing, handleCloseModal]);
 
   const handleSubmit = () => {
-    // For white-balance task, prompt is optional (can be empty)
     const promptValue = prompt.trim();
-    if (appMode === "evaluation" && onEvaluate) {
+    if (appMode === "benchmark" && onEvaluate) {
+      // For benchmark mode, prompt is required
+      if (!promptValue) {
+        // Show error or disable button - validation handled by button disabled state
+        return;
+      }
       onEvaluate(promptValue);
     } else {
+      // For white-balance task, prompt is optional (can be empty)
       // For white-balance, allow empty prompt
       if (aiTask === "white-balance" || promptValue) {
         onSummon(promptValue);
@@ -121,7 +126,11 @@ export default function Header({
         <div className="flex-1 max-w-2xl mx-4 flex gap-3 items-center">
           <input
             type="text"
-            placeholder={t("header.placeholder")}
+            placeholder={
+              appMode === "benchmark" 
+                ? "Enter prompt for ALL benchmark images..." 
+                : t("header.placeholder")
+            }
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -138,11 +147,14 @@ export default function Header({
           ) : (
             <button
               onClick={handleSubmit}
-              disabled={(isGenerating || isEvaluating) || (!prompt.trim() && aiTask !== "white-balance")}
+              disabled={
+                (isGenerating || isEvaluating) || 
+                (appMode === "benchmark" ? !prompt.trim() : (!prompt.trim() && aiTask !== "white-balance"))
+              }
               className="px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {appMode === "evaluation" 
-                ? (isEvaluating ? t("header.evaluating") : t("header.evaluate"))
+              {appMode === "benchmark" 
+                ? (isEvaluating ? "Benchmarking..." : "Benchmark!")
                 : (isGenerating ? t("header.generating") : t("header.edit"))}
             </button>
           )}
@@ -324,15 +336,15 @@ export default function Header({
                       {appMode === "inference" && <MdCheck size={16} />}
                     </button>
                     <button
-                      onClick={() => onAppModeChange("evaluation")}
+                      onClick={() => onAppModeChange("benchmark")}
                       className={`flex items-center justify-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        appMode === "evaluation"
+                        appMode === "benchmark"
                           ? "bg-[var(--primary-accent)] text-white shadow-lg"
                           : "bg-[var(--secondary-bg)] text-[var(--text-secondary)] hover:bg-[var(--primary-accent)] hover:text-white"
                       }`}
                     >
-                      <span>{t("settings.evaluation")}</span>
-                      {appMode === "evaluation" && <MdCheck size={16} />}
+                      <span>Benchmark</span>
+                      {appMode === "benchmark" && <MdCheck size={16} />}
                     </button>
                   </div>
                 </div>

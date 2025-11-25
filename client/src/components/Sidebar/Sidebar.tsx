@@ -9,6 +9,7 @@ import {
   FaPlus,
   FaBalanceScale,
   FaUndo,
+  FaQuestionCircle,
 } from "react-icons/fa";
 import { HiSparkles } from "react-icons/hi2";
 import { useLanguage } from "@/contexts/LanguageContext";
@@ -28,6 +29,7 @@ import {
   Image as ImageIcon,
   CheckCircle as CheckCircleIcon,
 } from "@mui/icons-material";
+import type { InputQualityPreset } from "@/services/api";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -35,11 +37,14 @@ interface SidebarProps {
   uploadedImage: string | null;
   referenceImage: string | null;
   aiTask: "white-balance" | "object-insert" | "object-removal" | "evaluation";
-  appMode?: "inference" | "evaluation";
+  appMode?: "inference" | "benchmark";
   isMaskingMode: boolean;
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
   isResizing?: boolean; // For resize handle styling
+  imageDimensions?: { width: number; height: number } | null;
+  inputQuality: InputQualityPreset;
+  isApplyingQuality?: boolean;
   onImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onReferenceImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveImage: () => void;
@@ -132,6 +137,34 @@ interface SidebarProps {
   evaluationResponse?: any;
   onExportEvaluationJSON?: () => void;
   onExportEvaluationCSV?: () => void;
+  onInputQualityChange: (value: InputQualityPreset) => void;
+  // Benchmark mode props
+  benchmarkFolder?: string;
+  benchmarkValidation?: {
+    success: boolean;
+    message: string;
+    image_count: number;
+    details?: Record<string, number>;
+  } | null;
+  benchmarkSampleCount?: number;
+  benchmarkTask?: "white-balance" | "object-insert" | "object-removal";
+  isRunningBenchmark?: boolean;
+  isValidatingBenchmark?: boolean;
+  benchmarkProgress?: {
+    current: number;
+    total: number;
+    currentImage?: string;
+  } | null;
+  benchmarkResults?: any;
+  onBenchmarkFolderChange?: (path: string) => void;
+  onBenchmarkFolderValidate?: (file: File | string) => void;
+  onBenchmarkSampleCountChange?: (count: number) => void;
+  onBenchmarkTaskChange?: (
+    task: "white-balance" | "object-insert" | "object-removal"
+  ) => void;
+  benchmarkPrompt?: string;
+  onBenchmarkPromptChange?: (prompt: string) => void;
+  onRunBenchmark?: () => void;
 }
 
 export default function Sidebar({
@@ -145,6 +178,9 @@ export default function Sidebar({
   maskBrushSize,
   maskToolType = "brush",
   isResizing = false,
+  imageDimensions = null,
+  inputQuality,
+  isApplyingQuality = false,
   onImageUpload,
   onReferenceImageUpload,
   onRemoveImage,
@@ -211,6 +247,23 @@ export default function Sidebar({
   evaluationResponse = null,
   onExportEvaluationJSON,
   onExportEvaluationCSV,
+  onInputQualityChange,
+  // Benchmark props with defaults
+  benchmarkFolder = "",
+  benchmarkValidation = null,
+  benchmarkSampleCount = 0,
+  benchmarkTask = "object-removal",
+  isRunningBenchmark = false,
+  isValidatingBenchmark = false,
+  benchmarkProgress = null,
+  benchmarkResults = null,
+  onBenchmarkFolderChange,
+  onBenchmarkFolderValidate,
+  onBenchmarkSampleCountChange,
+  onBenchmarkTaskChange,
+  benchmarkPrompt = "",
+  onBenchmarkPromptChange,
+  onRunBenchmark,
 }: SidebarProps) {
   // Translation hook
   const { t } = useLanguage();
@@ -218,6 +271,53 @@ export default function Sidebar({
   // Determine if we're in "editing done" state (comparison mode)
   const isEditingDone =
     originalImage && modifiedImage && originalImage !== modifiedImage;
+
+  const inputQualityOptions: {
+    value: InputQualityPreset;
+    label: string;
+    ratio: string;
+    description: string;
+  }[] = [
+    {
+      value: "super_low",
+      label: "Super Low",
+      ratio: "1/16",
+      description: "Nhanh nhất, phù hợp để duyệt bố cục trước khi tinh chỉnh.",
+    },
+    {
+      value: "low",
+      label: "Low",
+      ratio: "1/8",
+      description: "Tiết kiệm VRAM, phù hợp khi cần xem nhanh kết quả.",
+    },
+    {
+      value: "medium",
+      label: "Medium",
+      ratio: "1/4",
+      description: "Cân bằng giữa chất lượng và tốc độ.",
+    },
+    {
+      value: "high",
+      label: "High",
+      ratio: "1/2",
+      description: "Chi tiết cao nhưng vẫn tối ưu tài nguyên.",
+    },
+    {
+      value: "original",
+      label: "Original",
+      ratio: "1/1",
+      description: "Giữ nguyên kích thước gốc, tốn tài nguyên nhất.",
+    },
+  ];
+
+  const selectedQuality = inputQualityOptions.find(
+    (option) => option.value === inputQuality
+  );
+
+  const showOriginalWarning =
+    inputQuality === "original" &&
+    imageDimensions &&
+    Math.max(imageDimensions.width, imageDimensions.height) >= 2048;
   return (
     <div
       className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 sidebar-scrollable ${
@@ -245,8 +345,8 @@ export default function Sidebar({
             paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
           }}
         >
-          {/* Image Upload Section */}
-          {!isEditingDone && (
+          {/* Image Upload Section - Only show in inference mode */}
+          {!isEditingDone && appMode === "inference" && (
             <div className="pb-4 border-b border-[var(--border-color)]">
               <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                 {t("sidebar.imageUpload")}
@@ -278,6 +378,70 @@ export default function Sidebar({
             </div>
           )}
 
+          {/* Input Quality Section - Only show in inference mode */}
+          {!isEditingDone && appMode === "inference" && uploadedImage && (
+            <div className="pb-4 border-b border-[var(--border-color)]">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-[var(--text-primary)] font-medium text-sm lg:text-base">
+                  Chất lượng xử lý
+                </h3>
+                <button
+                  type="button"
+                  className="text-[var(--text-secondary)] hover:text-[var(--primary-accent)] transition-colors"
+                  title="Giảm kích thước ảnh đầu vào để tiết kiệm VRAM. Mức thấp hơn giúp chạy nhanh hơn nhưng ít chi tiết hơn."
+                >
+                  <FaQuestionCircle className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  {inputQualityOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => onInputQualityChange(option.value)}
+                      disabled={isApplyingQuality}
+                      className={`px-3 py-2 rounded text-sm border transition-colors text-left ${
+                        inputQuality === option.value
+                          ? "bg-[var(--primary-accent)] text-white border-[var(--primary-accent)]"
+                          : "bg-[var(--secondary-bg)] text-[var(--text-primary)] border-[var(--border-color)] hover:bg-[var(--hover-bg)]"
+                      } ${
+                        isApplyingQuality ? "opacity-60 cursor-not-allowed" : ""
+                      }`}
+                    >
+                      <div className="flex items-center justify-between font-medium">
+                        <span>{option.label}</span>
+                        <span className="text-xs opacity-80">
+                          {option.ratio}
+                        </span>
+                      </div>
+                      <p className="text-[10px] mt-1 opacity-80">
+                        {option.description}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+                {selectedQuality && (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Đang chọn: {selectedQuality.label} ({selectedQuality.ratio}{" "}
+                    kích thước gốc)
+                  </p>
+                )}
+                {isApplyingQuality && (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Đang áp dụng chất lượng mới, vui lòng chờ...
+                  </p>
+                )}
+                {showOriginalWarning && (
+                  <p className="text-xs text-yellow-400">
+                    Ảnh lớn ({imageDimensions?.width}×{imageDimensions?.height}
+                    ). Mức Original có thể tốn rất nhiều VRAM, cân nhắc chọn
+                    High hoặc Medium nếu gặp lỗi OOM.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Editing Done Message */}
           {isEditingDone && (
             <div className="bg-[var(--secondary-bg)] border border-[var(--success)] rounded-lg p-4 text-center">
@@ -293,27 +457,32 @@ export default function Sidebar({
               </p>
               <div className="space-y-2">
                 <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => {
-                    if (modifiedImage) {
-                      const link = document.createElement("a");
-                      link.href = modifiedImage;
-                      link.download = `artmancer-edited-${Date.now()}.png`;
-                      document.body.appendChild(link);
-                      link.click();
-                      document.body.removeChild(link);
-                    }
-                  }}
+                  <button
+                    onClick={() => {
+                      if (modifiedImage) {
+                        const link = document.createElement("a");
+                        link.href = modifiedImage;
+                        link.download = `artmancer-edited-${Date.now()}.png`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }
+                    }}
                     className="px-3 py-2 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-2"
-                >
-                  <FaDownload className="w-3 h-3" />
-                  {t("sidebar.downloadImage")}
-                </button>
+                  >
+                    <FaDownload className="w-3 h-3" />
+                    {t("sidebar.downloadImage")}
+                  </button>
                   {lastRequestId && (
                     <button
                       onClick={() => {
-                        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8003';
-                        window.open(`${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`, '_blank');
+                        const apiUrl =
+                          process.env.NEXT_PUBLIC_API_URL ||
+                          "http://localhost:8003";
+                        window.open(
+                          `${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`,
+                          "_blank"
+                        );
                       }}
                       className="px-3 py-2 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-[var(--border-color)]"
                       title="Download visualization (original + generated images)"
@@ -398,121 +567,121 @@ export default function Sidebar({
           {!isEditingDone &&
             appMode === "inference" &&
             aiTask === "white-balance" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.whiteBalanceSettings")}
-              </h3>
-              <div className="space-y-4">
-                {/* Method Selection */}
-                <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.method")}
-                  </label>
-                  <select
-                    onChange={(e) => {
+              <div className="pb-4 border-b border-[var(--border-color)]">
+                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                  {t("sidebar.whiteBalanceSettings")}
+                </h3>
+                <div className="space-y-4">
+                  {/* Method Selection */}
+                  <div>
+                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                      {t("sidebar.method")}
+                    </label>
+                    <select
+                      onChange={(e) => {
                         const method = e.target.value as
                           | "auto"
                           | "manual"
                           | "ai";
-                      onWhiteBalance?.(method);
-                    }}
-                    className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
-                  >
-                    <option value="auto">
-                      {t("sidebar.autoWhiteBalance")}
-                    </option>
-                    <option value="manual">
-                      {t("sidebar.manualWhiteBalance")}
-                    </option>
-                    <option value="ai">{t("sidebar.aiWhiteBalance")}</option>
-                  </select>
-                </div>
-
-                {/* Manual Controls */}
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.temperature")}: {whiteBalanceTemperature}
-                    </label>
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      value={whiteBalanceTemperature}
-                      onChange={(e) =>
-                        onWhiteBalanceTemperatureChange?.(
-                          parseInt(e.target.value)
-                        )
-                      }
-                      className="w-full"
-                    />
+                        onWhiteBalance?.(method);
+                      }}
+                      className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
+                    >
+                      <option value="auto">
+                        {t("sidebar.autoWhiteBalance")}
+                      </option>
+                      <option value="manual">
+                        {t("sidebar.manualWhiteBalance")}
+                      </option>
+                      <option value="ai">{t("sidebar.aiWhiteBalance")}</option>
+                    </select>
                   </div>
-                  <div>
-                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.tint")}: {whiteBalanceTint}
-                    </label>
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      value={whiteBalanceTint}
-                      onChange={(e) =>
-                        onWhiteBalanceTintChange?.(parseInt(e.target.value))
-                      }
-                      className="w-full"
-                    />
+
+                  {/* Manual Controls */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                        {t("sidebar.temperature")}: {whiteBalanceTemperature}
+                      </label>
+                      <input
+                        type="range"
+                        min="-100"
+                        max="100"
+                        value={whiteBalanceTemperature}
+                        onChange={(e) =>
+                          onWhiteBalanceTemperatureChange?.(
+                            parseInt(e.target.value)
+                          )
+                        }
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                        {t("sidebar.tint")}: {whiteBalanceTint}
+                      </label>
+                      <input
+                        type="range"
+                        min="-100"
+                        max="100"
+                        value={whiteBalanceTint}
+                        onChange={(e) =>
+                          onWhiteBalanceTintChange?.(parseInt(e.target.value))
+                        }
+                        className="w-full"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
           {/* Reference Image Upload (only for object insert) - Only in inference mode */}
           {!isEditingDone &&
             appMode === "inference" &&
             aiTask === "object-insert" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.referenceImage")}
-              </h3>
-              <div className="space-y-3">
-                <label
-                  htmlFor="reference-image-upload"
-                  className="w-full px-4 py-3 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-secondary)] hover:text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2 border-2 border-dashed border-[var(--primary-accent)]"
-                >
-                  <FaImage className="w-4 h-4" />
-                  {t("sidebar.chooseReference")}
-                </label>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/webp"
-                  onChange={onReferenceImageUpload}
-                  className="hidden"
-                  id="reference-image-upload"
-                />
-                {referenceImage && (
-                  <div className="space-y-2">
-                    <div className="relative w-full h-24 bg-[var(--secondary-bg)] rounded-lg overflow-hidden">
-                      <img
-                        src={referenceImage}
-                        alt="Reference"
-                        className="w-full h-full object-cover"
-                      />
+              <div className="pb-4 border-b border-[var(--border-color)]">
+                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                  {t("sidebar.referenceImage")}
+                </h3>
+                <div className="space-y-3">
+                  <label
+                    htmlFor="reference-image-upload"
+                    className="w-full px-4 py-3 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-secondary)] hover:text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2 border-2 border-dashed border-[var(--primary-accent)]"
+                  >
+                    <FaImage className="w-4 h-4" />
+                    {t("sidebar.chooseReference")}
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/webp"
+                    onChange={onReferenceImageUpload}
+                    className="hidden"
+                    id="reference-image-upload"
+                  />
+                  {referenceImage && (
+                    <div className="space-y-2">
+                      <div className="relative w-full h-24 bg-[var(--secondary-bg)] rounded-lg overflow-hidden">
+                        <img
+                          src={referenceImage}
+                          alt="Reference"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <button
+                        onClick={onRemoveReferenceImage}
+                        className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
+                      >
+                        {t("sidebar.removeReference")}
+                      </button>
                     </div>
-                    <button
-                      onClick={onRemoveReferenceImage}
-                      className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
-                    >
-                      {t("sidebar.removeReference")}
-                    </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Evaluation Section */}
-          {!isEditingDone && appMode === "evaluation" && (
+          {/* Benchmark Mode Section */}
+          {!isEditingDone && appMode === "benchmark" && (
             <Box
               sx={{
                 pb: 3,
@@ -528,7 +697,7 @@ export default function Sidebar({
                   color: "text.primary",
                 }}
               >
-                {t("sidebar.evaluationMode")}
+                🎯 Benchmark Mode
               </Typography>
 
               {/* Task Selection */}
@@ -537,342 +706,703 @@ export default function Sidebar({
                   variant="caption"
                   sx={{ color: "text.secondary", mb: 1, display: "block" }}
                 >
-                  {t("sidebar.aiTask")}
+                  Task Type
                 </Typography>
                 <ToggleButtonGroup
-                  value={evaluationTask}
+                  value={benchmarkTask}
                   exclusive
                   onChange={(_, value) => {
                     if (value !== null) {
-                      onEvaluationTaskChange?.(value);
+                      onBenchmarkTaskChange?.(value);
                     }
                   }}
                   fullWidth
                   size="small"
                 >
-                  <ToggleButton value="white-balance">
-                    {t("sidebar.whiteBalance")}
-                  </ToggleButton>
                   <ToggleButton value="object-removal">
-                    {t("sidebar.objectRemoval")}
+                    Object Removal ✅
                   </ToggleButton>
-                  <ToggleButton value="object-insert">
-                    {t("sidebar.objectInsert")}
+                  <ToggleButton value="white-balance" disabled>
+                    White Balancing 🚧
+                  </ToggleButton>
+                  <ToggleButton value="object-insert" disabled>
+                    Object Insertion 🚧
                   </ToggleButton>
                 </ToggleButtonGroup>
               </Box>
 
-              {/* Mode Selection */}
-              <Box sx={{ mb: 3 }}>
+              {/* Benchmark Dataset Upload */}
+              <Box sx={{ mb: 2 }}>
                 <Typography
                   variant="caption"
                   sx={{ color: "text.secondary", mb: 1, display: "block" }}
                 >
-                  {t("sidebar.evaluationMode")}
+                  📁 Benchmark Dataset
                 </Typography>
-                <ToggleButtonGroup
-                  value={evaluationMode}
-                  exclusive
-                  onChange={(_, value) => {
-                    if (value !== null) {
-                      onEvaluationModeChange?.(value);
+                <Typography
+                  variant="caption"
+                  sx={{
+                    color: "text.secondary",
+                    fontSize: "0.7rem",
+                    display: "block",
+                    mb: 1,
+                  }}
+                >
+                  Upload ZIP file or folder containing: input/, mask/,
+                  groundtruth/
+                </Typography>
+
+                {/* ZIP Upload */}
+                <input
+                  type="file"
+                  accept=".zip"
+                  id="benchmark-zip-upload"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      console.log(
+                        "📤 ZIP file selected:",
+                        file.name,
+                        file.size,
+                        "bytes"
+                      );
+                      // Validate first (this will also set the file and folder name)
+                      if (onBenchmarkFolderValidate) {
+                        onBenchmarkFolderValidate(file);
+                      } else {
+                        // Fallback: just set folder name if validate handler not provided
+                        onBenchmarkFolderChange?.(file.name);
+                      }
+                    } else {
+                      console.warn("⚠️ No file selected");
                     }
                   }}
-                  fullWidth
-                  size="small"
-                >
-                  <ToggleButton value="single">
-                    {t("sidebar.singleImage")}
-                  </ToggleButton>
-                  <ToggleButton value="multiple">
-                    {t("sidebar.multipleImages")}
-                  </ToggleButton>
-                </ToggleButtonGroup>
+                />
+                <label htmlFor="benchmark-zip-upload">
+                  <Button
+                    component="span"
+                    variant="outlined"
+                    fullWidth
+                    size="small"
+                    startIcon={<CloudUploadIcon />}
+                    sx={{ textTransform: "none", mb: 1 }}
+                  >
+                    📦 Upload ZIP File
+                  </Button>
+                </label>
+
+                {/* Folder Upload */}
+                <input
+                  type="file"
+                  id="benchmark-folder-upload"
+                  style={{ display: "none" }}
+                  {...({ webkitdirectory: "", directory: "" } as any)}
+                  multiple
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (files.length > 0) {
+                      console.log("📁 Folder selected:", files.length, "files");
+                      // Create a FileList-like object or pass files array
+                      // For now, we'll create a ZIP-like structure on frontend
+                      // Or pass to backend as folder structure
+                      if (onBenchmarkFolderValidate) {
+                        // Pass files as a special marker - backend will handle folder structure
+                        // We'll need to update handler to accept FileList
+                        const folderName =
+                          files[0]?.webkitRelativePath?.split("/")[0] ||
+                          "folder";
+                        onBenchmarkFolderChange?.(folderName);
+                        // Create a FormData with all files
+                        const formData = new FormData();
+                        files.forEach((file) => {
+                          const relativePath =
+                            file.webkitRelativePath || file.name;
+                          formData.append("files", file, relativePath);
+                        });
+                        // We'll need to update the validation handler to accept folder uploads
+                        // For now, show a message that folder upload needs backend support
+                        console.log("📁 Folder upload:", formData);
+                        // Call a new handler for folder upload
+                        if (
+                          (onBenchmarkFolderValidate as any).handleFolderUpload
+                        ) {
+                          (onBenchmarkFolderValidate as any).handleFolderUpload(
+                            files
+                          );
+                        } else {
+                          // Fallback: try to validate as folder structure
+                          onBenchmarkFolderValidate(files as any);
+                        }
+                      }
+                    } else {
+                      console.warn("⚠️ No files selected");
+                    }
+                  }}
+                />
+                <label htmlFor="benchmark-folder-upload">
+                  <Button
+                    component="span"
+                    variant="outlined"
+                    fullWidth
+                    size="small"
+                    startIcon={<CloudUploadIcon />}
+                    disabled={isValidatingBenchmark}
+                    sx={{ textTransform: "none" }}
+                  >
+                    {isValidatingBenchmark
+                      ? "Đang kiểm tra..."
+                      : "📁 Upload Folder"}
+                  </Button>
+                </label>
+                {benchmarkFolder && (
+                  <Box
+                    sx={{
+                      mt: 1,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1,
+                    }}
+                  >
+                    <Chip
+                      label={benchmarkFolder}
+                      size="small"
+                      sx={{ fontSize: "0.7rem" }}
+                    />
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        onBenchmarkFolderChange?.("");
+                        // Reset validation state
+                        if (onBenchmarkFolderValidate) {
+                          // Clear validation by passing empty string
+                        }
+                        // Reset file input
+                        const input = document.getElementById(
+                          "benchmark-zip-upload"
+                        ) as HTMLInputElement;
+                        if (input) input.value = "";
+                      }}
+                      sx={{ minWidth: "auto", px: 1 }}
+                    >
+                      ✕
+                    </Button>
+                  </Box>
+                )}
               </Box>
 
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                {/* Single Image Pair Upload - Only show when mode is single */}
-                {evaluationMode === "single" && (
+              {/* Validation Status */}
+              {isValidatingBenchmark && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    bgcolor: "info.light",
+                    borderRadius: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1,
+                  }}
+                >
                   <Box
-                    sx={{ display: "flex", flexDirection: "column", gap: 2 }}
-                  >
-                    <Typography
-                      variant="caption"
-                      sx={{ color: "text.secondary", fontWeight: 500 }}
-                    >
-                      {t("sidebar.uploadSinglePair")}
-                    </Typography>
-                    <Box
-                      sx={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: 1.5,
-                      }}
-                    >
-                      <Box>
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/jpg,image/webp"
-                          id="eval-single-original-upload"
-                          style={{ display: "none" }}
-                          onChange={onEvaluationSingleOriginalUpload}
-                        />
-                        <label htmlFor="eval-single-original-upload">
-                          <Button
-                            component="span"
-                            variant="outlined"
-                            fullWidth
-                            size="small"
-                            startIcon={<CloudUploadIcon />}
-                            sx={{
-                              textTransform: "none",
-                              fontSize: "0.75rem",
-                            }}
-                          >
-                            {t("sidebar.uploadOriginal")}
-                          </Button>
-                        </label>
-                        {evaluationSingleOriginal && (
-                          <Box
-                            sx={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              mt: 0.5,
-                            }}
-                          >
-                            <Chip
-                              icon={<CheckCircleIcon />}
-                              label="Loaded"
-                              size="small"
-                              color="success"
-                              sx={{ height: 20, fontSize: "0.65rem" }}
-                            />
-                          </Box>
-                        )}
-                      </Box>
-                      <Box>
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/jpg,image/webp"
-                          id="eval-single-target-upload"
-                          style={{ display: "none" }}
-                          onChange={onEvaluationSingleTargetUpload}
-                        />
-                        <label htmlFor="eval-single-target-upload">
-                          <Button
-                            component="span"
-                            variant="outlined"
-                            fullWidth
-                            size="small"
-                            startIcon={<CloudUploadIcon />}
-                            sx={{
-                              textTransform: "none",
-                              fontSize: "0.75rem",
-                            }}
-                          >
-                            {t("sidebar.uploadTarget")}
-                          </Button>
-                        </label>
-                        {evaluationSingleTarget && (
-                          <Box
-                            sx={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              mt: 0.5,
-                            }}
-                          >
-                            <Chip
-                              icon={<CheckCircleIcon />}
-                              label="Loaded"
-                              size="small"
-                              color="success"
-                              sx={{ height: 20, fontSize: "0.65rem" }}
-                            />
-                          </Box>
-                        )}
-                      </Box>
-                    </Box>
-                  </Box>
-                )}
-
-                {/* Multiple Image Pairs Upload - Only show when mode is multiple */}
-                {evaluationMode === "multiple" && (
-                  <Box
-                    sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}
-                  >
-                    <Typography
-                      variant="caption"
-                      sx={{ color: "text.secondary", fontWeight: 500 }}
-                    >
-                      {t("sidebar.uploadMultiplePairs")}
-                    </Typography>
-                    
-                    {/* Original Images Folder Upload */}
-                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                      <Typography
-                        variant="caption"
-                        sx={{ color: "text.secondary", fontSize: "0.75rem" }}
-                      >
-                        {t("sidebar.originalImagesFolder")} (1.png, 2.png, ...)
-                      </Typography>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/jpg,image/webp"
-                        multiple
-                        webkitdirectory=""
-                        directory=""
-                        id="eval-original-folder-upload"
-                        style={{ display: "none" }}
-                        onChange={onEvaluationOriginalFolderUpload}
-                      />
-                      <label htmlFor="eval-original-folder-upload">
-                        <Button
-                          component="span"
-                          variant="outlined"
-                          fullWidth
-                          size="small"
-                          startIcon={<CloudUploadIcon />}
-                          sx={{ textTransform: "none" }}
-                        >
-                          {t("sidebar.selectOriginalFolder")}
-                        </Button>
-                      </label>
-                    </Box>
-
-                    {/* Target Images Folder Upload */}
-                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                      <Typography
-                        variant="caption"
-                        sx={{ color: "text.secondary", fontSize: "0.75rem" }}
-                      >
-                        {t("sidebar.targetImagesFolder")} (1.png, 2.png, ...)
-                      </Typography>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/jpg,image/webp"
-                        multiple
-                        webkitdirectory=""
-                        directory=""
-                        id="eval-target-folder-upload"
-                        style={{ display: "none" }}
-                        onChange={onEvaluationTargetFolderUpload}
-                      />
-                      <label htmlFor="eval-target-folder-upload">
-                        <Button
-                          component="span"
-                          variant="outlined"
-                          fullWidth
-                          size="small"
-                          startIcon={<CloudUploadIcon />}
-                          sx={{ textTransform: "none" }}
-                        >
-                          {t("sidebar.selectTargetFolder")}
-                        </Button>
-                      </label>
-                    </Box>
-
-                    {evaluationImagePairs.length > 0 && (
-                      <Chip
-                        label={`${evaluationImagePairs.length} ${t(
-                          "sidebar.pairsLoaded"
-                        )}`}
-                        size="small"
-                        color="primary"
-                        sx={{ alignSelf: "flex-start" }}
-                      />
-                    )}
-                  </Box>
-                )}
-
-                {/* Reference Image - Only for object-insert task */}
-                {evaluationTask === "object-insert" && (
-                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                    <Typography
-                      variant="caption"
-                      sx={{ color: "text.secondary", fontWeight: 500 }}
-                    >
-                      {t("sidebar.referenceImage")} ({t("sidebar.required")})
-                    </Typography>
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/jpg,image/webp"
-                      id="eval-reference-upload"
-                      style={{ display: "none" }}
-                      onChange={onEvaluationReferenceImageUpload}
-                    />
-                    <label htmlFor="eval-reference-upload">
-                      <Button
-                        component="span"
-                        variant="outlined"
-                        fullWidth
-                        size="small"
-                        startIcon={<ImageIcon />}
-                        sx={{ textTransform: "none" }}
-                      >
-                        {t("sidebar.chooseReference")}
-                      </Button>
-                    </label>
-                    {evaluationReferenceImage && (
-                      <Chip
-                        icon={<CheckCircleIcon />}
-                        label={t("sidebar.loaded")}
-                        size="small"
-                        color="success"
-                        sx={{ alignSelf: "flex-start" }}
-                      />
-                    )}
-                  </Box>
-                )}
-
-                {/* Conditional Images (Optional) - Show for both modes */}
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                    sx={{
+                      width: 16,
+                      height: 16,
+                      border: "2px solid",
+                      borderColor: "info.main",
+                      borderTopColor: "transparent",
+                      borderRadius: "50%",
+                      animation: "spin 1s linear infinite",
+                      "@keyframes spin": {
+                        "0%": { transform: "rotate(0deg)" },
+                        "100%": { transform: "rotate(360deg)" },
+                      },
+                    }}
+                  />
                   <Typography
                     variant="caption"
-                    sx={{ color: "text.secondary", fontWeight: 500 }}
+                    sx={{
+                      color: "info.dark",
+                      fontSize: "0.75rem",
+                    }}
                   >
-                    {t("sidebar.uploadConditionalImages")} (
-                    {t("sidebar.optional")})
+                    Đang kiểm tra cấu trúc folder/file...
                   </Typography>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/jpg,image/webp"
-                    multiple
-                    webkitdirectory=""
-                    directory=""
-                    id="eval-conditional-upload"
-                    style={{ display: "none" }}
-                    onChange={onEvaluationConditionalImagesUpload}
+                </Box>
+              )}
+              {!isValidatingBenchmark && benchmarkValidation && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    bgcolor: benchmarkValidation.success
+                      ? "success.light"
+                      : "error.light",
+                    borderRadius: 1,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: benchmarkValidation.success
+                        ? "success.dark"
+                        : "error.dark",
+                      fontSize: "0.75rem",
+                      display: "block",
+                    }}
+                  >
+                    {benchmarkValidation.message}
+                  </Typography>
+                  {benchmarkValidation.success &&
+                    benchmarkValidation.details && (
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "text.secondary",
+                          fontSize: "0.7rem",
+                          display: "block",
+                          mt: 0.5,
+                        }}
+                      >
+                        Input: {benchmarkValidation.details.input || 0} | Mask:{" "}
+                        {benchmarkValidation.details.mask || 0} | Groundtruth:{" "}
+                        {benchmarkValidation.details.groundtruth || 0}
+                      </Typography>
+                    )}
+                </Box>
+              )}
+
+              {/* Sample Count Selection */}
+              {benchmarkValidation?.success && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography
+                    variant="caption"
+                    sx={{ color: "text.secondary", mb: 1, display: "block" }}
+                  >
+                    🔢 Sample Count
+                  </Typography>
+                  <TextField
+                    type="number"
+                    value={benchmarkSampleCount || ""}
+                    onChange={(e) => {
+                      const inputValue = e.target.value.trim();
+
+                      // Handle empty input
+                      if (inputValue === "") {
+                        onBenchmarkSampleCountChange?.(0);
+                        return;
+                      }
+
+                      const value = parseInt(inputValue, 10);
+                      const totalImages = benchmarkValidation?.image_count || 0;
+
+                      // Validation logic
+                      if (isNaN(value)) {
+                        // Invalid input, reset to 0
+                        onBenchmarkSampleCountChange?.(0);
+                        return;
+                      }
+
+                      if (value < 0) {
+                        // Negative value, fallback to 0 (all images)
+                        onBenchmarkSampleCountChange?.(0);
+                        return;
+                      }
+
+                      if (value > totalImages && totalImages > 0) {
+                        // Value exceeds total, fallback to total (all images)
+                        onBenchmarkSampleCountChange?.(totalImages);
+                        return;
+                      }
+
+                      // Valid value
+                      onBenchmarkSampleCountChange?.(value);
+                    }}
+                    onBlur={(e) => {
+                      // Ensure value is valid on blur
+                      const value = parseInt(e.target.value, 10) || 0;
+                      const totalImages = benchmarkValidation?.image_count || 0;
+
+                      if (value < 0) {
+                        onBenchmarkSampleCountChange?.(0);
+                      } else if (value > totalImages && totalImages > 0) {
+                        onBenchmarkSampleCountChange?.(totalImages);
+                      } else {
+                        onBenchmarkSampleCountChange?.(value);
+                      }
+                    }}
+                    inputProps={{
+                      min: 0,
+                      max: benchmarkValidation.image_count || 0,
+                      step: 1,
+                    }}
+                    fullWidth
+                    size="small"
+                    placeholder="0 = all images"
+                    helperText={(() => {
+                      const total = benchmarkValidation.image_count || 0;
+                      const current = benchmarkSampleCount || 0;
+
+                      if (current === 0) {
+                        return `Process all ${total} images`;
+                      } else if (current > total) {
+                        return `⚠️ Value exceeds total. Will process all ${total} images.`;
+                      } else if (current < 0) {
+                        return `⚠️ Invalid value. Will process all ${total} images.`;
+                      } else {
+                        return `Process ${current} randomly selected images (from ${total} total)`;
+                      }
+                    })()}
+                    error={
+                      benchmarkSampleCount !== undefined &&
+                      benchmarkSampleCount !== null &&
+                      (benchmarkSampleCount < 0 ||
+                        (benchmarkValidation?.image_count !== undefined &&
+                          benchmarkValidation.image_count > 0 &&
+                          benchmarkSampleCount >
+                            benchmarkValidation.image_count))
+                    }
+                    sx={{ mb: 1 }}
                   />
-                  <label htmlFor="eval-conditional-upload">
-                    <Button
-                      component="span"
-                      variant="outlined"
-                      fullWidth
-                      size="small"
-                      startIcon={<ImageIcon />}
-                      sx={{ textTransform: "none" }}
+
+                  {/* Validation messages */}
+                  {benchmarkSampleCount !== undefined &&
+                    benchmarkSampleCount !== null && (
+                      <>
+                        {benchmarkSampleCount < 0 && (
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              color: "error.main",
+                              fontSize: "0.7rem",
+                              display: "block",
+                              mt: 0.5,
+                            }}
+                          >
+                            ❌ Invalid: Negative values not allowed. Using 0
+                            (all images).
+                          </Typography>
+                        )}
+                        {benchmarkValidation?.image_count &&
+                          benchmarkSampleCount >
+                            benchmarkValidation.image_count && (
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: "warning.main",
+                                fontSize: "0.7rem",
+                                display: "block",
+                                mt: 0.5,
+                              }}
+                            >
+                              ⚠️ Only {benchmarkValidation.image_count} images
+                              available. Will process all{" "}
+                              {benchmarkValidation.image_count} images.
+                            </Typography>
+                          )}
+                        {benchmarkSampleCount > 0 &&
+                          benchmarkSampleCount <=
+                            (benchmarkValidation?.image_count || 0) && (
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: "success.main",
+                                fontSize: "0.7rem",
+                                display: "block",
+                                mt: 0.5,
+                              }}
+                            >
+                              ✅ Will randomly select {benchmarkSampleCount}{" "}
+                              images from{" "}
+                              {benchmarkValidation?.image_count || 0} total.
+                            </Typography>
+                          )}
+                      </>
+                    )}
+
+                  {/* Info box explaining sample selection */}
+                  <Box
+                    sx={{
+                      mt: 1,
+                      p: 1,
+                      bgcolor: "background.paper",
+                      borderRadius: 1,
+                      border: "1px solid",
+                      borderColor: "divider",
+                    }}
+                  >
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        color: "text.secondary",
+                        fontSize: "0.7rem",
+                        display: "block",
+                      }}
                     >
-                      Upload Conditional Images
-                    </Button>
-                  </label>
-                  {evaluationConditionalImages.length > 0 && (
-                    <Chip
-                      label={`${evaluationConditionalImages.length} ${t(
-                        "sidebar.imagesLoaded"
-                      )}`}
-                      size="small"
-                      color="primary"
-                      sx={{ alignSelf: "flex-start" }}
-                    />
+                      <strong>Sample Selection Rules:</strong>
+                    </Typography>
+                    <ul
+                      style={{
+                        margin: "4px 0",
+                        paddingLeft: "20px",
+                        fontSize: "0.7rem",
+                        color: "var(--text-secondary)",
+                      }}
+                    >
+                      <li>
+                        <strong>0</strong> = Process all images
+                      </li>
+                      <li>
+                        <strong>1-N</strong> = Randomly select N images
+                      </li>
+                      <li>
+                        <strong>&gt; Total</strong> = Fallback to all images
+                        (with warning)
+                      </li>
+                      <li>
+                        <strong>&lt; 0</strong> = Fallback to all images (with
+                        warning)
+                      </li>
+                    </ul>
+                  </Box>
+                </Box>
+              )}
+
+              {/* Progress Indicator */}
+              {isRunningBenchmark && benchmarkProgress && (
+                <Box
+                  sx={{ mb: 2, p: 1.5, bgcolor: "info.light", borderRadius: 1 }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "info.dark",
+                      fontWeight: 500,
+                      display: "block",
+                    }}
+                  >
+                    Processing Benchmark...
+                  </Typography>
+                  <Box sx={{ mt: 1, mb: 1 }}>
+                    <Box
+                      sx={{
+                        width: "100%",
+                        height: 8,
+                        bgcolor: "grey.300",
+                        borderRadius: 1,
+                        overflow: "hidden",
+                      }}
+                    >
+                      <Box
+                        sx={{
+                          width: `${
+                            (benchmarkProgress.current /
+                              benchmarkProgress.total) *
+                            100
+                          }%`,
+                          height: "100%",
+                          bgcolor: "primary.main",
+                          transition: "width 0.3s ease",
+                        }}
+                      />
+                    </Box>
+                  </Box>
+                  <Typography
+                    variant="caption"
+                    sx={{ color: "text.secondary", fontSize: "0.7rem" }}
+                  >
+                    {benchmarkProgress.current} / {benchmarkProgress.total} (
+                    {Math.round(
+                      (benchmarkProgress.current / benchmarkProgress.total) *
+                        100
+                    )}
+                    %)
+                  </Typography>
+                  {benchmarkProgress.currentImage && (
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        color: "text.secondary",
+                        fontSize: "0.7rem",
+                        display: "block",
+                        mt: 0.5,
+                      }}
+                    >
+                      Current: {benchmarkProgress.currentImage}
+                    </Typography>
                   )}
                 </Box>
+              )}
+
+              {/* Info: Prompt is entered in Header */}
+              <Box sx={{ mb: 2, p: 1, bgcolor: "info.light", borderRadius: 1 }}>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    color: "info.dark",
+                    fontSize: "0.7rem",
+                    display: "block",
+                  }}
+                >
+                  ℹ️ Enter prompt in the header above. It will be used for ALL
+                  images in the benchmark.
+                </Typography>
               </Box>
 
-              {/* Evaluation Results Section */}
-              {evaluationResults && evaluationResults.length > 0 && (
-                <Box sx={{ mt: 3, pt: 3, borderTop: 1, borderColor: "divider" }}>
+              {/* Task-specific Settings */}
+              {benchmarkTask === "object-removal" && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.secondary",
+                      mb: 1,
+                      display: "block",
+                      fontWeight: 500,
+                    }}
+                  >
+                    Object Removal Settings
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.secondary",
+                      fontSize: "0.7rem",
+                      display: "block",
+                      mb: 1,
+                      fontStyle: "italic",
+                    }}
+                  >
+                    Model: Qwen Image Edit 2509
+                  </Typography>
+                  {/* NOTE: NO White Balance Settings for Object Removal */}
+                  {/* White balance is handled separately in White Balancing task */}
+                </Box>
+              )}
+
+              {benchmarkTask === "white-balance" && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    bgcolor: "warning.light",
+                    borderRadius: 1,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "warning.dark",
+                      fontSize: "0.75rem",
+                      display: "block",
+                    }}
+                  >
+                    ⚠️ White Balancing task is not yet implemented.
+                    <br />
+                    Coming soon with Pix2Pix model integration.
+                  </Typography>
+                  {/* TODO: Implement White Balancing specific settings */}
+                  {/* 
+                    TODO: Add the following settings:
+                    - Color temperature adjustment range
+                    - Tint correction
+                    - Auto white balance mode (on/off)
+                    - Reference white point selection
+                    - Illuminant type (D65, A, etc.)
+                    - Strength of correction (0-100%)
+                  */}
+                </Box>
+              )}
+
+              {benchmarkTask === "object-insert" && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    bgcolor: "warning.light",
+                    borderRadius: 1,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "warning.dark",
+                      fontSize: "0.75rem",
+                      display: "block",
+                    }}
+                  >
+                    ⚠️ Object Insertion task is not yet implemented.
+                    <br />
+                    Will use Qwen Image Edit 2509 with insertion mode.
+                  </Typography>
+                  {/* TODO: Implement Object Insertion specific settings */}
+                  {/* 
+                    TODO: Add the following settings:
+                    - Object prompt/description input
+                    - Insertion position control
+                    - Scale/size adjustment
+                    - Blending mode (natural, artistic, etc.)
+                    - Shadow generation (on/off)
+                    - Lighting consistency (match scene lighting)
+                    - Perspective correction
+                  */}
+                </Box>
+              )}
+
+              {/* Requirements Checklist */}
+              {!isRunningBenchmark && (
+                <Box
+                  sx={{
+                    mb: 2,
+                    p: 1.5,
+                    bgcolor: "background.paper",
+                    borderRadius: 1,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.secondary",
+                      fontSize: "0.7rem",
+                      display: "block",
+                      mb: 1,
+                      fontWeight: 500,
+                    }}
+                  >
+                    Requirements to run benchmark:
+                  </Typography>
+                  <ul
+                    style={{
+                      margin: "4px 0",
+                      paddingLeft: "20px",
+                      fontSize: "0.7rem",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {benchmarkValidation?.success ? (
+                      <li style={{ color: "var(--success)" }}>
+                        ✅ Upload benchmark folder or ZIP
+                      </li>
+                    ) : (
+                      <li>❌ Upload benchmark folder or ZIP</li>
+                    )}
+                    <li>❌ Enter benchmark prompt (in header)</li>
+                    {benchmarkTask === "object-removal" ? (
+                      <li style={{ color: "var(--success)" }}>
+                        ✅ Task implemented
+                      </li>
+                    ) : (
+                      <li>❌ Task not yet implemented</li>
+                    )}
+                  </ul>
+                </Box>
+              )}
+
+              {/* Benchmark Results */}
+              {benchmarkResults && (
+                <Box
+                  sx={{ mt: 3, pt: 3, borderTop: 1, borderColor: "divider" }}
+                >
                   <Typography
                     variant="subtitle2"
                     sx={{
@@ -881,97 +1411,45 @@ export default function Sidebar({
                       color: "text.primary",
                     }}
                   >
-                    {t("sidebar.evaluationResults")}
+                    Benchmark Results
                   </Typography>
-
-                  {/* Summary */}
-                  {evaluationResponse && (
-                    <Box sx={{ mb: 2, p: 1.5, bgcolor: "background.paper", borderRadius: 1 }}>
-                      <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+                  {benchmarkResults.summary && (
+                    <Box
+                      sx={{
+                        mb: 2,
+                        p: 1.5,
+                        bgcolor: "background.paper",
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "text.secondary",
+                          display: "block",
+                          mb: 0.5,
+                        }}
+                      >
                         Summary
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                        {evaluationResponse.successful_evaluations || 0} / {evaluationResponse.total_pairs || 0} successful
+                        {benchmarkResults.summary.successful_evaluations || 0} /{" "}
+                        {benchmarkResults.summary.total_pairs || 0} successful
                       </Typography>
-                      {evaluationResponse.total_evaluation_time && (
-                        <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                          Total time: {evaluationResponse.total_evaluation_time.toFixed(2)}s
+                      {benchmarkResults.summary.total_generation_time && (
+                        <Typography
+                          variant="caption"
+                          sx={{ color: "text.secondary" }}
+                        >
+                          Total time:{" "}
+                          {benchmarkResults.summary.total_generation_time.toFixed(
+                            2
+                          )}
+                          s
                         </Typography>
                       )}
                     </Box>
                   )}
-
-                  {/* Results List */}
-                  <Box sx={{ mb: 2, maxHeight: 200, overflowY: "auto" }}>
-                    {evaluationResults.slice(0, 5).map((result, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          mb: 1,
-                          p: 1,
-                          bgcolor: result.success ? "success.light" : "error.light",
-                          borderRadius: 1,
-                          opacity: result.success ? 1 : 0.7,
-                        }}
-                      >
-                        <Typography variant="caption" sx={{ fontWeight: 500, display: "block" }}>
-                          {result.filename || `Result ${index + 1}`}
-                        </Typography>
-                        {result.success && result.metrics && (
-                          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 0.5 }}>
-                            {result.metrics.psnr && (
-                              <Chip
-                                label={`PSNR: ${result.metrics.psnr.toFixed(2)} dB`}
-                                size="small"
-                                sx={{ height: 20, fontSize: "0.65rem" }}
-                              />
-                            )}
-                            {result.metrics.ssim && (
-                              <Chip
-                                label={`SSIM: ${result.metrics.ssim.toFixed(3)}`}
-                                size="small"
-                                sx={{ height: 20, fontSize: "0.65rem" }}
-                              />
-                            )}
-                          </Box>
-                        )}
-                        {!result.success && result.error && (
-                          <Typography variant="caption" sx={{ color: "error.main", fontSize: "0.7rem" }}>
-                            {result.error}
-                          </Typography>
-                        )}
-                      </Box>
-                    ))}
-                    {evaluationResults.length > 5 && (
-                      <Typography variant="caption" sx={{ color: "text.secondary", fontStyle: "italic" }}>
-                        +{evaluationResults.length - 5} more results
-                      </Typography>
-                    )}
-                  </Box>
-
-                  {/* Export Buttons */}
-                  <Box sx={{ display: "flex", gap: 1 }}>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      fullWidth
-                      startIcon={<FaDownload />}
-                      onClick={onExportEvaluationJSON}
-                      sx={{ textTransform: "none", fontSize: "0.75rem" }}
-                    >
-                      Export JSON
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      fullWidth
-                      startIcon={<FaDownload />}
-                      onClick={onExportEvaluationCSV}
-                      sx={{ textTransform: "none", fontSize: "0.75rem" }}
-                    >
-                      Export CSV
-                    </Button>
-                  </Box>
                 </Box>
               )}
             </Box>
@@ -1049,15 +1527,17 @@ export default function Sidebar({
                             control={
                               <Checkbox
                                 checked={enableSmartMasking}
-                                onChange={(e) => onSmartMaskingChange(e.target.checked)}
+                                onChange={(e) =>
+                                  onSmartMaskingChange(e.target.checked)
+                                }
                                 disabled={isSmartMaskLoading}
                                 sx={{
-                                  color: 'var(--primary-accent)',
-                                  '&.Mui-checked': {
-                                    color: 'var(--primary-accent)',
+                                  color: "var(--primary-accent)",
+                                  "&.Mui-checked": {
+                                    color: "var(--primary-accent)",
                                   },
-                                  '&.Mui-disabled': {
-                                    color: 'var(--text-secondary)',
+                                  "&.Mui-disabled": {
+                                    color: "var(--text-secondary)",
                                   },
                                 }}
                               />
@@ -1104,47 +1584,51 @@ export default function Sidebar({
                       </div>
 
                       {maskToolType === "brush" && (
-                      <div>
-                        <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                          {t("sidebar.brushSize")}
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number"
-                            min="1"
-                            max="50"
-                            value={maskBrushSize}
-                            onChange={(e) => {
-                              const value = parseInt(e.target.value);
-                              if (!isNaN(value) && value >= 1 && value <= 50) {
-                                onMaskBrushSizeChange(value);
+                        <div>
+                          <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                            {t("sidebar.brushSize")}
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="1"
+                              max="50"
+                              value={maskBrushSize}
+                              onChange={(e) => {
+                                const value = parseInt(e.target.value);
+                                if (
+                                  !isNaN(value) &&
+                                  value >= 1 &&
+                                  value <= 50
+                                ) {
+                                  onMaskBrushSizeChange(value);
+                                }
+                              }}
+                              onBlur={(e) => {
+                                const value = parseInt(e.target.value);
+                                if (isNaN(value) || value < 1) {
+                                  onMaskBrushSizeChange(1);
+                                } else if (value > 50) {
+                                  onMaskBrushSizeChange(50);
+                                }
+                              }}
+                              className="w-16 px-2 py-1 text-sm bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
+                            />
+                            <span className="text-xs text-[var(--text-secondary)] mr-1">
+                              px
+                            </span>
+                            <input
+                              type="range"
+                              min="1"
+                              max="50"
+                              value={maskBrushSize}
+                              onChange={(e) =>
+                                onMaskBrushSizeChange(parseInt(e.target.value))
                               }
-                            }}
-                            onBlur={(e) => {
-                              const value = parseInt(e.target.value);
-                              if (isNaN(value) || value < 1) {
-                                onMaskBrushSizeChange(1);
-                              } else if (value > 50) {
-                                onMaskBrushSizeChange(50);
-                              }
-                            }}
-                            className="w-16 px-2 py-1 text-sm bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
-                          />
-                          <span className="text-xs text-[var(--text-secondary)] mr-1">
-                            px
-                          </span>
-                          <input
-                            type="range"
-                            min="1"
-                            max="50"
-                            value={maskBrushSize}
-                            onChange={(e) =>
-                              onMaskBrushSizeChange(parseInt(e.target.value))
-                            }
-                            className="flex-1 accent-[var(--primary-accent)]"
-                          />
+                              className="flex-1 accent-[var(--primary-accent)]"
+                            />
+                          </div>
                         </div>
-                      </div>
                       )}
                     </div>
                   )}
@@ -1166,31 +1650,33 @@ export default function Sidebar({
               </div>
             )}
 
-          {/* White Balance Settings (only for white balance task) */}
-          {!isEditingDone && aiTask === "white-balance" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.whiteBalanceSettings")}
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.autoCorrectionStrength")}: 80%
-                  </label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    defaultValue="80"
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
+          {/* White Balance Settings (only for white balance task in inference mode) */}
+          {!isEditingDone &&
+            appMode === "inference" &&
+            aiTask === "white-balance" && (
+              <div className="pb-4 border-b border-[var(--border-color)]">
+                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                  {t("sidebar.whiteBalanceSettings")}
+                </h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                      {t("sidebar.autoCorrectionStrength")}: 80%
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      defaultValue="80"
+                      className="w-full accent-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    {t("sidebar.aiAutoAdjust")}
+                  </p>
                 </div>
-                <p className="text-xs text-[var(--text-secondary)]">
-                  {t("sidebar.aiAutoAdjust")}
-                </p>
               </div>
-            </div>
-          )}
+            )}
 
           {/* Advanced Settings */}
           {!isEditingDone && (
@@ -1258,7 +1744,6 @@ export default function Sidebar({
                     <span>{t("sidebar.followPromptStrictly")}</span>
                   </div>
                 </div>
-
 
                 {/* Steps (Updated from existing) */}
                 <div>

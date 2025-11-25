@@ -15,6 +15,7 @@ import {
   useImageTransform,
   useImageGeneration,
 } from "@/hooks";
+import type { InputQualityPreset } from "@/services/api";
 
 export default function Home() {
   // Basic UI state
@@ -29,8 +30,8 @@ export default function Home() {
   const [notificationMessage, setNotificationMessage] = useState<string>("");
   const [isNotificationVisible, setIsNotificationVisible] = useState(false);
 
-  // App Mode state (Inference or Evaluation)
-  const [appMode, setAppMode] = useState<"inference" | "evaluation">(
+  // App Mode state (Inference or Benchmark)
+  const [appMode, setAppMode] = useState<"inference" | "benchmark">(
     "inference"
   );
 
@@ -75,6 +76,24 @@ export default function Home() {
   const [guidanceScale, setGuidanceScale] = useState<number>(1.0);
   const [inferenceSteps, setInferenceSteps] = useState<number>(20); // Start with white-balance default
   const [cfgScale, setCfgScale] = useState<number>(4.0);
+  const [inputQuality, setInputQuality] = useState<InputQualityPreset>("high");
+  const QUALITY_SCALE_MAP: Record<InputQualityPreset, number> = useMemo(
+    () => ({
+      super_low: 1 / 16,
+      low: 1 / 8,
+      medium: 1 / 4,
+      high: 1 / 2,
+      original: 1,
+    }),
+    []
+  );
+  const [baseImageData, setBaseImageData] = useState<string | null>(null);
+  const [baseImageDimensions, setBaseImageDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const [isApplyingQuality, setIsApplyingQuality] = useState(false);
+  const qualityChangeRequestRef = useRef(0);
 
   // White balance state
   const [whiteBalanceTemperature, setWhiteBalanceTemperature] =
@@ -84,7 +103,30 @@ export default function Home() {
   // Visualization request ID state
   const [lastRequestId, setLastRequestId] = useState<string | null>(null);
 
-  // Evaluation mode state
+  // Benchmark mode state
+  const [benchmarkFolder, setBenchmarkFolder] = useState<string>("");
+  const [benchmarkValidation, setBenchmarkValidation] = useState<{
+    success: boolean;
+    message: string;
+    image_count: number;
+    details?: Record<string, number>;
+  } | null>(null);
+  const [benchmarkSampleCount, setBenchmarkSampleCount] = useState<number>(0);
+  const [benchmarkTask, setBenchmarkTask] = useState<
+    "white-balance" | "object-insert" | "object-removal"
+  >("object-removal");
+  const [isRunningBenchmark, setIsRunningBenchmark] = useState<boolean>(false);
+  const [benchmarkProgress, setBenchmarkProgress] = useState<{
+    current: number;
+    total: number;
+    currentImage?: string;
+  } | null>(null);
+  const [benchmarkResults, setBenchmarkResults] = useState<any>(null);
+  const [benchmarkPrompt, setBenchmarkPrompt] = useState<string>("");
+  const [isValidatingBenchmark, setIsValidatingBenchmark] =
+    useState<boolean>(false);
+
+  // Legacy evaluation state (kept for backward compatibility, will be removed)
   const [evaluationTask, setEvaluationTask] = useState<
     "white-balance" | "object-insert" | "object-removal"
   >("white-balance");
@@ -288,7 +330,7 @@ export default function Home() {
       });
       setEvaluationSingleOriginal(base64);
       // Set to canvas for preview
-      if (appMode === "evaluation") {
+      if (appMode === "benchmark") {
         setUploadedImage(base64);
       }
     } catch (error) {
@@ -368,7 +410,9 @@ export default function Home() {
 
       // If we have fewer originals than existing pairs, keep existing pairs
       if (originalImages.length < evaluationImagePairs.length) {
-        const remainingPairs = evaluationImagePairs.slice(originalImages.length);
+        const remainingPairs = evaluationImagePairs.slice(
+          originalImages.length
+        );
         setEvaluationImagePairs([...newPairs, ...remainingPairs]);
       } else {
         setEvaluationImagePairs(newPairs);
@@ -541,7 +585,8 @@ export default function Home() {
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
-      setEvaluationInputImage(base64);
+      // Legacy function - not used in benchmark mode
+      // setEvaluationInputImage(base64);
     } catch (error) {
       console.error("Error reading file:", error);
       setNotificationWithTimeout("error", "Failed to load input image");
@@ -549,7 +594,96 @@ export default function Home() {
   };
 
   const handleEvaluate = async (prompt: string) => {
-    await handleEvaluateImages(prompt);
+    // If in benchmark mode, run benchmark instead of evaluation
+    if (appMode === "benchmark") {
+      // Update benchmark prompt state
+      setBenchmarkPrompt(prompt);
+      // Run benchmark with the prompt from header
+      await handleRunBenchmarkWithPrompt(prompt);
+    } else {
+      // Legacy evaluation mode
+      await handleEvaluateImages(prompt);
+    }
+  };
+
+  const handleRunBenchmarkWithPrompt = async (prompt: string) => {
+    console.log("🚀 Running benchmark with prompt:", {
+      hasFile: !!benchmarkFile,
+      file: benchmarkFile?.name,
+      validation: benchmarkValidation,
+      prompt: prompt,
+      task: benchmarkTask,
+    });
+
+    if (!benchmarkFile) {
+      setNotificationWithTimeout(
+        "error",
+        "Please upload a benchmark ZIP file first"
+      );
+      return;
+    }
+
+    if (!benchmarkValidation?.success) {
+      setNotificationWithTimeout(
+        "error",
+        "Please validate the benchmark ZIP file first. Make sure it contains input/, mask/, and groundtruth/ folders."
+      );
+      return;
+    }
+
+    if (!prompt || prompt.trim().length === 0) {
+      setNotificationWithTimeout(
+        "error",
+        "Please enter a benchmark prompt in the header. This prompt will be used for all images."
+      );
+      return;
+    }
+
+    if (benchmarkTask !== "object-removal") {
+      setNotificationWithTimeout(
+        "error",
+        `Task "${benchmarkTask}" is not yet implemented. Only Object Removal is available.`
+      );
+      return;
+    }
+
+    setIsRunningBenchmark(true);
+    setBenchmarkProgress({
+      current: 0,
+      total: benchmarkValidation.image_count,
+    });
+    setBenchmarkResults(null);
+
+    try {
+      const { apiService } = await import("@/services/api");
+      // benchmarkFile can be File (ZIP) or File[] (folder)
+      const result = await apiService.runBenchmark(
+        benchmarkFile as File | File[],
+        {
+          task_type: benchmarkTask,
+          prompt: prompt.trim(), // Use prompt from header for ALL images
+          sample_count: benchmarkSampleCount,
+          num_inference_steps: inferenceSteps,
+          guidance_scale: guidanceScale,
+          true_cfg_scale: cfgScale,
+          negative_prompt: negativePrompt || undefined,
+          input_quality: inputQuality,
+        }
+      );
+
+      setBenchmarkResults(result);
+      setNotificationWithTimeout(
+        "success",
+        `Benchmark completed! Processed ${
+          result.summary?.successful_evaluations || 0
+        } images`
+      );
+    } catch (error: any) {
+      setNotificationWithTimeout("error", `Benchmark failed: ${error.message}`);
+    } finally {
+      setIsRunningBenchmark(false);
+      setBenchmarkProgress(null);
+    }
   };
 
   const handleEvaluateImages = async (prompt?: string) => {
@@ -584,14 +718,16 @@ export default function Home() {
     try {
       setIsEvaluating(true);
       setEvaluationProgress(null); // Reset progress
-      
+
       // Calculate total pairs for progress tracking
-      const totalPairs = evaluationMode === "single" 
-        ? 1 
-        : evaluationImagePairs.filter((pair) => pair.original && pair.target).length;
-      
+      const totalPairs =
+        evaluationMode === "single"
+          ? 1
+          : evaluationImagePairs.filter((pair) => pair.original && pair.target)
+              .length;
+
       setEvaluationProgress({ current: 0, total: totalPairs });
-      
+
       const { apiService } = await import("@/services/api");
 
       const request: any = {
@@ -642,7 +778,7 @@ export default function Home() {
           // If prompt provided, assign to this pair
           // If prompt contains newlines or is formatted for multiple pairs, split it
           if (prompt) {
-            const prompts = prompt.split('\n').filter(p => p.trim());
+            const prompts = prompt.split("\n").filter((p) => p.trim());
             if (prompts.length > index) {
               pairData.prompt = prompts[index].trim();
             } else if (prompts.length === 1) {
@@ -684,13 +820,15 @@ export default function Home() {
   // Export evaluation results as JSON
   const handleExportEvaluationJSON = () => {
     if (!evaluationResponse) return;
-    
+
     const dataStr = JSON.stringify(evaluationResponse, null, 2);
     const dataBlob = new Blob([dataStr], { type: "application/json" });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `evaluation-results-${new Date().toISOString().split("T")[0]}.json`;
+    link.download = `evaluation-results-${
+      new Date().toISOString().split("T")[0]
+    }.json`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -700,8 +838,16 @@ export default function Home() {
   // Export evaluation results as CSV
   const handleExportEvaluationCSV = () => {
     if (!evaluationResults || evaluationResults.length === 0) return;
-    
-    const headers = ["Filename", "PSNR (dB)", "SSIM", "LPIPS", "ΔE00", "Time (s)", "Status"];
+
+    const headers = [
+      "Filename",
+      "PSNR (dB)",
+      "SSIM",
+      "LPIPS",
+      "ΔE00",
+      "Time (s)",
+      "Status",
+    ];
     const rows = evaluationResults.map((result) => {
       const metrics = result.metrics || {};
       return [
@@ -714,17 +860,21 @@ export default function Home() {
         result.success ? "Success" : "Failed",
       ];
     });
-    
+
     // Add summary row
-    const avgPsnr = evaluationResults
-      .filter((r) => r.success && r.metrics?.psnr)
-      .reduce((sum, r) => sum + (r.metrics.psnr || 0), 0) / 
-      evaluationResults.filter((r) => r.success && r.metrics?.psnr).length || 0;
-    const avgSsim = evaluationResults
-      .filter((r) => r.success && r.metrics?.ssim)
-      .reduce((sum, r) => sum + (r.metrics.ssim || 0), 0) / 
-      evaluationResults.filter((r) => r.success && r.metrics?.ssim).length || 0;
-    
+    const avgPsnr =
+      evaluationResults
+        .filter((r) => r.success && r.metrics?.psnr)
+        .reduce((sum, r) => sum + (r.metrics.psnr || 0), 0) /
+        evaluationResults.filter((r) => r.success && r.metrics?.psnr).length ||
+      0;
+    const avgSsim =
+      evaluationResults
+        .filter((r) => r.success && r.metrics?.ssim)
+        .reduce((sum, r) => sum + (r.metrics.ssim || 0), 0) /
+        evaluationResults.filter((r) => r.success && r.metrics?.ssim).length ||
+      0;
+
     rows.push([]);
     rows.push(["Summary", "", "", "", "", "", ""]);
     rows.push([
@@ -734,32 +884,239 @@ export default function Home() {
       "",
       "",
       evaluationResponse?.total_evaluation_time?.toFixed(2) || "N/A",
-      `${evaluationResponse?.successful_evaluations || 0}/${evaluationResponse?.total_pairs || 0}`,
+      `${evaluationResponse?.successful_evaluations || 0}/${
+        evaluationResponse?.total_pairs || 0
+      }`,
     ]);
-    
+
     const csvContent = [headers, ...rows]
       .map((row) => row.map((cell) => `"${cell}"`).join(","))
       .join("\n");
-    
-    const dataBlob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+
+    const dataBlob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `evaluation-results-${new Date().toISOString().split("T")[0]}.csv`;
+    link.download = `evaluation-results-${
+      new Date().toISOString().split("T")[0]
+    }.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
 
-  const handleAppModeChange = (mode: "inference" | "evaluation") => {
+  const handleAppModeChange = (mode: "inference" | "benchmark") => {
     setAppMode(mode);
-    // Auto-switch to evaluation task when in evaluation mode
-    if (mode === "evaluation") {
-      setAiTask("evaluation");
+    // Auto-switch to benchmark when in benchmark mode
+    if (mode === "benchmark") {
+      // Reset benchmark state
+      setBenchmarkFolder("");
+      setBenchmarkValidation(null);
+      setBenchmarkSampleCount(0);
+      setBenchmarkFile(null);
     } else {
       // Reset to white-balance when switching back to inference
       setAiTask("white-balance");
+    }
+  };
+
+  // Benchmark handlers
+  const [benchmarkFile, setBenchmarkFile] = useState<File | null>(null);
+
+  const handleBenchmarkFolderChange = (path: string) => {
+    setBenchmarkFolder(path);
+  };
+
+  const handleBenchmarkFolderValidate = async (
+    fileOrPath: File | File[] | string
+  ) => {
+    setIsValidatingBenchmark(true);
+    try {
+      // Handle folder upload (File[])
+      if (Array.isArray(fileOrPath)) {
+        const files = fileOrPath;
+        console.log("📁 Validating benchmark folder:", files.length, "files");
+
+        const { apiService } = await import("@/services/api");
+        const validation = await apiService.validateBenchmarkFolder(files);
+
+        console.log("✅ Validation result:", validation);
+
+        setBenchmarkValidation(validation);
+        if (validation.success) {
+          // Store files for later use
+          setBenchmarkFile(files as any); // Store File[] as marker
+          const folderName =
+            files[0]?.webkitRelativePath?.split("/")[0] || "folder";
+          setBenchmarkFolder(folderName);
+          setNotificationWithTimeout("success", validation.message);
+        } else {
+          setNotificationWithTimeout("error", validation.message);
+          setBenchmarkFile(null);
+          setBenchmarkFolder("");
+        }
+        return;
+      }
+
+      // Handle ZIP file upload (File)
+      if (fileOrPath instanceof File) {
+        const file = fileOrPath;
+        // Set file and folder name first
+        setBenchmarkFile(file);
+        setBenchmarkFolder(file.name);
+        // Clear previous validation
+        setBenchmarkValidation(null);
+
+        console.log(
+          "📦 Validating benchmark ZIP file:",
+          file.name,
+          file.size,
+          "bytes"
+        );
+
+        const { apiService } = await import("@/services/api");
+        const validation = await apiService.validateBenchmarkFolder(file);
+
+        console.log("✅ Validation result:", validation);
+
+        setBenchmarkValidation(validation);
+        if (validation.success) {
+          setNotificationWithTimeout("success", validation.message);
+        } else {
+          setNotificationWithTimeout("error", validation.message);
+          // Clear file if validation failed
+          setBenchmarkFile(null);
+          setBenchmarkFolder("");
+        }
+        return;
+      }
+
+      // Legacy support - string path (should not happen with new UI)
+      setNotificationWithTimeout("error", "Please upload a ZIP file or folder");
+      setBenchmarkFile(null);
+      setBenchmarkFolder("");
+      setBenchmarkValidation(null);
+    } catch (error: any) {
+      console.error("❌ Validation error:", error);
+      setNotificationWithTimeout(
+        "error",
+        `Validation failed: ${error.message}`
+      );
+      setBenchmarkValidation({
+        success: false,
+        message: `❌ Validation failed: ${error.message}`,
+        image_count: 0,
+      });
+      setBenchmarkFile(null);
+      setBenchmarkFolder("");
+    } finally {
+      setIsValidatingBenchmark(false);
+    }
+  };
+
+  const handleBenchmarkSampleCountChange = (count: number) => {
+    // Validate and normalize count
+    const totalImages = benchmarkValidation?.image_count || 0;
+
+    let normalizedCount = count;
+
+    // Handle edge cases
+    if (isNaN(normalizedCount) || normalizedCount < 0) {
+      normalizedCount = 0; // Fallback to all images
+      if (count < 0) {
+        setNotificationWithTimeout(
+          "warning",
+          `Invalid sample count (${count}). Using 0 to process all images.`
+        );
+      }
+    } else if (totalImages > 0 && normalizedCount > totalImages) {
+      normalizedCount = totalImages; // Fallback to all available images
+      setNotificationWithTimeout(
+        "warning",
+        `Requested ${count} samples but only ${totalImages} available. Will process all ${totalImages} images.`
+      );
+    }
+
+    setBenchmarkSampleCount(normalizedCount);
+    console.log(
+      `🔢 Sample count changed: ${count} → ${normalizedCount} (total: ${totalImages})`
+    );
+  };
+
+  const handleBenchmarkTaskChange = (
+    task: "white-balance" | "object-insert" | "object-removal"
+  ) => {
+    setBenchmarkTask(task);
+  };
+
+  const handleBenchmarkPromptChange = (prompt: string) => {
+    setBenchmarkPrompt(prompt);
+  };
+
+  const handleRunBenchmark = async () => {
+    if (!benchmarkFile || !benchmarkValidation?.success) {
+      setNotificationWithTimeout(
+        "error",
+        "Please upload and validate a benchmark dataset (ZIP file or folder) first"
+      );
+      return;
+    }
+
+    if (!benchmarkPrompt || benchmarkPrompt.trim().length === 0) {
+      setNotificationWithTimeout(
+        "error",
+        "Please enter a benchmark prompt. This prompt will be used for all images."
+      );
+      return;
+    }
+
+    if (benchmarkTask !== "object-removal") {
+      setNotificationWithTimeout(
+        "error",
+        `Task "${benchmarkTask}" is not yet implemented. Only Object Removal is available.`
+      );
+      return;
+    }
+
+    setIsRunningBenchmark(true);
+    setBenchmarkProgress({
+      current: 0,
+      total: benchmarkValidation.image_count,
+    });
+    setBenchmarkResults(null);
+
+    try {
+      const { apiService } = await import("@/services/api");
+      // benchmarkFile can be File (ZIP) or File[] (folder)
+      const result = await apiService.runBenchmark(
+        benchmarkFile as File | File[],
+        {
+          task_type: benchmarkTask,
+          prompt: benchmarkPrompt.trim(), // Use the entered prompt for ALL images
+          sample_count: benchmarkSampleCount,
+          num_inference_steps: inferenceSteps,
+          guidance_scale: guidanceScale,
+          true_cfg_scale: cfgScale,
+          negative_prompt: negativePrompt || undefined,
+          input_quality: inputQuality,
+        }
+      );
+
+      setBenchmarkResults(result);
+      setNotificationWithTimeout(
+        "success",
+        `Benchmark completed! Processed ${
+          result.summary?.successful_evaluations || 0
+        } images`
+      );
+    } catch (error: any) {
+      setNotificationWithTimeout("error", `Benchmark failed: ${error.message}`);
+    } finally {
+      setIsRunningBenchmark(false);
+      setBenchmarkProgress(null);
     }
   };
 
@@ -776,11 +1133,12 @@ export default function Home() {
       currentReferenceImage: referenceImage ? "exists" : "null",
     });
 
-    // Auto-switch to evaluation mode if evaluation task is selected
+    // Legacy support: "evaluation" task maps to benchmark mode
+    // Note: "evaluation" is kept in aiTask type for backward compatibility
     if (task === "evaluation") {
-      setAppMode("evaluation");
-    } else if (appMode === "evaluation") {
-      // Switch back to inference mode if selecting other tasks
+      setAppMode("benchmark");
+    } else if (appMode === "benchmark") {
+      // Switch back to inference mode if selecting other tasks (not evaluation)
       setAppMode("inference");
     }
     // Clear reference image when switching away from object-insert
@@ -845,12 +1203,165 @@ export default function Home() {
     string | null
   >(null);
 
+  const MIN_QUALITY_DIMENSION = 64;
+
+  const scaleImageDataUrl = (
+    dataUrl: string,
+    targetWidth: number,
+    targetHeight: number
+  ): Promise<{ dataUrl: string; width: number; height: number }> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Cannot get canvas context"));
+          return;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+        resolve({
+          dataUrl: canvas.toDataURL("image/png"),
+          width: targetWidth,
+          height: targetHeight,
+        });
+      };
+      img.onerror = (err) => reject(err);
+      img.src = dataUrl;
+    });
+  };
+
+  const setBaseImage = useCallback(
+    (dataUrl: string | null, dims?: { width: number; height: number }) => {
+      setBaseImageData(dataUrl);
+      if (!dataUrl) {
+        setBaseImageDimensions(null);
+        return;
+      }
+      if (dims) {
+        setBaseImageDimensions(dims);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        setBaseImageDimensions({ width: img.width, height: img.height });
+      };
+      img.src = dataUrl;
+    },
+    []
+  );
+
+  const applyInputQualityPreset = useCallback(
+    async (
+      quality: InputQualityPreset,
+      options?: {
+        sourceData?: string;
+        sourceDimensions?: { width: number; height: number };
+        silent?: boolean;
+      }
+    ): Promise<boolean> => {
+      const sourceData = options?.sourceData ?? baseImageData;
+      const sourceDimensions = options?.sourceDimensions ?? baseImageDimensions;
+      if (!sourceData || !sourceDimensions) {
+        return false;
+      }
+
+      const scale = QUALITY_SCALE_MAP[quality] ?? QUALITY_SCALE_MAP.high;
+      const requestId = ++qualityChangeRequestRef.current;
+      setIsApplyingQuality(true);
+
+      try {
+        let targetWidth = sourceDimensions.width;
+        let targetHeight = sourceDimensions.height;
+        let resultDataUrl = sourceData;
+
+        if (scale < 0.999) {
+          targetWidth = Math.max(
+            MIN_QUALITY_DIMENSION,
+            Math.round(sourceDimensions.width * scale)
+          );
+          targetHeight = Math.max(
+            MIN_QUALITY_DIMENSION,
+            Math.round(sourceDimensions.height * scale)
+          );
+          const scaled = await scaleImageDataUrl(
+            sourceData,
+            targetWidth,
+            targetHeight
+          );
+          resultDataUrl = scaled.dataUrl;
+          targetWidth = scaled.width;
+          targetHeight = scaled.height;
+        }
+
+        if (qualityChangeRequestRef.current !== requestId) {
+          return false;
+        }
+
+        setUploadedImage(resultDataUrl);
+        setModifiedImage(resultDataUrl);
+        setImageDimensions({ width: targetWidth, height: targetHeight });
+        setOriginalImage(resultDataUrl);
+        setModifiedImageForComparison(null);
+        setComparisonSlider(50);
+        initializeHistory(resultDataUrl);
+        resetMaskHistory();
+        clearMask();
+        setLastRequestId(null);
+
+        if (!options?.silent) {
+          console.log("✅ Applied input quality preset:", {
+            quality,
+            scale,
+            width: targetWidth,
+            height: targetHeight,
+          });
+        }
+
+        return true;
+      } catch (error) {
+        console.error("Failed to apply input quality:", error);
+        if (!options?.silent) {
+          setNotificationWithTimeout(
+            "error",
+            "Không thể thay đổi chất lượng ảnh. Vui lòng thử lại."
+          );
+        }
+        return false;
+      } finally {
+        if (qualityChangeRequestRef.current === requestId) {
+          setIsApplyingQuality(false);
+        }
+      }
+    },
+    [
+      QUALITY_SCALE_MAP,
+      baseImageData,
+      baseImageDimensions,
+      clearMask,
+      initializeHistory,
+      resetMaskHistory,
+      setImageDimensions,
+      setModifiedImage,
+      setModifiedImageForComparison,
+      setOriginalImage,
+      setComparisonSlider,
+      setLastRequestId,
+      setNotificationWithTimeout,
+      setUploadedImage,
+    ]
+  );
+
   // Track if this is a new upload to properly set originalImage
   const isNewUploadRef = useRef(false);
-  
+
   // Track previous task to detect task changes
   const previousTaskRef = useRef<string>(aiTask);
-  
+
   // Auto-update parameters when task changes
   useEffect(() => {
     // Only update if task actually changed (not on initial mount)
@@ -874,7 +1385,6 @@ export default function Home() {
         initializeHistory(uploadedImage);
       }
       isNewUploadRef.current = false; // Reset flag
-
     }
     // If uploadedImage changed but flag is false,
     // it means user returned to original or loaded from history
@@ -913,25 +1423,20 @@ export default function Home() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const imageData = e.target?.result as string;
-      
+
       // Create an image element to get dimensions
-      const img = document.createElement('img');
+      const img = document.createElement("img");
       img.onload = () => {
-        // IMPORTANT: Set imageDimensions here to ensure it's available immediately
-        // This is critical for the new layer architecture to work correctly
-        setImageDimensions({ width: img.width, height: img.height });
+        const dims = { width: img.width, height: img.height };
+        setBaseImage(imageData, dims);
+        void applyInputQualityPreset(inputQuality, {
+          sourceData: imageData,
+          sourceDimensions: dims,
+          silent: true,
+        });
+        isNewUploadRef.current = false; // Reset flag
       };
       img.src = imageData;
-      
-      // Set uploaded image (this will trigger useEffect)
-      setUploadedImage(imageData);
-      setModifiedImage(imageData);
-      
-      // IMPORTANT: Set originalImage immediately to avoid timing issues
-      // This ensures originalImage is always the latest uploaded image
-      setOriginalImage(imageData);
-      initializeHistory(imageData);
-      isNewUploadRef.current = false; // Reset flag
     };
     reader.readAsDataURL(file);
   };
@@ -943,6 +1448,10 @@ export default function Home() {
     setModifiedImageForComparison(null);
     setComparisonSlider(50);
     resetMaskHistory();
+    setBaseImage(null);
+    setInputQuality("high");
+    setLastRequestId(null);
+    setIsApplyingQuality(false);
   };
 
   // Handle remove evaluation pair
@@ -966,6 +1475,7 @@ export default function Home() {
       setComparisonSlider(50);
       resetMaskHistory();
       clearMask();
+      setBaseImage(originalImage, imageDimensions ?? undefined);
       setNotificationWithTimeout("success", "Returned to original image");
     }
   };
@@ -979,7 +1489,6 @@ export default function Home() {
     setGuidanceScale(value);
   };
 
-
   const handleInferenceStepsChange = (value: number) => {
     setInferenceSteps(value);
   };
@@ -987,6 +1496,20 @@ export default function Home() {
   const handleCfgScaleChange = (value: number) => {
     setCfgScale(value);
   };
+
+  const handleInputQualityChange = useCallback(
+    async (quality: InputQualityPreset) => {
+      if (quality === inputQuality && baseImageData) {
+        return;
+      }
+      setInputQuality(quality);
+      if (!baseImageData) {
+        return;
+      }
+      await applyInputQualityPreset(quality);
+    },
+    [applyInputQualityPreset, baseImageData, inputQuality]
+  );
 
   const handleWhiteBalanceTemperatureChange = (value: number) => {
     setWhiteBalanceTemperature(value);
@@ -1032,6 +1555,15 @@ export default function Home() {
 
         // Add to history
         addToHistory(imageData);
+
+        const wbImg = new Image();
+        wbImg.onload = () => {
+          setBaseImage(imageData, {
+            width: wbImg.width,
+            height: wbImg.height,
+          });
+        };
+        wbImg.src = imageData;
 
         setNotificationWithTimeout(
           "success",
@@ -1126,6 +1658,7 @@ export default function Home() {
         true_cfg_scale: cfgScale,
         negative_prompt: negativePrompt || undefined,
         generator_seed: undefined, // Add seed if needed
+        input_quality: inputQuality,
       };
 
       // Use uploadedImage (current image) for API call
@@ -1143,11 +1676,12 @@ export default function Home() {
       });
 
       // Map aiTask to task_type for backend
-      const taskType = aiTask === "white-balance" 
-        ? "white-balance" 
-        : aiTask === "object-insert" 
-        ? "object-insert" 
-        : "object-removal";
+      const taskType =
+        aiTask === "white-balance"
+          ? "white-balance"
+          : aiTask === "object-insert"
+          ? "object-insert"
+          : "object-removal";
 
       const result = await generateImage(
         prompt,
@@ -1165,11 +1699,18 @@ export default function Home() {
         const img = new Image();
         img.onload = () => {
           // Update dimensions if they changed (should match original, but verify)
-          if (imageDimensions && (imageDimensions.width !== img.width || imageDimensions.height !== img.height)) {
-            console.log(`📐 Image size changed: ${imageDimensions.width}x${imageDimensions.height} -> ${img.width}x${img.height}`);
+          if (
+            imageDimensions &&
+            (imageDimensions.width !== img.width ||
+              imageDimensions.height !== img.height)
+          ) {
+            console.log(
+              `📐 Image size changed: ${imageDimensions.width}x${imageDimensions.height} -> ${img.width}x${img.height}`
+            );
             // Keep original dimensions for display consistency
             // The generated image should match, but if not, we keep the original dimensions
           }
+          setBaseImage(imageData, { width: img.width, height: img.height });
         };
         img.src = imageData;
 
@@ -1231,12 +1772,12 @@ export default function Home() {
 
       try {
         const { apiService } = await import("@/services/api");
-        
+
         // Use healthCheck with retry options
         const health = await apiService.healthCheck({
           retries: 5, // Try 5 times
           retryDelay: 1000, // Start with 1 second delay
-          timeout: 8000 // 8 seconds timeout per request
+          timeout: 8000, // 8 seconds timeout per request
         });
 
         if (!isMounted) return;
@@ -1250,8 +1791,9 @@ export default function Home() {
         if (!isMounted) return;
 
         console.error("⚠️ API connection failed after retries:", err);
-        
-        let errorMessage = "Unable to connect to backend server. Please ensure the backend is running on port 8003.";
+
+        let errorMessage =
+          "Unable to connect to backend server. Please ensure the backend is running on port 8003.";
 
         if (err instanceof Error) {
           try {
@@ -1264,15 +1806,22 @@ export default function Home() {
               if (errorData.status !== 0) {
                 errorMessage = errorData.error;
               } else {
-                errorMessage = "Backend server is not responding. Please check if the server is running on port 8003.";
+                errorMessage =
+                  "Backend server is not responding. Please check if the server is running on port 8003.";
               }
             } else if (errorData.status === 0) {
-              errorMessage = "Backend server is not responding. Please check if the server is running on port 8003.";
+              errorMessage =
+                "Backend server is not responding. Please check if the server is running on port 8003.";
             }
           } catch (parseError) {
             // If not JSON, use the error message directly
-            if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError") || err.message.includes("timeout")) {
-              errorMessage = "Backend server is not responding. Please check if the server is running on port 8003.";
+            if (
+              err.message.includes("Failed to fetch") ||
+              err.message.includes("NetworkError") ||
+              err.message.includes("timeout")
+            ) {
+              errorMessage =
+                "Backend server is not responding. Please check if the server is running on port 8003.";
             } else {
               errorMessage = err.message || errorMessage;
             }
@@ -1420,17 +1969,17 @@ export default function Home() {
   return (
     <div className="min-h-screen max-h-screen bg-[var(--primary-bg)] text-[var(--text-primary)] flex flex-col dots-pattern-small overflow-hidden">
       {/* Header */}
-       <Header
-         onSummon={handleEdit}
-         onEvaluate={handleEvaluate}
-         isCustomizeOpen={isCustomizeOpen}
-         onToggleCustomize={() => setIsCustomizeOpen(!isCustomizeOpen)}
+      <Header
+        onSummon={handleEdit}
+        onEvaluate={handleEvaluate}
+        isCustomizeOpen={isCustomizeOpen}
+        onToggleCustomize={() => setIsCustomizeOpen(!isCustomizeOpen)}
         isGenerating={isGenerating}
         isEvaluating={isEvaluating}
         appMode={appMode}
-         onAppModeChange={handleAppModeChange}
-         aiTask={aiTask}
-       />
+        onAppModeChange={handleAppModeChange}
+        aiTask={aiTask}
+      />
 
       {/* Main Content - Optimized transitions */}
       <main
@@ -1458,12 +2007,17 @@ export default function Home() {
                     <div
                       className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-300"
                       style={{
-                        width: `${(evaluationProgress.current / evaluationProgress.total) * 100}%`,
+                        width: `${
+                          (evaluationProgress.current /
+                            evaluationProgress.total) *
+                          100
+                        }%`,
                       }}
                     ></div>
                   </div>
                   <p className="text-[var(--text-secondary)] text-sm">
-                    {evaluationProgress.current} / {evaluationProgress.total} pairs
+                    {evaluationProgress.current} / {evaluationProgress.total}{" "}
+                    pairs
                     {evaluationProgress.currentPair && (
                       <span className="block text-xs mt-1 opacity-75">
                         {evaluationProgress.currentPair}
@@ -1474,7 +2028,9 @@ export default function Home() {
               )}
               {!evaluationProgress && (
                 <p className="text-[var(--text-secondary)] text-sm mt-1">
-                  {isGenerating ? "This may take a few seconds" : "Please wait..."}
+                  {isGenerating
+                    ? "This may take a few seconds"
+                    : "Please wait..."}
                 </p>
               )}
               {isGenerating && (
@@ -1518,8 +2074,8 @@ export default function Home() {
           isHelpOpen={isHelpOpen}
           imageContainerRef={imageContainerRef}
           containerRef={containerRef}
-            maskCanvasRef={maskCanvasRef}
-            edgeOverlayCanvasRef={edgeOverlayCanvasRef}
+          maskCanvasRef={maskCanvasRef}
+          edgeOverlayCanvasRef={edgeOverlayCanvasRef}
           imageRef={imageRef}
           onImageUpload={handleImageUploadWrapper}
           onRemoveImage={handleRemoveImage}
@@ -1552,12 +2108,15 @@ export default function Home() {
           width={sidebarWidth}
           isResizing={isResizing}
           uploadedImage={uploadedImage}
+          imageDimensions={imageDimensions}
           isMaskingMode={isMaskingMode}
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
           referenceImage={referenceImage}
           aiTask={aiTask}
           appMode={appMode}
+          inputQuality={inputQuality}
+          isApplyingQuality={isApplyingQuality}
           onImageUpload={handleImageUploadWrapper}
           onRemoveImage={handleRemoveImage}
           onToggleMaskingMode={toggleMaskingMode}
@@ -1611,18 +2170,39 @@ export default function Home() {
           }
           onEvaluationSingleTargetUpload={handleEvaluationSingleTargetUpload}
           onEvaluationMultipleUpload={handleEvaluationMultipleUpload}
-          onEvaluationOriginalFolderUpload={handleEvaluationOriginalFolderUpload}
+          onEvaluationOriginalFolderUpload={
+            handleEvaluationOriginalFolderUpload
+          }
           onEvaluationTargetFolderUpload={handleEvaluationTargetFolderUpload}
           onEvaluationConditionalImagesUpload={
             handleEvaluationConditionalImagesUpload
           }
-          onEvaluationReferenceImageUpload={handleEvaluationReferenceImageUpload}
+          onEvaluationReferenceImageUpload={
+            handleEvaluationReferenceImageUpload
+          }
           onAllowMultipleFoldersChange={setAllowMultipleFolders}
           onEvaluationDisplayLimitChange={setEvaluationDisplayLimit}
           evaluationResults={evaluationResults}
           evaluationResponse={evaluationResponse}
           onExportEvaluationJSON={handleExportEvaluationJSON}
           onExportEvaluationCSV={handleExportEvaluationCSV}
+          onInputQualityChange={handleInputQualityChange}
+          // Benchmark mode props
+          benchmarkFolder={benchmarkFolder}
+          benchmarkValidation={benchmarkValidation}
+          isValidatingBenchmark={isValidatingBenchmark}
+          benchmarkSampleCount={benchmarkSampleCount}
+          benchmarkTask={benchmarkTask}
+          isRunningBenchmark={isRunningBenchmark}
+          benchmarkProgress={benchmarkProgress}
+          benchmarkResults={benchmarkResults}
+          onBenchmarkFolderChange={handleBenchmarkFolderChange}
+          onBenchmarkFolderValidate={handleBenchmarkFolderValidate}
+          onBenchmarkSampleCountChange={handleBenchmarkSampleCountChange}
+          onBenchmarkTaskChange={handleBenchmarkTaskChange}
+          benchmarkPrompt={benchmarkPrompt}
+          onBenchmarkPromptChange={handleBenchmarkPromptChange}
+          onRunBenchmark={handleRunBenchmark}
         />
       </main>
     </div>

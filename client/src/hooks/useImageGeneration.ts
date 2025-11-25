@@ -68,6 +68,7 @@ export function useImageGeneration() {
         width: settings?.width,
         height: settings?.height,
         task_type: taskType,
+        input_quality: settings?.input_quality,
       };
 
       // Debug logging
@@ -104,20 +105,20 @@ export function useImageGeneration() {
             // Don't set error for cancelled requests
             return null;
           } else if (errorData.status === 0) {
-            // Network error
+          // Network error
             errorMessage = errorData.error || 'Unable to connect to server. Please check if the API server is running on port 8003.';
-          } else if (errorData.status === 500) {
-            // Server error
+        } else if (errorData.status === 500) {
+          // Server error
             errorMessage = errorData.error || 'Server error occurred. Please check the server logs and try again.';
-          } else if (errorData.error) {
-            // API error with message
-            errorMessage = errorData.error;
+        } else if (errorData.error) {
+          // API error with message
+          errorMessage = errorData.error;
           } else if (errorData.detail) {
             // FastAPI error format
             errorMessage = errorData.detail;
-          }
+        }
 
-          console.error('Generation error details:', errorData);
+        console.error('Generation error details:', errorData);
         }
       } catch (fallbackErr) {
         // Fallback for any unexpected errors
@@ -126,7 +127,7 @@ export function useImageGeneration() {
       }
 
       if (!isCancelled) {
-        setError(errorMessage);
+      setError(errorMessage);
       }
       return null;
     } finally {

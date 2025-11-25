@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Tuple, cast
 
 import torch
 from fastapi import HTTPException
 from PIL import Image
 
+from ..core.config import settings
 from ..core.pipeline import get_device, load_pipeline
 from ..services.image_processing import (
     base64_to_image,
@@ -55,6 +56,72 @@ class GenerationService:
                 self._pipeline_insertion = load_pipeline(task_type="insertion")
             return self._pipeline_insertion
 
+    def _resolve_quality(
+        self, override: str | None = None
+    ) -> Tuple[str, float]:
+        levels = settings.input_quality_levels
+        quality_label = settings.input_quality
+        scale = settings.input_quality_scale
+
+        if override:
+            normalized = override.strip().lower()
+            if normalized in levels:
+                quality_label = normalized
+                scale = levels[normalized]
+            else:
+                logger.warning(
+                    "⚠️ Unknown input quality override '%s'. Falling back to '%s'.",
+                    override,
+                    quality_label,
+                )
+        return quality_label, scale
+
+    def _apply_input_quality(
+        self,
+        original: Image.Image,
+        mask: Image.Image | None = None,
+        reference: Image.Image | None = None,
+        quality_override: str | None = None,
+    ) -> tuple[Image.Image, Image.Image | None, Image.Image | None]:
+        """Downscale inputs according to configured quality preset to save VRAM."""
+        quality_label, scale = self._resolve_quality(quality_override)
+
+        if scale >= 0.999:
+            max_dim = max(original.width, original.height)
+            if (
+                quality_label == "original"
+                and max_dim >= settings.input_quality_warning_px
+            ):
+                logger.warning(
+                    "⚠️ Input quality 'original' selected for large image %dx%d. "
+                    "This may consume significant GPU memory.",
+                    original.width,
+                    original.height,
+                )
+            return original, mask, reference
+
+        new_width = max(64, int(original.width * scale))
+        new_height = max(64, int(original.height * scale))
+        new_size = (new_width, new_height)
+
+        logger.info(
+            "🎚️ Applying input quality '%s' (scale %.4f): %dx%d -> %dx%d",
+            quality_label,
+            scale,
+            original.width,
+            original.height,
+            new_width,
+            new_height,
+        )
+
+        original = original.resize(new_size, Image.Resampling.LANCZOS)
+        if mask is not None:
+            mask = mask.resize(new_size, Image.Resampling.NEAREST)
+        if reference is not None:
+            reference = reference.resize(new_size, Image.Resampling.LANCZOS)
+
+        return original, mask, reference
+
     def _prepare_images(
         self, request: GenerationRequest, task_type: str = "removal"
     ) -> tuple[Image.Image, Image.Image, list[Image.Image], Image.Image | None]:
@@ -66,15 +133,39 @@ class GenerationService:
 
         original = base64_to_image(request.input_image)
         
-        # For white-balance, mask is not needed
+        # For white-balance, mask is not needed but quality scaling still applies
         if task_type == "white-balance":
-            # Return dummy mask and empty conditionals for white-balance
+            original, _, _ = self._apply_input_quality(
+                original, quality_override=request.input_quality
+            )
             mask = Image.new("RGB", original.size, (0, 0, 0))
             return original, mask, [], None
         
         # For other tasks, mask is required
         mask = base64_to_image(request.mask_image)
         
+        logger.info("🔍 [Backend Debug] Checking for reference image:")
+        logger.info("   - request.reference_image is None: %s", request.reference_image is None)
+        if request.reference_image:
+            logger.info("   - request.reference_image length: %d", len(request.reference_image))
+            logger.info("   - request.reference_image is empty string: %s", request.reference_image.strip() == "")
+            logger.info("   - request.reference_image first 50 chars: %s", request.reference_image[:50] if len(request.reference_image) > 50 else request.reference_image)
+        
+        reference = None
+        if request.reference_image and request.reference_image.strip() != "":
+            logger.info("🔍 [Backend Debug] Processing reference image for insertion")
+            reference = base64_to_image(request.reference_image)
+        else:
+            logger.info("🔍 [Backend Debug] No reference image provided - using removal model")
+        
+        original, mask, reference = self._apply_input_quality(
+            original, mask, reference, quality_override=request.input_quality
+        )
+        
+        # Safety check for type checkers
+        if mask is None:
+            raise RuntimeError("Mask image missing after quality scaling")
+
         # Resize mask to match original if needed (handled in prepare_mask_conditionals)
         # Returns: mask_rgb, background_rgb, object_rgb, mae_image (all RGB, no alpha channel)
         mask_cond, background_rgb, obj_rgb, mae_image = prepare_mask_conditionals(original, mask)
@@ -84,25 +175,12 @@ class GenerationService:
         conditional_images = [mask_cond, background_rgb, obj_rgb, mae_image]
         
         # Add reference image if provided (for object insertion)
-        reference = None
-        logger.info("🔍 [Backend Debug] Checking for reference image:")
-        logger.info("   - request.reference_image is None: %s", request.reference_image is None)
-        if request.reference_image:
-            logger.info("   - request.reference_image length: %d", len(request.reference_image))
-            logger.info("   - request.reference_image is empty string: %s", request.reference_image.strip() == "")
-            logger.info("   - request.reference_image first 50 chars: %s", request.reference_image[:50] if len(request.reference_image) > 50 else request.reference_image)
-        
-        if request.reference_image and request.reference_image.strip() != "":
-            logger.info("🔍 [Backend Debug] Processing reference image for insertion")
-            reference = base64_to_image(request.reference_image)
-            # Resize reference to match original image size
+        if reference is not None:
             if reference.size != original.size:
                 logger.info(f"🔄 Resizing reference image from {reference.size} to {original.size}")
                 reference = reference.resize(original.size, Image.Resampling.LANCZOS)
             conditional_images.append(reference)
             logger.info("✅ Reference image added for object insertion")
-        else:
-            logger.info("🔍 [Backend Debug] No reference image provided - using removal model")
         
         logger.info(f"🔍 [Backend Debug] Conditional images count: {len(conditional_images)} (expected 4 for removal, 5 for insertion with MAE)")
         return original, mask, conditional_images, reference
@@ -208,7 +286,12 @@ class GenerationService:
             # Determine task type: use request.task_type if provided, otherwise auto-detect
             if request.task_type:
                 task_type = request.task_type
-                logger.info("🎯 Using task_type from request: %s", task_type)
+                # Map task_type from API format to internal format
+                if task_type == "object-removal":
+                    task_type = "removal"
+                elif task_type == "object-insert":
+                    task_type = "insertion"
+                logger.info("🎯 Using task_type from request: %s (mapped to: %s)", request.task_type, task_type)
             else:
                 # Auto-detect based on whether reference_image is provided
                 has_reference = request.reference_image is not None and request.reference_image.strip() != ""
@@ -224,6 +307,7 @@ class GenerationService:
             logger.info("🎯 Task type: %s", task_type)
             
             pipeline = self._ensure_pipeline(task_type=task_type)
+            pipeline_callable = cast(Any, pipeline)
             original, mask, conditionals, reference = self._prepare_images(request, task_type)
             
             with torch.no_grad():
@@ -253,7 +337,7 @@ class GenerationService:
                     # According to reference: pipe(prompt, image=image, num_inference_steps=..., image_guidance_scale=..., guidance_scale=..., generator=...)
                     # The model loaded might be StableDiffusionInstructPix2PixPipeline which requires image parameter
                     try:
-                        result = pipeline(
+                        result = pipeline_callable(
                             prompt=prompt,
                             image=original,
                             num_inference_steps=num_inference_steps,
@@ -271,7 +355,7 @@ class GenerationService:
                         # If parameters are not accepted, try simpler call
                         logger.warning(f"Pipeline call failed with full parameters, trying simpler call: {e}")
                         try:
-                            result = pipeline(prompt=prompt, image=original)
+                            result = pipeline_callable(prompt=prompt, image=original)
                             generated = result.images[0]
                             # Ensure generated image has same size as original
                             if generated.size != original.size:
@@ -280,7 +364,7 @@ class GenerationService:
                         except (TypeError, ValueError) as e2:
                             # Last resort: try prompt only (for text-to-image models)
                             logger.warning(f"Pipeline doesn't accept image parameter, trying prompt only: {e2}")
-                            result = pipeline(prompt=prompt)
+                            result = pipeline_callable(prompt=prompt)
                             generated = result.images[0]
                             # For text-to-image, resize to match original
                             if generated.size != original.size:
@@ -290,7 +374,9 @@ class GenerationService:
                     # For other tasks (insertion/removal), check if using QwenImageEditPlusPipeline
                     is_qwen_pipeline = False
                     try:
-                        from diffusers import QwenImageEditPlusPipeline
+                        from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
+                            QwenImageEditPlusPipeline,
+                        )
                         is_qwen_pipeline = isinstance(pipeline, QwenImageEditPlusPipeline)
                     except (ImportError, AttributeError):
                         # QwenImageEditPlusPipeline not available, use standard pipeline
@@ -335,7 +421,7 @@ class GenerationService:
                             qwen_params["generator"] = torch.Generator(device=device).manual_seed(request.seed)
                         
                         logger.info(f"📥 Calling QwenImageEditPlusPipeline with {len(image_list)} conditional images")
-                        result = pipeline(**qwen_params)
+                        result = pipeline_callable(**qwen_params)
                         
                         # QwenImageEditPlusPipeline returns QwenImagePipelineOutput with images attribute
                         if hasattr(result, "images"):
@@ -345,14 +431,14 @@ class GenerationService:
                     else:
                         # For standard StableDiffusionInpaintPipeline, use existing params
                         params = self._build_params(request, original, mask, conditionals, task_type=task_type)
-                        result = pipeline(**params)  # type: ignore[operator]
-                        generated = (
-                            result.images[0]
-                            if hasattr(result, "images")
-                            else result[0]
-                            if isinstance(result, list)
-                            else result
-                        )
+                    result = pipeline_callable(**params)
+                    generated = (
+                        result.images[0]
+                        if hasattr(result, "images")
+                        else result[0]
+                        if isinstance(result, list)
+                        else result
+                    )
                     
                     # Ensure generated image has same size as original
                     # Model might output different size due to internal constraints (e.g., multiples of 64)

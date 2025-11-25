@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,12 @@ class GenerationRequest(BaseModel):
     task_type: Optional[str] = Field(default=None, description="Task type: 'white-balance', 'object-insert', 'object-removal' (auto-detected if not provided)")
     angle: Optional[str] = Field(default=None, description="Angle macro label for prompt composition (e.g., 'wide-angle', 'top-down'). Only used for insert/remove tasks, ignored for white-balance.")
     background_preset: Optional[str] = Field(default=None, description="Background preset name for prompt composition (e.g., 'marble-surface', 'white-background'). Only used for insert/remove tasks, ignored for white-balance.")
+    input_quality: Optional[
+        Literal["super_low", "low", "medium", "high", "original"]
+    ] = Field(
+        default=None,
+        description="Optional override for input quality preset ('super_low', 'low', 'medium', 'high', 'original').",
+    )
 
 
 class GenerationResponse(BaseModel):
@@ -151,4 +157,70 @@ class EvaluationResponse(BaseModel):
     successful_evaluations: int = Field(..., description="Number of successful evaluations")
     failed_evaluations: int = Field(..., description="Number of failed evaluations")
     total_evaluation_time: float = Field(..., description="Total time taken for all evaluations")
+
+
+class BenchmarkRequest(BaseModel):
+    """Request for benchmark evaluation."""
+    input_path: str = Field(..., description="Path to folder, ZIP file, or Parquet file")
+    task_type: str = Field(
+        default="object-removal",
+        description="Task type: 'object-removal', 'object-insert', or 'white-balance'"
+    )
+    prompt: str = Field(
+        default="remove the object",
+        description="Prompt for image generation"
+    )
+    sample_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of samples to process (0 = all images)"
+    )
+    num_inference_steps: Optional[int] = Field(default=None, ge=1, le=100)
+    guidance_scale: Optional[float] = Field(default=None, ge=0.5, le=20)
+    true_cfg_scale: Optional[float] = Field(default=None, ge=0.5, le=15)
+    negative_prompt: Optional[str] = Field(default=None)
+    seed: Optional[int] = Field(default=None)
+    input_quality: Optional[str] = Field(
+        default=None,
+        description="Input quality preset: 'super_low', 'low', 'medium', 'high', 'original'"
+    )
+
+
+class BenchmarkResult(BaseModel):
+    """Result for a single benchmark image."""
+    image_id: str = Field(..., description="Image ID (filename without extension)")
+    filename: str = Field(..., description="Original filename")
+    success: bool = Field(..., description="Whether generation was successful")
+    psnr: Optional[float] = Field(default=None, description="PSNR score [dB]")
+    ssim: Optional[float] = Field(default=None, description="SSIM score [0,1]")
+    lpips: Optional[float] = Field(default=None, description="LPIPS score [0,1]")
+    clip_score: Optional[float] = Field(default=None, description="CLIP-S score [0,1]")
+    delta_e: Optional[float] = Field(default=None, description="Delta E 2000 score")
+    generation_time: float = Field(default=0.0, description="Generation time in seconds")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class BenchmarkSummary(BaseModel):
+    """Summary statistics for benchmark results."""
+    total_images: int
+    successful: int
+    failed: int
+    psnr: Optional[Dict[str, float]] = None
+    ssim: Optional[Dict[str, float]] = None
+    lpips: Optional[Dict[str, float]] = None
+    clip_score: Optional[Dict[str, float]] = None
+    delta_e: Optional[Dict[str, float]] = None
+    generation_time: Optional[Dict[str, float]] = None
+
+
+class BenchmarkResponse(BaseModel):
+    """Response for benchmark request."""
+    success: bool
+    results: List[BenchmarkResult] = Field(..., description="Per-image results")
+    summary: BenchmarkSummary = Field(..., description="Summary statistics")
+    total_time: float = Field(..., description="Total benchmark time in seconds")
+    exported_files: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Paths to exported files (CSV, JSON, LaTeX)"
+    )
 

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.endpoints import evaluation, generation, system, white_balance, smart_mask, visualization
+from .api.endpoints import evaluation, generation, system, white_balance, smart_mask, visualization, benchmark
 from .core.config import settings
 from .core.pipeline import clear_pipeline_cache
 
@@ -74,7 +74,7 @@ def create_app() -> FastAPI:
     
     # In debug mode, automatically add common localhost ports for development convenience
     if settings.debug:
-        common_ports = [3000, 3001, 3002, 3003, 5173, 5174]  # Next.js, Vite default ports
+        common_ports = [3000, 3001, 3002, 3003, 3300, 5173, 5174]  # common dev ports
         for port in common_ports:
             origin = f"http://localhost:{port}"
             if origin not in cors_origins:
@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(white_balance.router)
     app.include_router(smart_mask.router)
     app.include_router(visualization.router)
+    app.include_router(benchmark.router)
     
     logger.info("✅ Routers registered:")
     logger.info("   - System: /api/health, /api/clear-cache")
@@ -108,6 +109,7 @@ def create_app() -> FastAPI:
     logger.info("   - White Balance: /api/white-balance")
     logger.info("   - Smart Mask: /api/smart-mask")
     logger.info("   - Visualization: /api/visualization")
+    logger.info("   - Benchmark: /api/benchmark/run, /api/benchmark/upload")
 
     return app
 

@@ -836,9 +836,9 @@ export function useMasking(
         strokeMovementRef.current = 0;
       }
 
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      setIsMaskDrawing(true);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    setIsMaskDrawing(true);
     }
   }, [isMaskingMode, uploadedImage, imageDimensions, getCanvasCoordinates, captureCanvasState, enableSmartMasking, isSmartMaskLoading, maskToolType]);
 
@@ -906,10 +906,10 @@ export function useMasking(
           const distance = Math.sqrt(dx * dx + dy * dy);
           strokeMovementRef.current = Math.max(strokeMovementRef.current, distance);
         }
-      }
+    }
 
-      ctx.lineTo(x, y);
-      ctx.stroke();
+    ctx.lineTo(x, y);
+    ctx.stroke();
     }
   }, [isMaskDrawing, isMaskingMode, getCanvasCoordinates, enableSmartMasking, isSmartMaskLoading, maskToolType]);
 

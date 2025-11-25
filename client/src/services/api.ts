@@ -4,6 +4,8 @@
 // To change: Set NEXT_PUBLIC_API_URL in .env.local file
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8003';
 
+export type InputQualityPreset = "super_low" | "low" | "medium" | "high" | "original";
+
 export interface ModelSettings {
   true_cfg_scale?: number;
   num_inference_steps?: number;
@@ -12,6 +14,7 @@ export interface ModelSettings {
   generator_seed?: number;
   width?: number;
   height?: number;
+  input_quality?: InputQualityPreset;
 }
 
 export interface GenerationRequest {
@@ -27,6 +30,7 @@ export interface GenerationRequest {
   negative_prompt?: string;
   seed?: number;
   task_type?: "white-balance" | "object-insert" | "object-removal";
+  input_quality?: InputQualityPreset;
 }
 
 export interface GenerationResponse {
@@ -276,11 +280,11 @@ class ApiService {
 
         // Race between the actual request and timeout
         const requestPromise = this.makeRequest<{
-          status: string;
-          model_loaded: boolean;
-          device: string;
-          device_info?: Record<string, any>;
-        }>('/api/health');
+      status: string;
+      model_loaded: boolean;
+      device: string;
+      device_info?: Record<string, any>;
+    }>('/api/health');
 
         const result = await Promise.race([requestPromise, timeoutPromise]);
         return result;
@@ -488,6 +492,104 @@ class ApiService {
 
   getVisualizationGeneratedUrl(requestId: string): string {
     return `${this.baseUrl}/api/visualization/${requestId}/generated`;
+  }
+
+  // Benchmark methods
+  async validateBenchmarkFolder(file: File | File[]): Promise<{
+    success: boolean;
+    message: string;
+    image_count: number;
+    details?: Record<string, number>;
+  }> {
+    try {
+      const formData = new FormData();
+      
+      if (Array.isArray(file)) {
+        // Folder upload: append all files with their relative paths
+        file.forEach((f) => {
+          const relativePath = (f as any).webkitRelativePath || f.name;
+          formData.append('files', f, relativePath);
+        });
+        formData.append('upload_type', 'folder');
+      } else {
+        // ZIP file upload
+        formData.append('file', file);
+        formData.append('upload_type', 'zip');
+      }
+
+      const response = await fetch(`${this.baseUrl}/api/benchmark/validate`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Validation failed');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error validating benchmark folder:', error);
+      throw error;
+    }
+  }
+
+  async runBenchmark(
+    file: File | File[],
+    options: {
+      task_type?: string;
+      prompt?: string;
+      sample_count?: number;
+      num_inference_steps?: number;
+      guidance_scale?: number;
+      true_cfg_scale?: number;
+      negative_prompt?: string;
+      seed?: number;
+      input_quality?: string;
+    }
+  ): Promise<any> {
+    try {
+      const formData = new FormData();
+      
+      if (Array.isArray(file)) {
+        // Folder upload: append all files with their relative paths
+        file.forEach((f) => {
+          const relativePath = (f as any).webkitRelativePath || f.name;
+          formData.append('files', f, relativePath);
+        });
+        formData.append('upload_type', 'folder');
+      } else {
+        // ZIP file upload
+        formData.append('file', file);
+        formData.append('upload_type', 'zip');
+      }
+      
+      formData.append('task_type', options.task_type || 'object-removal');
+      // Prompt is required - will be used for ALL images
+      formData.append('prompt', options.prompt || '');
+      if (options.sample_count !== undefined) formData.append('sample_count', options.sample_count.toString());
+      if (options.num_inference_steps) formData.append('num_inference_steps', options.num_inference_steps.toString());
+      if (options.guidance_scale) formData.append('guidance_scale', options.guidance_scale.toString());
+      if (options.true_cfg_scale) formData.append('true_cfg_scale', options.true_cfg_scale.toString());
+      if (options.negative_prompt) formData.append('negative_prompt', options.negative_prompt);
+      if (options.seed !== undefined) formData.append('seed', options.seed.toString());
+      if (options.input_quality) formData.append('input_quality', options.input_quality);
+
+      const response = await fetch(`${this.baseUrl}/api/benchmark/run`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Benchmark failed');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error running benchmark:', error);
+      throw error;
+    }
   }
 }
 

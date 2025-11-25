@@ -5,7 +5,7 @@ import warnings
 from typing import Optional
 
 import torch
-from diffusers import DiffusionPipeline
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 from .config import settings
 
@@ -39,7 +39,8 @@ def load_pix2pix_pipeline() -> DiffusionPipeline:
         return _pipeline_white_balance
     
     # Load Pix2Pix model for white balance from HuggingFace
-    logger.info("🎨 Loading Pix2Pix white balance model from HuggingFace: ArtMancer/Pix2Pix_wb")
+    model_id = settings.model_file_white_balance or "ArtMancer/Pix2Pix_wb"
+    logger.info(f"🎨 Loading Pix2Pix white balance model from HuggingFace: {model_id}")
     
     # Import get_device from pipeline module to avoid circular import
     from .pipeline import get_device
@@ -66,14 +67,14 @@ def load_pix2pix_pipeline() -> DiffusionPipeline:
             # Note: Some pipelines may not accept dtype directly, so we try both methods
             try:
                 pipe = DiffusionPipeline.from_pretrained(
-                    "ArtMancer/Pix2Pix_wb",
+                    model_id,
                     dtype=dtype,
                     device_map=device_map,
                 )
             except (TypeError, ValueError):
                 # Fallback: load without dtype, then set it manually
                 pipe = DiffusionPipeline.from_pretrained(
-                    "ArtMancer/Pix2Pix_wb",
+                    model_id,
                     device_map=device_map,
                 )
                 # Set dtype after loading if needed
@@ -83,7 +84,7 @@ def load_pix2pix_pipeline() -> DiffusionPipeline:
             # Final fallback for older diffusers versions
             logger.warning(f"Failed to load with dtype, trying torch_dtype: {e}")
             pipe = DiffusionPipeline.from_pretrained(
-                "ArtMancer/Pix2Pix_wb",
+                model_id,
                 torch_dtype=dtype,
                 device_map=device_map,
             )
@@ -107,9 +108,9 @@ def load_pix2pix_pipeline() -> DiffusionPipeline:
                 logger.warning("⚠️ Could not enable xFormers attention: %s", exc)
     
     # VAE slicing for white-balance (Pix2Pix) pipeline
-    if settings.enable_vae_slicing_white_balance and hasattr(pipe, "enable_vae_slicing"):
+    if settings.enable_vae_slicing_white_balance and hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
         try:
-            pipe.enable_vae_slicing()
+            pipe.vae.enable_slicing()
             logger.info("✅ VAE slicing enabled for Pix2Pix white-balance pipeline")
         except Exception as exc:
             logger.warning("⚠️ Could not enable VAE slicing for Pix2Pix: %s", exc)

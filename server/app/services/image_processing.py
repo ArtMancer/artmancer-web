@@ -189,7 +189,12 @@ def generate_mae_image(
     # cv2.INPAINT_TELEA is faster than cv2.INPAINT_NS (Navier-Stokes)
     if CV2_AVAILABLE:
         try:
-            mae_array = cv2.inpaint(original_array, mask_inverted, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+            mae_array = cv2.inpaint(
+                original_array,
+                mask_inverted,
+                inpaintRadius=3,
+                flags=cv2.INPAINT_TELEA,
+            )
             mae_image = Image.fromarray(mae_array, mode="RGB")
             logger.info("✅ Generated MAE image using OpenCV Telea inpainting")
             return mae_image
@@ -199,22 +204,22 @@ def generate_mae_image(
     else:
         logger.info("📝 OpenCV not available, using mean fill for MAE image")
     
-    # Fallback: fill masked region with mean color of background
-    mask_bool = mask_array > 128  # Threshold to get binary mask
-    
-    # Calculate mean color of background (where mask is NOT)
-    background_pixels = original_array[~mask_bool]
-    if len(background_pixels) > 0:
-        mean_color = np.mean(background_pixels.reshape(-1, 3), axis=0).astype(np.uint8)
-    else:
-        # If no background pixels, use gray
-        mean_color = np.array([128, 128, 128], dtype=np.uint8)
-    
-    # Create MAE image: original where mask is NOT, mean color where mask is
-    mae_array = original_array.copy()
-    mae_array[mask_bool] = mean_color
-    mae_image = Image.fromarray(mae_array, mode="RGB")
-    logger.info("✅ Generated MAE image using mean color fill fallback")
+        # Fallback: fill masked region with mean color of background
+        mask_bool = mask_array > 128  # Threshold to get binary mask
+        
+        # Calculate mean color of background (where mask is NOT)
+        background_pixels = original_array[~mask_bool]
+        if len(background_pixels) > 0:
+            mean_color = np.mean(background_pixels.reshape(-1, 3), axis=0).astype(np.uint8)
+        else:
+            # If no background pixels, use gray
+            mean_color = np.array([128, 128, 128], dtype=np.uint8)
+        
+        # Create MAE image: original where mask is NOT, mean color where mask is
+        mae_array = original_array.copy()
+        mae_array[mask_bool] = mean_color
+        mae_image = Image.fromarray(mae_array, mode="RGB")
+        logger.info("✅ Generated MAE image using mean color fill fallback")
     
     return mae_image
 

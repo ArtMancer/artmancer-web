@@ -37,7 +37,7 @@ interface CanvasProps {
   isHelpOpen: boolean;
 
   // Evaluation mode props
-  appMode?: "inference" | "evaluation";
+  appMode?: "inference" | "benchmark";
   evaluationImagePairs?: Array<{
     original: string | null;
     target: string | null;
@@ -220,7 +220,7 @@ export default function Canvas({
 
   // Evaluation mode: show grid of images
   const isEvaluationMode =
-    appMode === "evaluation" && evaluationImagePairs.length > 0;
+    appMode === "benchmark" && evaluationImagePairs.length > 0;
   // Filter valid pairs and get their original indices
   const validPairsWithIndices = isEvaluationMode
     ? evaluationImagePairs

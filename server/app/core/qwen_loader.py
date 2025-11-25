@@ -138,22 +138,48 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             
             # Load text encoder and tokenizer
             logger.info("📥 Loading text encoder and tokenizer from HuggingFace...")
-            text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                "Qwen/Qwen2.5-VL-7B-Instruct",
-                torch_dtype=dtype,
-                device_map=device if device.type == "cuda" else None,
-            )
-            tokenizer = Qwen2Tokenizer.from_pretrained(
-                "Qwen/Qwen2.5-VL-7B-Instruct"
-            )
+            try:
+                text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2.5-VL-7B-Instruct",
+                    torch_dtype=dtype,
+                    device_map=device if device.type == "cuda" else None,
+                )
+                tokenizer = Qwen2Tokenizer.from_pretrained(
+                    "Qwen/Qwen2.5-VL-7B-Instruct"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load from Qwen2.5-VL-7B-Instruct: {e}")
+                logger.info("📥 Trying Qwen/Qwen2-VL-7B-Instruct instead...")
+                text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2-VL-7B-Instruct",
+                    torch_dtype=dtype,
+                    device_map=device if device.type == "cuda" else None,
+                )
+                tokenizer = Qwen2Tokenizer.from_pretrained(
+                    "Qwen/Qwen2-VL-7B-Instruct"
+                )
             
             # Load VAE
             logger.info("📥 Loading VAE from HuggingFace...")
-            vae = AutoencoderKLQwenImage.from_pretrained(
-                "Qwen/Qwen2-VL-7B-Instruct",
-                subfolder="vae",
-                torch_dtype=dtype,
-            )
+            try:
+                vae = AutoencoderKLQwenImage.from_pretrained(
+                    "Qwen/Qwen2-VL-7B-Instruct",
+                    subfolder="vae",
+                    torch_dtype=dtype,
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load VAE from Qwen2-VL-7B-Instruct: {e}")
+                logger.info("📥 Trying without subfolder...")
+                try:
+                    vae = AutoencoderKLQwenImage.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        torch_dtype=dtype,
+                    )
+                except Exception as e2:
+                    logger.error(f"❌ Failed to load VAE: {e2}")
+                    # Don't raise - let it fallback to standard pipeline
+                    logger.warning("⚠️ Will fallback to standard StableDiffusionInpaintPipeline")
+                    raise
             vae = vae.to(device)
             
             # Load transformer from safetensors (NOT from HuggingFace to save bandwidth)
@@ -171,11 +197,28 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             
             # Load transformer base model structure from HuggingFace (small config files only)
             logger.info("📥 Loading transformer base structure from HuggingFace (config only, no weights)...")
-            transformer = QwenImageTransformer2DModel.from_pretrained(
-                "Qwen/Qwen2-VL-7B-Instruct",
-                subfolder="transformer",
-                torch_dtype=dtype,
-            )
+            try:
+                transformer = QwenImageTransformer2DModel.from_pretrained(
+                    "Qwen/Qwen2-VL-7B-Instruct",
+                    subfolder="transformer",
+                    torch_dtype=dtype,
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load transformer from Qwen2-VL-7B-Instruct/transformer: {e}")
+                logger.info("📥 Trying Qwen/Qwen2.5-VL-7B-Instruct instead...")
+                try:
+                    transformer = QwenImageTransformer2DModel.from_pretrained(
+                        "Qwen/Qwen2.5-VL-7B-Instruct",
+                        subfolder="transformer",
+                        torch_dtype=dtype,
+                    )
+                except Exception as e2:
+                    logger.warning(f"⚠️ Failed to load transformer from Qwen2.5-VL-7B-Instruct: {e2}")
+                    logger.info("📥 Trying without subfolder...")
+                    transformer = QwenImageTransformer2DModel.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        torch_dtype=dtype,
+                    )
             
             # Load custom transformer weights from safetensors
             if transformer_weights:
@@ -208,22 +251,42 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                 
                 # Load text encoder and tokenizer
                 logger.info("📥 Loading text encoder and tokenizer...")
-                text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    "Qwen/Qwen2.5-VL-7B-Instruct",
-                    torch_dtype=dtype,
-                    device_map=device if device.type == "cuda" else None,
-                )
-                tokenizer = Qwen2Tokenizer.from_pretrained(
-                    "Qwen/Qwen2.5-VL-7B-Instruct"
-                )
+                try:
+                    text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        "Qwen/Qwen2.5-VL-7B-Instruct",
+                        torch_dtype=dtype,
+                        device_map=device if device.type == "cuda" else None,
+                    )
+                    tokenizer = Qwen2Tokenizer.from_pretrained(
+                        "Qwen/Qwen2.5-VL-7B-Instruct"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to load from Qwen2.5-VL-7B-Instruct: {e}")
+                    logger.info("📥 Trying Qwen/Qwen2-VL-7B-Instruct instead...")
+                    text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        torch_dtype=dtype,
+                        device_map=device if device.type == "cuda" else None,
+                    )
+                    tokenizer = Qwen2Tokenizer.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct"
+                    )
                 
                 # Load VAE
                 logger.info("📥 Loading VAE...")
-                vae = AutoencoderKLQwenImage.from_pretrained(
-                    "Qwen/Qwen2-VL-7B-Instruct",
-                    subfolder="vae",
-                    torch_dtype=dtype,
-                )
+                try:
+                    vae = AutoencoderKLQwenImage.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        subfolder="vae",
+                        torch_dtype=dtype,
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to load VAE from Qwen2-VL-7B-Instruct: {e}")
+                    logger.info("📥 Trying without subfolder...")
+                    vae = AutoencoderKLQwenImage.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        torch_dtype=dtype,
+                    )
                 vae = vae.to(device)
                 
                 # Load transformer from safetensors
@@ -240,11 +303,28 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                         transformer_weights[clean_key] = value
                 
                 # Load transformer
-                transformer = QwenImageTransformer2DModel.from_pretrained(
-                    "Qwen/Qwen2-VL-7B-Instruct",
-                    subfolder="transformer",
-                    torch_dtype=dtype,
-                )
+                try:
+                    transformer = QwenImageTransformer2DModel.from_pretrained(
+                        "Qwen/Qwen2-VL-7B-Instruct",
+                        subfolder="transformer",
+                        torch_dtype=dtype,
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to load transformer from Qwen2-VL-7B-Instruct/transformer: {e}")
+                    logger.info("📥 Trying Qwen/Qwen2.5-VL-7B-Instruct instead...")
+                    try:
+                        transformer = QwenImageTransformer2DModel.from_pretrained(
+                            "Qwen/Qwen2.5-VL-7B-Instruct",
+                            subfolder="transformer",
+                            torch_dtype=dtype,
+                        )
+                    except Exception as e2:
+                        logger.warning(f"⚠️ Failed to load transformer from Qwen2.5-VL-7B-Instruct: {e2}")
+                        logger.info("📥 Trying without subfolder...")
+                        transformer = QwenImageTransformer2DModel.from_pretrained(
+                            "Qwen/Qwen2-VL-7B-Instruct",
+                            torch_dtype=dtype,
+                        )
                 
                 # Load weights into transformer
                 if transformer_weights:
