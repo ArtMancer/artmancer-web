@@ -291,3 +291,6 @@ server/*.sqlite3
 *.safetensors
 *.pt
 /.cursor/plans
+
+# Datasets
+datasets/
