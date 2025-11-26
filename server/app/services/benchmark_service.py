@@ -385,22 +385,15 @@ class BenchmarkSystem:
                     })
                     logger.info(f"✅ Generated {i+1}/{len(self.input_images)}: {input_path.name}")
                 else:
-                    generated_results.append({
-                        "index": i,
-                        "filename": input_path.name,
-                        "success": False,
-                        "error": result.get("error", "Unknown error"),
-                    })
-                    logger.error(f"❌ Failed to generate {input_path.name}")
+                    error_message = result.get("error", "Unknown error")
+                    logger.error(f"❌ Failed to generate {input_path.name}: {error_message}")
+                    raise RuntimeError(
+                        f"Generation failed for {input_path.name}: {error_message}"
+                    )
                     
             except Exception as e:
                 logger.exception(f"❌ Error generating image {i+1}: {e}")
-                generated_results.append({
-                    "index": i,
-                    "filename": input_path.name if i < len(self.input_images) else "unknown",
-                    "success": False,
-                    "error": str(e),
-                })
+                raise
         
         return generated_results
     

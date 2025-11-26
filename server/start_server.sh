@@ -8,21 +8,22 @@ if [ ! -f ".env" ]; then
     if [ -f ".env.example" ]; then
         echo "⚠️  .env file not found. Creating from .env.example..."
         cp .env.example .env
-        echo "✅ .env file created. Update MODEL_FILE if your checkpoint is stored elsewhere."
+        echo "✅ .env file created. Update MODEL_FILE_INSERTION and MODEL_FILE_REMOVAL if your checkpoints are stored elsewhere."
     else
         echo "⚠️ .env file not found. Creating a minimal one..."
         cat <<'EOF' > .env
-MODEL_FILE=./qwen_2509_object_insertion_512_000002750.safetensors
+MODEL_FILE_INSERTION=./checkpoints/qwen_2509_object_insertion_512_000002750.safetensors
+MODEL_FILE_REMOVAL=./checkpoints/qwen_2509_object_removal_512_000007500.safetensors
 EOF
-        echo "✅ Created .env with default MODEL_FILE."
+        echo "✅ Created .env with default MODEL_FILE_INSERTION and MODEL_FILE_REMOVAL."
     fi
 fi
 
 # Ensure model files exist
 MODEL_FILE_INSERTION=$(grep "^MODEL_FILE_INSERTION=" .env | cut -d'=' -f2-)
-MODEL_FILE_INSERTION=${MODEL_FILE_INSERTION:-./qwen_2509_object_insertion_512_000002750.safetensors}
+MODEL_FILE_INSERTION=${MODEL_FILE_INSERTION:-./checkpoints/qwen_2509_object_insertion_512_000002750.safetensors}
 MODEL_FILE_REMOVAL=$(grep "^MODEL_FILE_REMOVAL=" .env | cut -d'=' -f2-)
-MODEL_FILE_REMOVAL=${MODEL_FILE_REMOVAL:-./qwen2509_object_removal_512_000002500.safetensors}
+MODEL_FILE_REMOVAL=${MODEL_FILE_REMOVAL:-./checkpoints/qwen_2509_object_removal_512_000007500.safetensors}
 
 if [ ! -f "$MODEL_FILE_INSERTION" ]; then
     echo "❌ Insertion model file not found at $MODEL_FILE_INSERTION"
@@ -34,6 +35,26 @@ if [ ! -f "$MODEL_FILE_REMOVAL" ]; then
     echo "❌ Removal model file not found at $MODEL_FILE_REMOVAL"
     echo "📝 Update MODEL_FILE_REMOVAL in .env to point to your safetensors checkpoint."
     exit 1
+fi
+
+# Fix virtual environment location for WSL (avoid permission issues on Windows filesystem)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$SCRIPT_DIR" == /mnt/* ]] && [ -d "$SCRIPT_DIR/.venv" ]; then
+    # Check if .venv is a symlink (already fixed) or real directory (needs fixing)
+    if [ ! -L "$SCRIPT_DIR/.venv" ]; then
+        echo "⚠️  Virtual environment on Windows filesystem detected."
+        echo "🔧 Moving .venv to Linux filesystem to avoid permission issues..."
+        VENV_LINUX="$HOME/.cache/artmancer-web-venv"
+        rm -rf "$SCRIPT_DIR/.venv"
+        ln -sf "$VENV_LINUX" "$SCRIPT_DIR/.venv"
+        export UV_PROJECT_ENVIRONMENT="$VENV_LINUX"
+        echo "✅ Using Linux filesystem for .venv: $VENV_LINUX"
+    fi
+elif [[ "$SCRIPT_DIR" == /mnt/* ]]; then
+    # Project on Windows filesystem but no .venv yet - use Linux filesystem
+    VENV_LINUX="$HOME/.cache/artmancer-web-venv"
+    export UV_PROJECT_ENVIRONMENT="$VENV_LINUX"
+    echo "📦 Virtual environment will be created on Linux filesystem: $VENV_LINUX"
 fi
 
 # Install dependencies if needed

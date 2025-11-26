@@ -13,8 +13,7 @@ dependencies = [
   "uvicorn[standard]>=0.30.0",
   "python-dotenv>=1.0.0",
   "requests>=2.31.0",
-  "torch>=2.8.0",
-  "torchvision>=0.23.0",
+  # Torch sẽ được cài qua extras
   "diffusers>=0.35.1",
   "transformers>=4.56.2",
   "accelerate>=1.10.1",
@@ -26,8 +25,32 @@ dependencies = [
   "scikit-image>=0.21.0",
   "ultralytics>=8.0.0",
   "opencv-python-headless>=4.11.0.86",
-  "clip",
   "pandas>=2.3.3",
+]
+
+[project.optional-dependencies]
+# CUDA 12.8
+cuda = [
+  "torch>=2.8.0",
+  "torchvision>=0.23.0",
+]
+
+# Intel XPU
+xpu = [
+  "torch>=2.8.0",
+  "torchvision>=0.23.0",
+  "pytorch-triton-xpu",
+]
+
+# CPU only
+cpu = [
+  "torch>=2.8.0",
+  "torchvision>=0.23.0",
+]
+
+# CLIP (common for all)
+clip = [
+  "clip @ git+https://github.com/openai/CLIP.git",
 ]
 
 [[tool.uv.index]]
@@ -35,12 +58,23 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
 [tool.uv.sources]
+# CUDA sources
 torch = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  # { index = "pytorch-cu128", marker = "extra == 'cuda'" },
+  # We explicitly say: use xpu ONLY if cuda is NOT enabled
+  { index = "pytorch-xpu", marker = "extra == 'xpu' and extra != 'cuda'" },
 ]
 torchvision = [
-  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  # { index = "pytorch-cu128", marker = "extra == 'cuda'" },
+  { index = "pytorch-xpu", marker = "extra == 'xpu' and extra != 'cuda'" },
+]
+pytorch-triton-xpu = [
+  { index = "pytorch-xpu", marker = "extra == 'xpu'" },
 ]
 diffusers = { git = "https://github.com/huggingface/diffusers" }
-clip = { git = "https://github.com/openai/CLIP.git" }

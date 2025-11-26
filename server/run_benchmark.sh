@@ -3,7 +3,18 @@
 # Benchmark Runner Script for ArtMancer
 # Usage: ./run_benchmark.sh <input_path> [options]
 
-set -e  # Exit on error
+set -euo pipefail  # Exit on error, unset vars, fail in pipelines
+
+WORK_DIR=""
+
+cleanup() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+        rm -rf "$WORK_DIR"
+    fi
+    trap - EXIT
+}
+
+trap cleanup EXIT
 
 # Colors for output
 RED='\033[0;31m'
@@ -24,6 +35,7 @@ NEGATIVE_PROMPT=""
 SEED=""
 INPUT_QUALITY="high"
 OUTPUT_DIR=""
+DEVICE_MODE="auto"
 
 # Function to print usage
 print_usage() {
@@ -31,8 +43,8 @@ print_usage() {
     echo "  ./run_benchmark.sh <input_path> [options]"
     echo ""
     echo -e "${BLUE}Arguments:${NC}"
-    echo "  <input_path>          Path to benchmark folder or ZIP file"
-    echo "                       Must contain: input/, mask/, groundtruth/ folders"
+    echo "  <input_path>          Path to dataset folder or ZIP file."
+    echo "                       Expecting sub-folders: input/, mae/ (optional), mask/, target/"
     echo ""
     echo -e "${BLUE}Options:${NC}"
     echo "  -t, --task TYPE       Task type: object-removal (default)"
@@ -44,6 +56,7 @@ print_usage() {
     echo "  --negative-prompt T   Negative prompt"
     echo "  --seed N              Random seed"
     echo "  --quality TYPE        Input quality: super_low, low, medium, high, original (default: high)"
+    echo "  --device MODE         Device preference: auto, cuda, xpu, mps, cpu (default: auto)"
     echo "  -o, --output DIR      Output directory for results (default: ./benchmark_results)"
     echo "  -h, --help            Show this help message"
     echo ""
@@ -98,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --quality)
             INPUT_QUALITY="$2"
+            shift 2
+            ;;
+        --device)
+            DEVICE_MODE="$2"
             shift 2
             ;;
         -o|--output)
@@ -191,6 +208,7 @@ mkdir -p "$OUTPUT_DIR"
 
 # Check if Python script exists
 PYTHON_SCRIPT="$SCRIPT_DIR/app/cli/benchmark_cli.py"
+DATASET_PREPROCESSOR="$SCRIPT_DIR/app/utils/dataset_preprocessor.py"
 
 if [ ! -f "$PYTHON_SCRIPT" ]; then
     echo -e "${RED}Error: Python CLI script not found: $PYTHON_SCRIPT${NC}"
@@ -198,17 +216,137 @@ if [ ! -f "$PYTHON_SCRIPT" ]; then
     exit 1
 fi
 
-# Check if uv is available
-if command -v uv &> /dev/null; then
-    PYTHON_CMD="uv run python"
-elif command -v python3 &> /dev/null; then
-    PYTHON_CMD="python3"
+if [ ! -f "$DATASET_PREPROCESSOR" ]; then
+    echo -e "${RED}Error: Dataset preprocessor not found: $DATASET_PREPROCESSOR${NC}"
+    exit 1
+fi
+
+# Resolve Python interpreter
+if command -v python3 &> /dev/null; then
+    PYTHON_BIN="python3"
 elif command -v python &> /dev/null; then
-    PYTHON_CMD="python"
+    PYTHON_BIN="python"
 else
     echo -e "${RED}Error: Python not found. Please install Python 3.8+${NC}"
     exit 1
 fi
+
+# Prefer running under uv if available
+if command -v uv &> /dev/null; then
+    PYTHON_CMD=(uv run "$PYTHON_BIN")
+else
+    PYTHON_CMD=("$PYTHON_BIN")
+fi
+
+# Prepare temp workspace
+WORK_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'benchmark_tmp')"
+MANIFEST_PATH="$WORK_DIR/dataset_manifest.json"
+NORMALIZED_DATASET="$WORK_DIR/dataset"
+
+echo -e "${BLUE}🔧 Preparing dataset structure (input/mae/mask/target) ...${NC}"
+if ! PREPROCESS_JSON=$("${PYTHON_CMD[@]}" "$DATASET_PREPROCESSOR" \
+        --source "$INPUT_PATH" \
+        --output "$NORMALIZED_DATASET" \
+        --manifest "$MANIFEST_PATH"); then
+    echo -e "${RED}❌ Dataset preprocessing failed${NC}"
+    exit 1
+fi
+INPUT_PATH="$NORMALIZED_DATASET"
+
+# Extract summary fields from JSON output
+TOTAL_PAIRS="$(
+    PREPROCESS_JSON="$PREPROCESS_JSON" "$PYTHON_BIN" - <<'PY'
+import json, os
+data = json.loads(os.environ["PREPROCESS_JSON"])
+print(data.get("total_pairs", 0))
+PY
+)"
+
+MAE_AVAILABLE="$(
+    PREPROCESS_JSON="$PREPROCESS_JSON" "$PYTHON_BIN" - <<'PY'
+import json, os
+data = json.loads(os.environ["PREPROCESS_JSON"])
+print("yes" if data.get("mae_available") else "no")
+PY
+)"
+
+echo -e "${GREEN}✅ Dataset normalized (${TOTAL_PAIRS} pairs, mae:$MAE_AVAILABLE). Manifest: $MANIFEST_PATH${NC}"
+
+# Select device backend
+DEVICE_SELECTION_OUTPUT=$(
+    REQUESTED_DEVICE="$DEVICE_MODE" "${PYTHON_CMD[@]}" - <<'PY'
+import os, sys, torch
+
+requested = os.environ["REQUESTED_DEVICE"].strip().lower()
+valid_modes = {"auto", "cuda", "xpu", "mps", "cpu"}
+
+def available(name: str) -> bool:
+    if name == "cuda":
+        return torch.cuda.is_available()
+    if name == "xpu":
+        return hasattr(torch, "xpu") and torch.xpu.is_available()
+    if name == "mps":
+        backend = getattr(torch.backends, "mps", None)
+        return backend.is_available() if backend else False
+    if name == "cpu":
+        return True
+    return False
+
+if requested not in valid_modes:
+    sys.stderr.write(
+        f"Invalid --device value '{requested}'. Valid options: auto, cuda, xpu, mps, cpu.\\n"
+    )
+    sys.exit(1)
+
+order = ("cuda", "xpu", "mps", "cpu")
+
+if requested == "auto":
+    for name in order:
+        if available(name):
+            print(name)
+            sys.exit(0)
+    print("cpu")
+    sys.exit(0)
+
+if not available(requested):
+    sys.stderr.write(
+        f"Requested device '{requested}' is not available on this system.\\n"
+    )
+    sys.exit(2)
+
+print(requested)
+PY
+)
+DEVICE_STATUS=$?
+if [ $DEVICE_STATUS -ne 0 ]; then
+    echo -e "${RED}❌ Unable to select execution device. Aborting.${NC}"
+    exit 1
+fi
+
+SELECTED_DEVICE="$(echo "$DEVICE_SELECTION_OUTPUT" | tr -d '\r\n')"
+export ARTMANCER_DEVICE="$SELECTED_DEVICE"
+
+case "$SELECTED_DEVICE" in
+    cuda)
+        echo -e "${GREEN}🟢 CUDA device detected. Running with NVIDIA acceleration.${NC}"
+        ;;
+    xpu)
+        export SYCL_DEVICE_FILTER="gpu"
+        export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
+        echo -e "${GREEN}🟢 Intel XPU detected. Running with torch.xpu backend.${NC}"
+        ;;
+    mps)
+        echo -e "${GREEN}🟢 Apple MPS backend detected.${NC}"
+        ;;
+    cpu)
+        export CUDA_VISIBLE_DEVICES=""
+        export PYTORCH_ENABLE_MPS_FALLBACK=1
+        echo -e "${YELLOW}⚠️  No compatible GPU detected. Falling back to CPU.${NC}"
+        ;;
+    *)
+        echo -e "${YELLOW}⚠️  Unknown device '$SELECTED_DEVICE'. Proceeding but behavior may be undefined.${NC}"
+        ;;
+esac
 
 # Print configuration
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
@@ -224,6 +362,7 @@ echo "  Inference Steps: $NUM_INFERENCE_STEPS"
 echo "  Guidance Scale: $GUIDANCE_SCALE"
 echo "  CFG Scale:      $TRUE_CFG_SCALE"
 echo "  Input Quality:  $INPUT_QUALITY"
+echo "  Device:         $SELECTED_DEVICE"
 echo "  Output Dir:     $OUTPUT_DIR"
 [ -n "$NEGATIVE_PROMPT" ] && echo "  Negative Prompt: $NEGATIVE_PROMPT"
 [ -n "$SEED" ] && echo "  Seed:            $SEED"
@@ -235,8 +374,8 @@ echo ""
 
 cd "$SCRIPT_DIR"
 
-$PYTHON_CMD "$PYTHON_SCRIPT" \
-    --input "$ABS_INPUT_PATH" \
+"${PYTHON_CMD[@]}" "$PYTHON_SCRIPT" \
+    --input "$INPUT_PATH" \
     --task "$TASK_TYPE" \
     --prompt "$PROMPT" \
     --samples "$SAMPLE_COUNT" \
@@ -252,6 +391,10 @@ EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo ""
+    if [ -f "$MANIFEST_PATH" ]; then
+        cp "$MANIFEST_PATH" "$OUTPUT_DIR/benchmark_manifest.json"
+        echo -e "${GREEN}📄 Dataset manifest saved to $OUTPUT_DIR/benchmark_manifest.json${NC}"
+    fi
     echo -e "${GREEN}✅ Benchmark completed successfully!${NC}"
     echo -e "${GREEN}Results saved to: $OUTPUT_DIR${NC}"
 else

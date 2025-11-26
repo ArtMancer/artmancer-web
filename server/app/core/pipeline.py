@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 from functools import lru_cache
 from typing import Any, Dict
 
@@ -29,11 +30,36 @@ def is_pipeline_loaded(task_type: str | None = None) -> bool:
         return is_qwen_pipeline_loaded(task_type)
 
 
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
+def _xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
+def _resolve_device(name: str) -> torch.device | None:
+    normalized = name.strip().lower()
+    if normalized in {"cuda", "gpu", "nvidia"} and torch.cuda.is_available():
         return torch.device("cuda")
-    if torch.backends.mps.is_available():  # pragma: no cover - platform specific
+    if normalized in {"xpu", "intel", "arc"} and _xpu_available():
+        return torch.device("xpu")
+    if normalized == "mps" and torch.backends.mps.is_available():  # pragma: no cover - platform specific
         return torch.device("mps")
+    if normalized == "cpu":
+        return torch.device("cpu")
+    return None
+
+
+def get_device() -> torch.device:
+    forced = os.getenv("ARTMANCER_DEVICE", "").strip().lower()
+    if forced:
+        device = _resolve_device(forced)
+        if device is None:
+            raise RuntimeError(f"Requested device '{forced}' is not available on this machine.")
+        logger.info("⚙️  Forcing execution device to %s via ARTMANCER_DEVICE", device)
+        return device
+
+    for candidate in ("cuda", "xpu", "mps"):
+        device = _resolve_device(candidate)
+        if device is not None:
+            return device
     return torch.device("cpu")
 
 
@@ -43,7 +69,8 @@ def get_device_info() -> Dict[str, Any]:
     info: Dict[str, Any] = {
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
-        "mps_available": torch.backends.mps.is_available(),
+        "mps_available": torch.backends.mps.is_available(),  # pragma: no cover - platform specific
+        "xpu_available": _xpu_available(),
     }
 
     if torch.cuda.is_available():
@@ -51,6 +78,13 @@ def get_device_info() -> Dict[str, Any]:
         info["memory_total"] = torch.cuda.get_device_properties(0).total_memory
         info["memory_allocated"] = torch.cuda.memory_allocated()
         info["memory_reserved"] = torch.cuda.memory_reserved()
+    elif _xpu_available():
+        try:
+            info["device_name"] = torch.xpu.get_device_name()
+        except Exception:  # pragma: no cover - best effort
+            info["device_name"] = "Intel XPU"
+    elif torch.backends.mps.is_available():  # pragma: no cover - platform specific
+        info["device_name"] = "Apple MPS"
 
     return info
 
