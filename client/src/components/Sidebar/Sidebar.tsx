@@ -37,7 +37,6 @@ interface SidebarProps {
   uploadedImage: string | null;
   referenceImage: string | null;
   aiTask: "white-balance" | "object-insert" | "object-removal" | "evaluation";
-  appMode?: "inference" | "benchmark";
   isMaskingMode: boolean;
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
@@ -138,33 +137,6 @@ interface SidebarProps {
   onExportEvaluationJSON?: () => void;
   onExportEvaluationCSV?: () => void;
   onInputQualityChange: (value: InputQualityPreset) => void;
-  // Benchmark mode props
-  benchmarkFolder?: string;
-  benchmarkValidation?: {
-    success: boolean;
-    message: string;
-    image_count: number;
-    details?: Record<string, number>;
-  } | null;
-  benchmarkSampleCount?: number;
-  benchmarkTask?: "white-balance" | "object-insert" | "object-removal";
-  isRunningBenchmark?: boolean;
-  isValidatingBenchmark?: boolean;
-  benchmarkProgress?: {
-    current: number;
-    total: number;
-    currentImage?: string;
-  } | null;
-  benchmarkResults?: any;
-  onBenchmarkFolderChange?: (path: string) => void;
-  onBenchmarkFolderValidate?: (file: File | string) => void;
-  onBenchmarkSampleCountChange?: (count: number) => void;
-  onBenchmarkTaskChange?: (
-    task: "white-balance" | "object-insert" | "object-removal"
-  ) => void;
-  benchmarkPrompt?: string;
-  onBenchmarkPromptChange?: (prompt: string) => void;
-  onRunBenchmark?: () => void;
 }
 
 export default function Sidebar({
@@ -173,7 +145,6 @@ export default function Sidebar({
   uploadedImage,
   referenceImage,
   aiTask,
-  appMode = "inference",
   isMaskingMode,
   maskBrushSize,
   maskToolType = "brush",
@@ -248,22 +219,6 @@ export default function Sidebar({
   onExportEvaluationJSON,
   onExportEvaluationCSV,
   onInputQualityChange,
-  // Benchmark props with defaults
-  benchmarkFolder = "",
-  benchmarkValidation = null,
-  benchmarkSampleCount = 0,
-  benchmarkTask = "object-removal",
-  isRunningBenchmark = false,
-  isValidatingBenchmark = false,
-  benchmarkProgress = null,
-  benchmarkResults = null,
-  onBenchmarkFolderChange,
-  onBenchmarkFolderValidate,
-  onBenchmarkSampleCountChange,
-  onBenchmarkTaskChange,
-  benchmarkPrompt = "",
-  onBenchmarkPromptChange,
-  onRunBenchmark,
 }: SidebarProps) {
   // Translation hook
   const { t } = useLanguage();
@@ -345,8 +300,8 @@ export default function Sidebar({
             paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
           }}
         >
-          {/* Image Upload Section - Only show in inference mode */}
-          {!isEditingDone && appMode === "inference" && (
+          {/* Image Upload Section */}
+          {!isEditingDone && (
             <div className="pb-4 border-b border-[var(--border-color)]">
               <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                 {t("sidebar.imageUpload")}
@@ -378,8 +333,8 @@ export default function Sidebar({
             </div>
           )}
 
-          {/* Input Quality Section - Only show in inference mode */}
-          {!isEditingDone && appMode === "inference" && uploadedImage && (
+          {/* Input Quality Section */}
+          {!isEditingDone && uploadedImage && (
             <div className="pb-4 border-b border-[var(--border-color)]">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-[var(--text-primary)] font-medium text-sm lg:text-base">
@@ -531,8 +486,8 @@ export default function Sidebar({
             </div>
           )}
 
-          {/* AI Task Selection - Only show in inference mode */}
-          {!isEditingDone && appMode === "inference" && (
+          {/* AI Task Selection */}
+          {!isEditingDone && (
             <div className="pb-4 border-b border-[var(--border-color)]">
               <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                 {t("sidebar.aiTask")}
@@ -563,10 +518,8 @@ export default function Sidebar({
             </div>
           )}
 
-          {/* White Balance Controls - Only in inference mode */}
-          {!isEditingDone &&
-            appMode === "inference" &&
-            aiTask === "white-balance" && (
+          {/* White Balance Controls */}
+          {!isEditingDone && aiTask === "white-balance" && (
               <div className="pb-4 border-b border-[var(--border-color)]">
                 <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                   {t("sidebar.whiteBalanceSettings")}
@@ -636,10 +589,8 @@ export default function Sidebar({
               </div>
             )}
 
-          {/* Reference Image Upload (only for object insert) - Only in inference mode */}
-          {!isEditingDone &&
-            appMode === "inference" &&
-            aiTask === "object-insert" && (
+          {/* Reference Image Upload (only for object insert) */}
+          {!isEditingDone && aiTask === "object-insert" && (
               <div className="pb-4 border-b border-[var(--border-color)]">
                 <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                   {t("sidebar.referenceImage")}
@@ -1455,9 +1406,8 @@ export default function Sidebar({
             </Box>
           )}
 
-          {/* Masking Tool Section - Only for object insert and removal in inference mode */}
+          {/* Masking Tool Section - Only for object insert and removal */}
           {!isEditingDone &&
-            appMode === "inference" &&
             (aiTask === "object-insert" || aiTask === "object-removal") && (
               <div className="pb-4 border-b border-[var(--border-color)]">
                 <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
@@ -1650,10 +1600,8 @@ export default function Sidebar({
               </div>
             )}
 
-          {/* White Balance Settings (only for white balance task in inference mode) */}
-          {!isEditingDone &&
-            appMode === "inference" &&
-            aiTask === "white-balance" && (
+          {/* White Balance Settings (only for white balance task) */}
+          {!isEditingDone && aiTask === "white-balance" && (
               <div className="pb-4 border-b border-[var(--border-color)]">
                 <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                   {t("sidebar.whiteBalanceSettings")}

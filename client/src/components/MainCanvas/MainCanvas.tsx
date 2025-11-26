@@ -37,7 +37,6 @@ interface CanvasProps {
   isHelpOpen: boolean;
 
   // Evaluation mode props
-  appMode?: "inference" | "benchmark";
   evaluationImagePairs?: Array<{
     original: string | null;
     target: string | null;
@@ -114,7 +113,6 @@ export default function Canvas({
   onZoomViewportOut,
   onResetViewportZoom,
   onToggleHelp,
-  appMode = "inference",
   evaluationImagePairs = [],
   evaluationDisplayLimit = 10,
   onEvaluationDisplayLimitChange,
@@ -218,9 +216,8 @@ export default function Canvas({
   const isComparisonMode =
     originalImage && modifiedImage && originalImage !== modifiedImage;
 
-  // Evaluation mode: show grid of images
-  const isEvaluationMode =
-    appMode === "benchmark" && evaluationImagePairs.length > 0;
+  // Evaluation mode: show grid of images when dataset pairs exist
+  const isEvaluationMode = evaluationImagePairs.length > 0;
   // Filter valid pairs and get their original indices
   const validPairsWithIndices = isEvaluationMode
     ? evaluationImagePairs

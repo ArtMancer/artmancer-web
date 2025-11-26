@@ -463,7 +463,7 @@ export function useMasking(
       const data = imageData.data;
       let hasContent = false;
       let pixelsChecked = 0;
-      let nonZeroPixels = 0;
+      const nonZeroPixels = 0;
       let rgbPixels = 0;
       let alphaPixels = 0;
 

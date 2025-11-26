@@ -1760,7 +1760,7 @@ export default function Home() {
   // Check API connectivity on mount with retry logic
   useEffect(() => {
     let isMounted = true;
-    let retryTimeout: NodeJS.Timeout | null = null;
+    const retryTimeout: NodeJS.Timeout | null = null;
 
     const checkApiHealth = async (isRetry = false) => {
       // Don't show loading message on initial check, only on retries

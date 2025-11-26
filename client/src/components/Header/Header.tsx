@@ -1,7 +1,6 @@
 import Image from "next/image";
 import {
   MdSettings,
-  MdPerson,
   MdMenu,
   MdLanguage,
   MdLightMode,
@@ -13,26 +12,18 @@ import { useTheme, useLanguage } from "@/contexts";
 
 interface HeaderProps {
   onSummon: (prompt: string) => void;
-  onEvaluate?: (prompt: string) => void;
   isCustomizeOpen: boolean;
   onToggleCustomize: () => void;
   isGenerating?: boolean;
-  isEvaluating?: boolean;
-  appMode?: "inference" | "benchmark";
-  onAppModeChange?: (mode: "inference" | "benchmark") => void;
   aiTask?: "white-balance" | "object-insert" | "object-removal" | "evaluation";
   onCancel?: () => void;
 }
 
 export default function Header({
   onSummon,
-  onEvaluate,
   isCustomizeOpen,
   onToggleCustomize,
   isGenerating = false,
-  isEvaluating = false,
-  appMode = "inference",
-  onAppModeChange,
   aiTask,
   onCancel,
 }: HeaderProps) {
@@ -85,19 +76,8 @@ export default function Header({
 
   const handleSubmit = () => {
     const promptValue = prompt.trim();
-    if (appMode === "benchmark" && onEvaluate) {
-      // For benchmark mode, prompt is required
-      if (!promptValue) {
-        // Show error or disable button - validation handled by button disabled state
-        return;
-      }
-      onEvaluate(promptValue);
-    } else {
-      // For white-balance task, prompt is optional (can be empty)
-      // For white-balance, allow empty prompt
-      if (aiTask === "white-balance" || promptValue) {
-        onSummon(promptValue);
-      }
+    if (aiTask === "white-balance" || promptValue) {
+      onSummon(promptValue);
     }
   };
 
@@ -126,15 +106,11 @@ export default function Header({
         <div className="flex-1 max-w-2xl mx-4 flex gap-3 items-center">
           <input
             type="text"
-            placeholder={
-              appMode === "benchmark" 
-                ? "Enter prompt for ALL benchmark images..." 
-                : t("header.placeholder")
-            }
+            placeholder={t("header.placeholder")}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isGenerating || isEvaluating}
+            disabled={isGenerating}
             className="flex-1 px-4 py-3 bg-transparent border-2 border-[var(--primary-accent)] rounded-lg text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--highlight-accent)] focus:outline-none transition-colors text-sm h-12 disabled:opacity-50"
           />
           {isGenerating && onCancel ? (
@@ -148,14 +124,11 @@ export default function Header({
             <button
               onClick={handleSubmit}
               disabled={
-                (isGenerating || isEvaluating) || 
-                (appMode === "benchmark" ? !prompt.trim() : (!prompt.trim() && aiTask !== "white-balance"))
+                isGenerating || (!prompt.trim() && aiTask !== "white-balance")
               }
               className="px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {appMode === "benchmark" 
-                ? (isEvaluating ? "Benchmarking..." : "Benchmark!")
-                : (isGenerating ? t("header.generating") : t("header.edit"))}
+              {isGenerating ? t("header.generating") : t("header.edit")}
             </button>
           )}
         </div>
@@ -313,42 +286,7 @@ export default function Header({
                 </div>
               </div>
 
-              {/* App Mode Setting */}
-              {onAppModeChange && (
-                <div>
-                  <h4 className="text-[var(--text-primary)] font-medium mb-4 flex items-center gap-2">
-                    <MdSettings
-                      className="text-[var(--primary-accent)]"
-                      size={18}
-                    />
-                    {t("settings.mode")}
-                  </h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      onClick={() => onAppModeChange("inference")}
-                      className={`flex items-center justify-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        appMode === "inference"
-                          ? "bg-[var(--primary-accent)] text-white shadow-lg"
-                          : "bg-[var(--secondary-bg)] text-[var(--text-secondary)] hover:bg-[var(--primary-accent)] hover:text-white"
-                      }`}
-                    >
-                      <span>{t("settings.inference")}</span>
-                      {appMode === "inference" && <MdCheck size={16} />}
-                    </button>
-                    <button
-                      onClick={() => onAppModeChange("benchmark")}
-                      className={`flex items-center justify-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        appMode === "benchmark"
-                          ? "bg-[var(--primary-accent)] text-white shadow-lg"
-                          : "bg-[var(--secondary-bg)] text-[var(--text-secondary)] hover:bg-[var(--primary-accent)] hover:text-white"
-                      }`}
-                    >
-                      <span>Benchmark</span>
-                      {appMode === "benchmark" && <MdCheck size={16} />}
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* Benchmark mode toggle removed */}
             </div>
 
             {/* Modal Footer */}
