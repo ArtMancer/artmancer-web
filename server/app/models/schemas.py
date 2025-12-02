@@ -8,9 +8,14 @@ from pydantic import BaseModel, Field
 class GenerationRequest(BaseModel):
     prompt: str = Field(..., description="Description of the desired edit")
     input_image: str = Field(..., description="Base64 encoded original image")
-    mask_image: str = Field(..., description="Base64 encoded mask image")
-    reference_image: Optional[str] = Field(
-        default=None, description="Base64 encoded reference image (for object insertion)"
+    # Qwen: chỉ dùng thêm các ảnh condition (mask + condition khác) dưới dạng base64
+    conditional_images: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "List of base64-encoded conditional images for Qwen. "
+            "By convention, conditional_images[0] is the mask; "
+            "subsequent items are additional condition images."
+        ),
     )
     width: Optional[int] = Field(None, ge=256, le=2048)
     height: Optional[int] = Field(None, ge=256, le=2048)
@@ -22,9 +27,7 @@ class GenerationRequest(BaseModel):
     task_type: Optional[str] = Field(default=None, description="Task type: 'white-balance', 'object-insert', 'object-removal' (auto-detected if not provided)")
     angle: Optional[str] = Field(default=None, description="Angle macro label for prompt composition (e.g., 'wide-angle', 'top-down'). Only used for insert/remove tasks, ignored for white-balance.")
     background_preset: Optional[str] = Field(default=None, description="Background preset name for prompt composition (e.g., 'marble-surface', 'white-background'). Only used for insert/remove tasks, ignored for white-balance.")
-    input_quality: Optional[
-        Literal["super_low", "low", "medium", "high", "original"]
-    ] = Field(
+    input_quality: Optional[Literal["super_low", "low", "medium", "high", "original"]] = Field(
         default=None,
         description="Optional override for input quality preset ('super_low', 'low', 'medium', 'high', 'original').",
     )

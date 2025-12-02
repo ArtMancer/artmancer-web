@@ -7,7 +7,7 @@ import io
 import logging
 import psutil
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List
 import numpy as np
 from PIL import Image
 from ultralytics import FastSAM  # type: ignore

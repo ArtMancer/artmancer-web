@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any, Dict, Tuple, cast
 
 import torch
-from fastapi import HTTPException
 from PIL import Image
 
 from ..core.config import settings
@@ -17,22 +16,28 @@ from ..services.image_processing import (
     prepare_mask_conditionals,
 )
 from ..services.prompt_composer import compose_prompt
-from ..services.visualization import create_visualization_service
 from ..models.schemas import GenerationRequest
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    # Dùng HTTPException của FastAPI nếu có (khi chạy qua FastAPI/Modal)
+    from fastapi import HTTPException  # type: ignore
+except Exception:  # pragma: no cover - fallback cho môi trường không có fastapi
+    class HTTPException(Exception):  # type: ignore[override]
+        """Minimal HTTP-like exception để dùng trong core service khi không có FastAPI."""
+
+        def __init__(self, status_code: int, detail: str) -> None:
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(detail)
 
 
 class GenerationService:
     def __init__(self) -> None:
         self._pipeline_insertion = None
         self._pipeline_removal = None
-        # Initialize visualization service
-        from ..core.config import settings
-        self._visualization = create_visualization_service(
-            output_dir=settings.visualization_dir if settings.visualization_dir else None,
-            enabled=settings.enable_visualization,
-        )
 
     def _ensure_pipeline(self, task_type: str = "insertion"):
         """
@@ -49,8 +54,10 @@ class GenerationService:
                 self._pipeline_removal = load_pipeline(task_type="removal")
             return self._pipeline_removal
         elif task_type == "white-balance":
-            # White balance uses a different pipeline (Pix2Pix from HuggingFace)
-            return load_pipeline(task_type="white-balance")
+            # White-balance cũng dùng Qwen pipeline (một biến thể cấu hình nhẹ hơn).
+            if self._pipeline_insertion is None:
+                self._pipeline_insertion = load_pipeline(task_type="insertion")
+            return self._pipeline_insertion
         else:  # insertion (default)
             if self._pipeline_insertion is None:
                 self._pipeline_insertion = load_pipeline(task_type="insertion")
@@ -127,63 +134,93 @@ class GenerationService:
     ) -> tuple[Image.Image, Image.Image, list[Image.Image], Image.Image | None]:
         if not request.input_image:
             raise HTTPException(status_code=400, detail="input_image is required")
-        # For white-balance, mask is not required
-        if task_type != "white-balance" and not request.mask_image:
-            raise HTTPException(status_code=400, detail="mask_image is required")
 
         original = base64_to_image(request.input_image)
         
-        # For white-balance, mask is not needed but quality scaling still applies
+        # Qwen flow mới:
+        # - conditional_images[0]: mask
+        # - conditional_images[1:]: các condition bổ sung (background masked, canny, mae, ...)
+        cond_list = list(request.conditional_images or [])
+        extra_cond_b64s: list[str] = []
+
         if task_type == "white-balance":
+            # White-balance: có thể không gửi mask, khi đó dùng full white mask.
             original, _, _ = self._apply_input_quality(
                 original, quality_override=request.input_quality
             )
-            mask = Image.new("RGB", original.size, (0, 0, 0))
-            return original, mask, [], None
-        
-        # For other tasks, mask is required
-        mask = base64_to_image(request.mask_image)
-        
-        logger.info("🔍 [Backend Debug] Checking for reference image:")
-        logger.info("   - request.reference_image is None: %s", request.reference_image is None)
-        if request.reference_image:
-            logger.info("   - request.reference_image length: %d", len(request.reference_image))
-            logger.info("   - request.reference_image is empty string: %s", request.reference_image.strip() == "")
-            logger.info("   - request.reference_image first 50 chars: %s", request.reference_image[:50] if len(request.reference_image) > 50 else request.reference_image)
-        
-        reference = None
-        if request.reference_image and request.reference_image.strip() != "":
-            logger.info("🔍 [Backend Debug] Processing reference image for insertion")
-            reference = base64_to_image(request.reference_image)
+            if cond_list:
+                mask_b64 = cond_list[0]
+                extra_cond_b64s = cond_list[1:]
+                mask = base64_to_image(mask_b64)
+            else:
+                mask = Image.new("RGB", original.size, (255, 255, 255))
         else:
-            logger.info("🔍 [Backend Debug] No reference image provided - using removal model")
-        
-        original, mask, reference = self._apply_input_quality(
-            original, mask, reference, quality_override=request.input_quality
+            # insertion / removal: bắt buộc phải có ít nhất 1 condition làm mask
+            if not cond_list:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "conditional_images must include at least one image "
+                        "(mask) for insertion/removal tasks."
+                    ),
+                )
+            mask_b64 = cond_list[0]
+            extra_cond_b64s = cond_list[1:]
+            mask = base64_to_image(mask_b64)
+
+            # Áp dụng input_quality cho insert/remove
+            original, mask, _ = self._apply_input_quality(
+                original, mask, None, quality_override=request.input_quality
         )
         
-        # Safety check for type checkers
         if mask is None:
-            raise RuntimeError("Mask image missing after quality scaling")
+            raise RuntimeError("Mask image missing after preprocessing")
 
-        # Resize mask to match original if needed (handled in prepare_mask_conditionals)
-        # Returns: mask_rgb, background_rgb, object_rgb, mae_image (all RGB, no alpha channel)
-        mask_cond, background_rgb, obj_rgb, mae_image = prepare_mask_conditionals(original, mask)
+        # Từ mask build các condition cơ bản: mask/background/object/mae
+        mask_cond, background_rgb, obj_rgb, mae_image = prepare_mask_conditionals(
+            original, mask
+        )
+        conditional_images: list[Image.Image] = [
+            mask_cond,
+            background_rgb,
+            obj_rgb,
+            mae_image,
+        ]
         
-        # All conditional images are already RGB format (black/white, no transparency)
-        # For QwenImageEditPlus: [mask, background, object, mae] for removal
-        conditional_images = [mask_cond, background_rgb, obj_rgb, mae_image]
+        # Append các condition bổ sung từ client (ảnh base64 bất kỳ)
+        if extra_cond_b64s:
+            extra_images: list[Image.Image] = []
+            for idx, img_b64 in enumerate(extra_cond_b64s):
+                try:
+                    extra_img = base64_to_image(img_b64)
+                    if extra_img.size != original.size:
+                        logger.info(
+                            "🔄 Resizing extra conditional image %d from %s to %s",
+                            idx,
+                            extra_img.size,
+                            original.size,
+                        )
+                        extra_img = extra_img.resize(
+                            original.size, Image.Resampling.LANCZOS
+                        )
+                    extra_images.append(extra_img)
+                except Exception as exc:
+                    logger.warning(
+                        "⚠️ Failed to decode extra conditional image %d: %s", idx, exc
+                    )
+            if extra_images:
+                logger.info(
+                    "📎 Appended %d extra conditional images from request",
+                    len(extra_images),
+                )
+                conditional_images.extend(extra_images)
         
-        # Add reference image if provided (for object insertion)
-        if reference is not None:
-            if reference.size != original.size:
-                logger.info(f"🔄 Resizing reference image from {reference.size} to {original.size}")
-                reference = reference.resize(original.size, Image.Resampling.LANCZOS)
-            conditional_images.append(reference)
-            logger.info("✅ Reference image added for object insertion")
-        
-        logger.info(f"🔍 [Backend Debug] Conditional images count: {len(conditional_images)} (expected 4 for removal, 5 for insertion with MAE)")
-        return original, mask, conditional_images, reference
+        logger.info(
+            "🔍 [Backend Debug] Conditional images count: %d (>=4: base conditionals + optional extras)",
+            len(conditional_images),
+        )
+        # reference không còn dùng trong Qwen flow mới
+        return original, mask, conditional_images, None
 
     def _build_params(
         self,
@@ -239,8 +276,7 @@ class GenerationService:
             output_width = rounded_width
             output_height = height_from_width
         
-        # Apply prompt composition for insertion/removal tasks only
-        # White balance tasks skip prompt composition (they use simple prompts or empty)
+        # Apply prompt composition cho insertion/removal; white-balance dùng prompt raw/đơn giản
         final_prompt = request.prompt
         if task_type in ("insertion", "removal") and (request.angle or request.background_preset):
             # Use prompt composition when angle or background_preset is provided
@@ -286,97 +322,29 @@ class GenerationService:
             # Determine task type: use request.task_type if provided, otherwise auto-detect
             if request.task_type:
                 task_type = request.task_type
-                # Map task_type from API format to internal format
+                # Map task_type từ API format sang internal
                 if task_type == "object-removal":
                     task_type = "removal"
                 elif task_type == "object-insert":
                     task_type = "insertion"
-                logger.info("🎯 Using task_type from request: %s (mapped to: %s)", request.task_type, task_type)
             else:
-                # Auto-detect based on whether reference_image is provided
-                has_reference = request.reference_image is not None and request.reference_image.strip() != ""
-                task_type = "insertion" if has_reference else "removal"
-                logger.info("🔍 [Backend Debug] Task type auto-detection:")
-                logger.info("   - reference_image is None: %s", request.reference_image is None)
-                logger.info("   - reference_image provided: %s", has_reference)
-                logger.info("   - reference_image length: %s", len(request.reference_image) if request.reference_image else 0)
-                if request.reference_image:
-                    logger.info("   - reference_image first 100 chars: %s", request.reference_image[:100])
-                logger.info("   - Determined task_type: %s", task_type)
-            
-            logger.info("🎯 Task type: %s", task_type)
+                # Không có task_type: mặc định removal
+                task_type = "removal"
+            logger.info("🎯 Task type (resolved): %s", task_type)
             
             pipeline = self._ensure_pipeline(task_type=task_type)
             pipeline_callable = cast(Any, pipeline)
             original, mask, conditionals, reference = self._prepare_images(request, task_type)
             
             with torch.no_grad():
-                # For white-balance task, use DiffusionPipeline (Pix2Pix)
+                # Tất cả task (insert/remove/white-balance) đều dùng Qwen; khác biệt chỉ ở params/conditionals.
+                # Kiểm tra xem pipeline hiện tại có phải QwenImageEditPlusPipeline.
                 if task_type == "white-balance":
-                    logger.info("🎨 Using Pix2Pix pipeline for white balance")
-                    
-                    # Prompt is optional for white balance, can be empty string
-                    prompt = request.prompt if request.prompt else ""
-                    
-                    # Default parameters for Pix2Pix white balance
-                    num_inference_steps = request.num_inference_steps or 20
-                    image_guidance_scale = 1.5  # Default from reference code
-                    guidance_scale = 0  # Default from reference code (0 means no text guidance)
-                    
-                    # Get device for generator
-                    device_obj = get_device()
-                    
-                    # Create generator with seed if provided
-                    generator = None
-                    if request.seed is not None:
-                        generator = torch.Generator(device=device_obj).manual_seed(request.seed)
-                    else:
-                        generator = torch.Generator(device=device_obj).manual_seed(0)  # Default seed
-                    
-                    # Pix2Pix model needs both image and prompt
-                    # According to reference: pipe(prompt, image=image, num_inference_steps=..., image_guidance_scale=..., guidance_scale=..., generator=...)
-                    # The model loaded might be StableDiffusionInstructPix2PixPipeline which requires image parameter
-                    try:
-                        result = pipeline_callable(
-                            prompt=prompt,
-                            image=original,
-                            num_inference_steps=num_inference_steps,
-                            image_guidance_scale=image_guidance_scale,
-                            guidance_scale=guidance_scale,
-                            generator=generator,
-                        )
-                        generated = result.images[0]
-                        
-                        # Ensure generated image has same size as original
-                        if generated.size != original.size:
-                            logger.info(f"🔄 Resizing generated image from {generated.size} to {original.size} to match input")
-                            generated = generated.resize(original.size, Image.Resampling.LANCZOS)
-                    except (TypeError, ValueError) as e:
-                        # If parameters are not accepted, try simpler call
-                        logger.warning(f"Pipeline call failed with full parameters, trying simpler call: {e}")
-                        try:
-                            result = pipeline_callable(prompt=prompt, image=original)
-                            generated = result.images[0]
-                            # Ensure generated image has same size as original
-                            if generated.size != original.size:
-                                logger.info(f"🔄 Resizing generated image from {generated.size} to {original.size} to match input")
-                                generated = generated.resize(original.size, Image.Resampling.LANCZOS)
-                        except (TypeError, ValueError) as e2:
-                            # Last resort: try prompt only (for text-to-image models)
-                            logger.warning(f"Pipeline doesn't accept image parameter, trying prompt only: {e2}")
-                            result = pipeline_callable(prompt=prompt)
-                            generated = result.images[0]
-                            # For text-to-image, resize to match original
-                            if generated.size != original.size:
-                                logger.info(f"🔄 Resizing generated image from {generated.size} to {original.size} to match input")
-                                generated = generated.resize(original.size, Image.Resampling.LANCZOS)
-                else:
-                    # For other tasks (insertion/removal), check if using QwenImageEditPlusPipeline
+                    logger.info("🎨 Using Qwen pipeline for white-balance task")
+                # For other tasks (insertion/removal/white-balance), check if using QwenImageEditPlusPipeline
                     is_qwen_pipeline = False
                     try:
-                        from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
-                            QwenImageEditPlusPipeline,
-                        )
+                        from diffusers import QwenImageEditPlusPipeline # type: ignore
                         is_qwen_pipeline = isinstance(pipeline, QwenImageEditPlusPipeline)
                     except (ImportError, AttributeError):
                         # QwenImageEditPlusPipeline not available, use standard pipeline
@@ -384,7 +352,7 @@ class GenerationService:
                         try:
                             pipeline_class_name = pipeline.__class__.__name__
                             is_qwen_pipeline = "QwenImageEditPlus" in pipeline_class_name
-                        except:
+                        except Exception:
                             is_qwen_pipeline = False
                     
                     if is_qwen_pipeline:
@@ -403,12 +371,12 @@ class GenerationService:
                         # Prepare image list (conditional images)
                         image_list = conditionals if conditionals else []
                         
-                        # Build params for QwenImageEditPlusPipeline
+                        # Build params cho QwenImageEditPlusPipeline
                         qwen_params = {
                             "image": image_list,
-                            "prompt": request.prompt,
-                            "num_inference_steps": request.num_inference_steps or 40,
-                            "true_cfg_scale": request.true_cfg_scale or request.guidance_scale or 4.0,
+                            "prompt": request.prompt or "",
+                            "num_inference_steps": request.num_inference_steps or (20 if task_type == "white-balance" else 40),
+                            "true_cfg_scale": request.true_cfg_scale or request.guidance_scale or (3.3 if task_type == "white-balance" else 4.0),
                             "height": original.height,
                             "width": original.width,
                         }
@@ -420,7 +388,7 @@ class GenerationService:
                             device = get_device()
                             qwen_params["generator"] = torch.Generator(device=device).manual_seed(request.seed)
                         
-                        logger.info(f"📥 Calling QwenImageEditPlusPipeline with {len(image_list)} conditional images")
+                        logger.info(f"📥 Calling QwenImageEditPlusPipeline with {len(image_list)} conditional images for task={task_type}")
                         result = pipeline_callable(**qwen_params)
                         
                         # QwenImageEditPlusPipeline returns QwenImagePipelineOutput with images attribute
@@ -452,50 +420,26 @@ class GenerationService:
             # Save visualization
             request_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             
-            # Build metadata - handle white-balance case where params might not exist
-            if task_type == "white-balance":
-                metadata = {
-                    "prompt": prompt,  # Use the prompt we used for generation
-                    "negative_prompt": request.negative_prompt,
-                    "num_inference_steps": request.num_inference_steps or 40,
-                    "guidance_scale": request.guidance_scale or 1.0,
-                    "true_cfg_scale": request.true_cfg_scale,
-                    "seed": request.seed,
-                    "image_size": f"{original.width}x{original.height}",
-                    "generation_time": round(generation_time, 2),
-                    "timestamp": datetime.now().isoformat(),
-                    "has_reference_image": reference is not None,
-                    "task_type": "white-balance",
-                }
-            else:
-                metadata = {
-                    "prompt": request.prompt,
-                    "negative_prompt": request.negative_prompt,
-                    "num_inference_steps": params["num_inference_steps"],
-                    "guidance_scale": params["guidance_scale"],
-                    "true_cfg_scale": params.get("true_cfg_scale"),
-                    "seed": request.seed,
-                    "image_size": f"{params['width']}x{params['height']}",
-                    "generation_time": round(generation_time, 2),
-                    "timestamp": datetime.now().isoformat(),
-                    "has_reference_image": reference is not None,
-                }
+            # Build metadata
+            metadata = {
+                "prompt": request.prompt,
+                "negative_prompt": request.negative_prompt,
+                "num_inference_steps": params["num_inference_steps"],
+                "guidance_scale": params["guidance_scale"],
+                "true_cfg_scale": params.get("true_cfg_scale"),
+                "seed": request.seed,
+                "image_size": f"{params['width']}x{params['height']}",
+                "generation_time": round(generation_time, 2),
+                "timestamp": datetime.now().isoformat(),
+                "has_reference_image": reference is not None,
+            "task_type": task_type,
+            }
+
             # Use conditional images for visualization (RGB format)
-            # For white-balance, conditionals are empty, so skip them
-            conditional_images_for_viz = list(conditionals) if task_type != "white-balance" else []
+            conditional_images_for_viz = list(conditionals)
             # If reference image was added, include it in visualization
             if reference and len(conditional_images_for_viz) == 3:
                 conditional_images_for_viz = conditional_images_for_viz + [reference]
-            
-            self._visualization.save_generation_visualization(
-                request_id=request_id,
-                original=original,
-                mask=mask if task_type != "white-balance" else None,  # No mask for white-balance
-                conditional_images=conditional_images_for_viz,
-                output=generated,
-                reference_image=reference,
-                metadata=metadata,
-            )
 
             return {
                 "success": True,

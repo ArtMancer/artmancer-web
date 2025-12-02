@@ -294,3 +294,4 @@ server/*.sqlite3
 
 # Datasets
 datasets/
+/server/dataset

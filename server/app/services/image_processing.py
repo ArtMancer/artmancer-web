@@ -4,20 +4,22 @@ import base64
 import io
 import logging
 from typing import Tuple
-
-import logging
 import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Optional import for cv2 (opencv-python)
+# Optional import cho cv2 (OpenCV) – bắt buộc cho MAE, KHÔNG fallback
 try:
     import cv2  # type: ignore
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    logger.warning("⚠️ opencv-python not available, MAE image generation will use fallback method")
+    logger.error(
+        "❌ Thư viện OpenCV (cv2) không được cài đặt. "
+        "MAE image generation yêu cầu OpenCV. "
+        "Vui lòng cài đặt gói 'opencv-python-headless' (khuyến nghị) hoặc 'opencv-python' trong môi trường chạy."
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -185,43 +187,32 @@ def generate_mae_image(
     # Our mask is white where object is, so we need to invert it
     mask_inverted = 255 - mask_array
     
+    # MAE bắt buộc dùng OpenCV; nếu thiếu thì báo lỗi rõ ràng
+    if not CV2_AVAILABLE:
+        raise RuntimeError(
+            "Thư viện OpenCV (cv2) không được cài đặt trong môi trường chạy. "
+            "Không thể tạo MAE image. "
+            "Hãy cài đặt gói 'opencv-python-headless' (khuyến nghị) hoặc 'opencv-python', "
+            "hoặc tắt MAE trong logic chuẩn bị conditionals."
+        )
+    
     # Use OpenCV inpainting with Telea algorithm (fast and effective)
     # cv2.INPAINT_TELEA is faster than cv2.INPAINT_NS (Navier-Stokes)
-    if CV2_AVAILABLE:
-        try:
-            mae_array = cv2.inpaint(
-                original_array,
-                mask_inverted,
-                inpaintRadius=3,
-                flags=cv2.INPAINT_TELEA,
-            )
-            mae_image = Image.fromarray(mae_array, mode="RGB")
-            logger.info("✅ Generated MAE image using OpenCV Telea inpainting")
-            return mae_image
-        except Exception as e:
-            logger.warning(f"⚠️ OpenCV inpainting failed: {e}, falling back to mean fill")
-            # Fall through to mean fill fallback
-    else:
-        logger.info("📝 OpenCV not available, using mean fill for MAE image")
-    
-        # Fallback: fill masked region with mean color of background
-        mask_bool = mask_array > 128  # Threshold to get binary mask
-        
-        # Calculate mean color of background (where mask is NOT)
-        background_pixels = original_array[~mask_bool]
-        if len(background_pixels) > 0:
-            mean_color = np.mean(background_pixels.reshape(-1, 3), axis=0).astype(np.uint8)
-        else:
-            # If no background pixels, use gray
-            mean_color = np.array([128, 128, 128], dtype=np.uint8)
-        
-        # Create MAE image: original where mask is NOT, mean color where mask is
-        mae_array = original_array.copy()
-        mae_array[mask_bool] = mean_color
+    try:
+        mae_array = cv2.inpaint(
+            original_array,
+            mask_inverted,
+            inpaintRadius=3,
+            flags=cv2.INPAINT_TELEA,
+        )
         mae_image = Image.fromarray(mae_array, mode="RGB")
-        logger.info("✅ Generated MAE image using mean color fill fallback")
-    
-    return mae_image
+        logger.info("✅ Generated MAE image using OpenCV Telea inpainting")
+        return mae_image
+    except Exception as exc:
+        logger.error("❌ OpenCV inpainting failed for MAE image: %s", exc)
+        raise RuntimeError(
+            f"OpenCV inpainting failed while generating MAE image: {exc}"
+        ) from exc
 
 
 def prepare_mask_conditionals(

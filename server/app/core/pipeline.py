@@ -14,20 +14,16 @@ logger = logging.getLogger(__name__)
 
 def is_pipeline_loaded(task_type: str | None = None) -> bool:
     """
-    Check if pipeline is loaded without forcing a load.
+    Kiểm tra xem Qwen pipeline đã được load chưa (cho bất kỳ task nào).
     
     Args:
-        task_type: "insertion", "removal", "white-balance", or None to check any pipeline
+        task_type: "insertion", "removal", "white-balance", hoặc None để kiểm tra bất kỳ.
     
     Returns:
-        True if pipeline is loaded, False otherwise
+        True nếu pipeline tương ứng đã được load.
     """
-    if task_type == "white-balance":
-        from .pix2pix_loader import is_pix2pix_pipeline_loaded
-        return is_pix2pix_pipeline_loaded()
-    else:
-        from .qwen_loader import is_qwen_pipeline_loaded
-        return is_qwen_pipeline_loaded(task_type)
+    from .qwen_loader import is_qwen_pipeline_loaded
+    return is_qwen_pipeline_loaded(task_type)
 
 
 def _xpu_available() -> bool:
@@ -91,32 +87,24 @@ def get_device_info() -> Dict[str, Any]:
 
 def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     """
-    Load pipeline for the specified task type.
-    Dispatches to appropriate loader based on task type.
+    Load Qwen pipeline cho task tương ứng.
     
     Args:
-        task_type: "insertion", "removal", or "white-balance"
+        task_type: "insertion", "removal", hoặc "white-balance"
     
     Returns:
-        Loaded DiffusionPipeline
+        DiffusionPipeline đã load
     """
-    if task_type == "white-balance":
-        from .pix2pix_loader import load_pix2pix_pipeline
-        return load_pix2pix_pipeline()
-    else:
-        # insertion or removal - use Qwen loader
-        from .qwen_loader import load_qwen_pipeline
-        return load_qwen_pipeline(task_type)
+    # Cả 3 task đều dùng chung Qwen loader, khác nhau ở checkpoint và tham số.
+    from .qwen_loader import load_qwen_pipeline
+    return load_qwen_pipeline(task_type)
 
 
 def clear_pipeline_cache() -> None:
-    """Clear all cached pipelines."""
+    """Xoá cache toàn bộ Qwen pipelines."""
     from .qwen_loader import clear_qwen_cache
-    from .pix2pix_loader import clear_pix2pix_cache
     
     clear_qwen_cache()
-    clear_pix2pix_cache()
-    
     gc.collect()
-    logger.info("🧹 Cleared all pipeline caches")
+    logger.info("🧹 Cleared all Qwen pipeline caches")
 

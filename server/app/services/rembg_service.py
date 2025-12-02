@@ -47,19 +47,36 @@ def remove_background(image_bytes: bytes) -> bytes:
         # 3. Process with rembg
         # alpha_matting=False: Faster processing, good enough for most cases
         # Set alpha_matting=True if you need extremely smooth edges (slower)
-        output_image = remove(
-            input_image,
+        #
+        # Đưa ảnh (sau khi resize nếu có) về PNG bytes rồi truyền vào rembg.
+        # rembg.remove(...) sẽ trả về bytes, phù hợp với type hint (không còn gọi .save trên bytes).
+        buffer = io.BytesIO()
+        input_image.save(buffer, format="PNG")
+        buffer.seek(0)
+
+        result = remove(
+            buffer.getvalue(),
             alpha_matting=False,
         )
-        
-        # 4. Convert PIL Image to PNG bytes
-        output_buffer = io.BytesIO()
-        output_image.save(output_buffer, format="PNG")
-        output_buffer.seek(0)
-        
-        result_bytes = output_buffer.getvalue()
-        logger.info(f"Background removal successful. Output size: {len(result_bytes)} bytes")
-        
+
+        # Chuẩn hoá kết quả về bytes để khớp type hint
+        if isinstance(result, bytes):
+            result_bytes = result
+        elif isinstance(result, Image.Image):
+            out_buf = io.BytesIO()
+            result.save(out_buf, format="PNG")
+            out_buf.seek(0)
+            result_bytes = out_buf.getvalue()
+        else:
+            # rembg cũng có thể trả về ndarray; chuyển sang PNG bytes
+            img = Image.fromarray(result)
+            out_buf = io.BytesIO()
+            img.save(out_buf, format="PNG")
+            out_buf.seek(0)
+            result_bytes = out_buf.getvalue()
+
+        logger.info("Background removal successful. Output size: %d bytes", len(result_bytes))
+
         return result_bytes
         
     except Exception as e:
