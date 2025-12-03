@@ -464,7 +464,7 @@ export default function Sidebar({
                         const apiUrl =
                           process.env.NEXT_PUBLIC_API_URL ||
                           process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL ||
-                          "http://localhost:8003";
+                          "https://pov3ewvy1mejeo.api.runpod.ai";
                         window.open(
                           `${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`,
                           "_blank"

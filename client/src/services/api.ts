@@ -2,18 +2,20 @@
 // API URL is configured via NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL environment variable
 // To change: Set NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL in .env.local file (without trailing slash)
 // RunPod endpoint format: https://ENDPOINT_ID.api.runpod.ai
+// Default RunPod endpoint: https://pov3ewvy1mejeo.api.runpod.ai
 // @ts-ignore - process.env is available in Next.js runtime
 const RAW_RUNPOD_GENERATE_URL = process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL?.trim();
 const RUNPOD_GENERATE_URL = RAW_RUNPOD_GENERATE_URL?.replace(/\/+$/, '');
 // @ts-ignore - process.env is available in Next.js runtime
 const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.trim();
-// Priority: API_BASE_URL > RUNPOD_GENERATE_URL
+// Priority: API_BASE_URL > RUNPOD_GENERATE_URL > Default RunPod endpoint > Local dev
+const DEFAULT_RUNPOD_ENDPOINT = 'https://pov3ewvy1mejeo.api.runpod.ai';
 const API_BASE_URL = (
   RAW_API_BASE_URL && RAW_API_BASE_URL.length > 0
     ? RAW_API_BASE_URL
     : RUNPOD_GENERATE_URL && RUNPOD_GENERATE_URL.length > 0
       ? RUNPOD_GENERATE_URL
-      : 'http://localhost:8003' // Fallback to local development
+      : DEFAULT_RUNPOD_ENDPOINT // Default to RunPod endpoint
 ).replace(/\/+$/, '');
 
 // Check if using RunPod endpoint (for health check retry logic)
