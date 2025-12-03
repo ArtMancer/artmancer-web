@@ -61,8 +61,8 @@ def _get_service() -> GenerationService:
 
 
 # Bắt buộc: Health check endpoint cho RunPod Load Balancer
-@app.get("/ping")
-async def ping() -> Response | Dict[str, str]:
+@app.get("/ping", response_model=None)
+async def ping() -> Response:
     """
     Health check endpoint required by RunPod Load Balancer.
     
@@ -73,7 +73,7 @@ async def ping() -> Response | Dict[str, str]:
     """
     try:
         if is_pipeline_loaded():
-            return {"status": "healthy"}  # 200 OK
+            return Response(content='{"status": "healthy"}', media_type="application/json", status_code=200)
         else:
             return Response(status_code=204)  # 204 No Content - Initializing
     except Exception as e:

@@ -39,11 +39,78 @@ or use the helper script:
 ### Step 1: Setup Network Volume
 
 1. Create a network volume on RunPod console for checkpoints
-2. Upload checkpoint files to the volume:
-   - `insertion_cp.safetensors`
-   - `removal_cp.safetensors`
-   - `wb_cp.safetensors`
-3. Note the volume mount path (default: `/runpod-volume/`)
+   - Go to Storage → New Network Volume
+   - Select datacenter (EU-RO-1 recommended for S3 API support)
+   - Set size (e.g., 10GB for 3 checkpoint files ~850MB total)
+   - Note: S3-compatible API is available for: EUR-IS-1, EU-RO-1, EU-CZ-1, US-KS-2, US-CA-2
+   - Reference: https://docs.runpod.io/storage/network-volumes
+
+2. **Create S3 API Key** (separate from your regular RunPod API key):
+   - Go to RunPod Console → Settings → S3 API Keys
+   - Click "Create an S3 API key"
+   - Save the **access key** (user_XXXXX) and **secret** (rps_XXXXX)
+   - The access key is your User ID (found in the key description)
+   - Reference: https://docs.runpod.io/storage/s3-api#setup-and-authentication
+
+3. Upload checkpoint files to the volume using S3-compatible API:
+
+   **Option A: Use the provided Python upload script (recommended)**
+
+   ```bash
+   cd server
+
+   # Create .env file with S3 API credentials
+   echo 'RUNPOD_S3_USER_ID=user_XXXXX' > .env
+   echo 'RUNPOD_S3_SECRET=rps_XXXXX' >> .env
+   echo 'RUNPOD_S3_BUCKET=YOUR_VOLUME_ID' >> .env
+
+   # Run upload script
+   uv run python upload_checkpoints_to_runpod.py
+   ```
+
+   Or set environment variables directly:
+
+   ```bash
+   export RUNPOD_S3_USER_ID='user_XXXXX'
+   export RUNPOD_S3_SECRET='rps_XXXXX'
+   export RUNPOD_S3_BUCKET='YOUR_VOLUME_ID'
+   uv run python upload_checkpoints_to_runpod.py
+   ```
+
+   **Option B: Manual upload with AWS CLI**
+
+   ```bash
+   # Install AWS CLI if not already installed
+   pip install awscli
+
+   # Configure AWS CLI with S3 API credentials
+   aws configure
+   # AWS Access Key ID: Enter your User ID (user_XXXXX)
+   # AWS Secret Access Key: Enter your S3 API secret (rps_XXXXX)
+   # Default region: eu-ro-1 (or your datacenter)
+   # Default output format: json
+
+   # Upload each file (replace YOUR_VOLUME_ID with your Network Volume ID)
+   aws s3 cp checkpoints/insertion_cp.safetensors \
+     s3://YOUR_VOLUME_ID/checkpoints/insertion_cp.safetensors \
+     --region eu-ro-1 \
+     --endpoint-url https://s3api-eu-ro-1.runpod.io
+
+   aws s3 cp checkpoints/removal_cp.safetensors \
+     s3://YOUR_VOLUME_ID/checkpoints/removal_cp.safetensors \
+     --region eu-ro-1 \
+     --endpoint-url https://s3api-eu-ro-1.runpod.io
+
+   aws s3 cp checkpoints/wb_cp.safetensors \
+     s3://YOUR_VOLUME_ID/checkpoints/wb_cp.safetensors \
+     --region eu-ro-1 \
+     --endpoint-url https://s3api-eu-ro-1.runpod.io
+
+   # Verify upload
+   aws s3 ls --region eu-ro-1 --endpoint-url https://s3api-eu-ro-1.runpod.io s3://YOUR_VOLUME_ID/checkpoints/
+   ```
+
+3. **Important**: Files uploaded to `s3://bucket/checkpoints/` will be accessible at `/runpod-volume/checkpoints/` on Serverless workers
 
 ### Step 2: Build Docker Image
 
