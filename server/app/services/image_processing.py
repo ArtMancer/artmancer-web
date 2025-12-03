@@ -9,16 +9,16 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Optional import cho cv2 (OpenCV) – bắt buộc cho MAE, KHÔNG fallback
+# Optional import for cv2 (OpenCV) – required for MAE, NO fallback
 try:
     import cv2  # type: ignore
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
     logger.error(
-        "❌ Thư viện OpenCV (cv2) không được cài đặt. "
-        "MAE image generation yêu cầu OpenCV. "
-        "Vui lòng cài đặt gói 'opencv-python-headless' (khuyến nghị) hoặc 'opencv-python' trong môi trường chạy."
+        "❌ OpenCV library (cv2) is not installed. "
+        "MAE image generation requires OpenCV. "
+        "Please install 'opencv-python-headless' (recommended) or 'opencv-python' package in the runtime environment."
     )
 
 logger = logging.getLogger(__name__)
@@ -187,13 +187,13 @@ def generate_mae_image(
     # Our mask is white where object is, so we need to invert it
     mask_inverted = 255 - mask_array
     
-    # MAE bắt buộc dùng OpenCV; nếu thiếu thì báo lỗi rõ ràng
+    # MAE requires OpenCV; raise clear error if missing
     if not CV2_AVAILABLE:
         raise RuntimeError(
-            "Thư viện OpenCV (cv2) không được cài đặt trong môi trường chạy. "
-            "Không thể tạo MAE image. "
-            "Hãy cài đặt gói 'opencv-python-headless' (khuyến nghị) hoặc 'opencv-python', "
-            "hoặc tắt MAE trong logic chuẩn bị conditionals."
+            "OpenCV library (cv2) is not installed in the runtime environment. "
+            "Cannot generate MAE image. "
+            "Please install 'opencv-python-headless' (recommended) or 'opencv-python' package, "
+            "or disable MAE in conditional preparation logic."
         )
     
     # Use OpenCV inpainting with Telea algorithm (fast and effective)

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class GenerationRequest(BaseModel):
     prompt: str = Field(..., description="Description of the desired edit")
     input_image: str = Field(..., description="Base64 encoded original image")
-    # Qwen: chỉ dùng thêm các ảnh condition (mask + condition khác) dưới dạng base64
+    # Qwen: only uses additional condition images (mask + other conditions) as base64
     conditional_images: Optional[List[str]] = Field(
         default=None,
         description=(
@@ -19,17 +19,37 @@ class GenerationRequest(BaseModel):
     )
     width: Optional[int] = Field(None, ge=256, le=2048)
     height: Optional[int] = Field(None, ge=256, le=2048)
-    num_inference_steps: Optional[int] = Field(40, ge=1, le=100)
+    num_inference_steps: Optional[int] = Field(20, ge=1, le=100)
     guidance_scale: Optional[float] = Field(1.0, ge=0.5, le=20)
     true_cfg_scale: Optional[float] = Field(4.0, ge=0.5, le=15)
     negative_prompt: Optional[str] = Field(default=None)
     seed: Optional[int] = Field(default=None)
-    task_type: Optional[str] = Field(default=None, description="Task type: 'white-balance', 'object-insert', 'object-removal' (auto-detected if not provided)")
+    task_type: Optional[Literal["insertion", "removal", "white-balance"]] = Field(
+        default=None, 
+        description="Task type: 'insertion', 'removal', or 'white-balance' (auto-detected if not provided)"
+    )
     angle: Optional[str] = Field(default=None, description="Angle macro label for prompt composition (e.g., 'wide-angle', 'top-down'). Only used for insert/remove tasks, ignored for white-balance.")
     background_preset: Optional[str] = Field(default=None, description="Background preset name for prompt composition (e.g., 'marble-surface', 'white-background'). Only used for insert/remove tasks, ignored for white-balance.")
-    input_quality: Optional[Literal["super_low", "low", "medium", "high", "original"]] = Field(
+    input_quality: Optional[Literal["resized", "original"]] = Field(
         default=None,
-        description="Optional override for input quality preset ('super_low', 'low', 'medium', 'high', 'original').",
+        description="Optional override for input quality preset ('resized' for 1:1 square, 'original' to keep original size).",
+    )
+    # Low-end optimization flags (can override config defaults)
+    enable_4bit_text_encoder: Optional[bool] = Field(
+        default=None,
+        description="Enable 4-bit quantization for text encoder (saves ~4GB VRAM, slower). Overrides config if provided."
+    )
+    enable_cpu_offload: Optional[bool] = Field(
+        default=None,
+        description="Enable CPU offload for transformer and VAE (saves VRAM, slower). Overrides config if provided."
+    )
+    enable_memory_optimizations: Optional[bool] = Field(
+        default=None,
+        description="Enable memory optimizations (safetensors, low_cpu_mem_usage, TF32). Overrides config if provided."
+    )
+    enable_flowmatch_scheduler: Optional[bool] = Field(
+        default=None,
+        description="Use FlowMatchEulerDiscreteScheduler instead of default. Overrides config if provided."
     )
 
 

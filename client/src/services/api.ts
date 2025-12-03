@@ -1,10 +1,25 @@
 // API service for ArtMancer backend integration
-// API URL is configured via NEXT_PUBLIC_API_URL environment variable
-// Default: http://localhost:8003 (backend default port)
-// To change: Set NEXT_PUBLIC_API_URL in .env.local file
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8003';
+// API URL is configured via NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL environment variable
+// To change: Set NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL in .env.local file (without trailing slash)
+// RunPod endpoint format: https://ENDPOINT_ID.api.runpod.ai
+// @ts-ignore - process.env is available in Next.js runtime
+const RAW_RUNPOD_GENERATE_URL = process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL?.trim();
+const RUNPOD_GENERATE_URL = RAW_RUNPOD_GENERATE_URL?.replace(/\/+$/, '');
+// @ts-ignore - process.env is available in Next.js runtime
+const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.trim();
+// Priority: API_BASE_URL > RUNPOD_GENERATE_URL
+const API_BASE_URL = (
+  RAW_API_BASE_URL && RAW_API_BASE_URL.length > 0
+    ? RAW_API_BASE_URL
+    : RUNPOD_GENERATE_URL && RUNPOD_GENERATE_URL.length > 0
+      ? RUNPOD_GENERATE_URL
+      : 'http://localhost:8003' // Fallback to local development
+).replace(/\/+$/, '');
 
-export type InputQualityPreset = "super_low" | "low" | "medium" | "high" | "original";
+// Check if using RunPod endpoint (for health check retry logic)
+const IS_RUNPOD_ENDPOINT = API_BASE_URL.includes('api.runpod.ai') || !!RUNPOD_GENERATE_URL;
+
+export type InputQualityPreset = "resized" | "original";
 
 export interface ModelSettings {
   true_cfg_scale?: number;
@@ -15,13 +30,23 @@ export interface ModelSettings {
   width?: number;
   height?: number;
   input_quality?: InputQualityPreset;
+  // Low-end optimization flags
+  enable_4bit_text_encoder?: boolean;
+  enable_cpu_offload?: boolean;
+  enable_memory_optimizations?: boolean;
+  enable_flowmatch_scheduler?: boolean;
 }
+
+// Valid task types matching backend schema
+export type TaskType = "insertion" | "removal" | "white-balance";
 
 export interface GenerationRequest {
   prompt: string;
   input_image: string; // Base64 encoded input image (required)
-  mask_image: string; // Base64 encoded mask image (required)
-  reference_image?: string; // Base64 encoded reference image (optional, for object insertion)
+  conditional_images?: string[]; // List of base64 encoded conditional images (first element is mask, optional extras)
+  // Legacy fields for backward compatibility (will be converted to conditional_images)
+  mask_image?: string; // Base64 encoded mask image (will be converted to conditional_images[0])
+  reference_image?: string; // Base64 encoded reference image (not used in new Qwen flow)
   width?: number;
   height?: number;
   num_inference_steps?: number;
@@ -29,8 +54,13 @@ export interface GenerationRequest {
   true_cfg_scale?: number;
   negative_prompt?: string;
   seed?: number;
-  task_type?: "white-balance" | "object-insert" | "object-removal";
+  task_type?: TaskType; // Must be "insertion", "removal", or "white-balance" (matches backend exactly)
   input_quality?: InputQualityPreset;
+  // Low-end optimization flags (for GPU 12GB or lower)
+  enable_4bit_text_encoder?: boolean; // Enable 4-bit quantization for text encoder (saves ~4GB VRAM)
+  enable_cpu_offload?: boolean; // Enable CPU offload for transformer and VAE (saves VRAM, slower)
+  enable_memory_optimizations?: boolean; // Enable memory optimizations (safetensors, low_cpu_mem_usage, TF32)
+  enable_flowmatch_scheduler?: boolean; // Use FlowMatchEulerDiscreteScheduler instead of default
 }
 
 export interface GenerationResponse {
@@ -119,6 +149,56 @@ class ApiService {
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl;
+  }
+
+  /**
+   * Health check with retry logic for RunPod cold start handling.
+   * RunPod workers need time to initialize, so we retry the /ping endpoint
+   * before sending actual requests.
+   */
+  private async healthCheckWithRetry(
+    maxRetries: number = 5,
+    delay: number = 10000
+  ): Promise<boolean> {
+    if (!IS_RUNPOD_ENDPOINT) {
+      // Skip health check for non-RunPod endpoints
+      return true;
+    }
+
+    const pingUrl = `${this.baseUrl}/ping`;
+    console.log('🏥 Starting health check for RunPod endpoint...');
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await fetch(pingUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          signal: AbortSignal.timeout(10000), // 10 second timeout per check
+        });
+
+        if (response.status === 200) {
+          console.log('✓ Health check passed - worker is ready');
+          return true;
+        } else if (response.status === 204) {
+          // Worker is initializing, retry
+          console.log(`⏳ Worker initializing (attempt ${attempt + 1}/${maxRetries})...`);
+        } else {
+          console.warn(`⚠️ Health check returned status ${response.status}`);
+        }
+      } catch (error) {
+        console.log(`⚠️ Health check attempt ${attempt + 1} failed:`, error);
+      }
+
+      if (attempt < maxRetries - 1) {
+        console.log(`🔄 Retrying health check in ${delay / 1000} seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+
+    console.error('✗ Health check failed after all retries - worker may not be ready');
+    return false;
   }
 
   private async makeRequest<T>(
@@ -241,17 +321,14 @@ class ApiService {
         url,
         baseUrl: this.baseUrl,
       };
-      
+
       console.error('❌ API Request Error:', errorInfo);
       console.error('❌ Raw Error Object:', error);
 
       if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
         const networkError = {
           status: 0,
-          error: `Network error: Unable to connect to server at ${this.baseUrl}. Please check:
-1. Is the backend server running on port 8003?
-2. Is the server accessible at ${this.baseUrl}?
-3. Are there any CORS issues?`,
+          error: `Network error: Unable to connect to API server at ${this.baseUrl}. Please check:\n1. Is the API endpoint reachable?\n2. Is your internet connection stable?\n3. Are there any CORS/network issues?`,
           endpoint: endpoint,
           baseUrl: this.baseUrl,
           fullUrl: url,
@@ -280,17 +357,17 @@ class ApiService {
 
         // Race between the actual request and timeout
         const requestPromise = this.makeRequest<{
-      status: string;
-      model_loaded: boolean;
-      device: string;
-      device_info?: Record<string, any>;
-    }>('/api/health');
+          status: string;
+          model_loaded: boolean;
+          device: string;
+          device_info?: Record<string, any>;
+        }>('/api/health');
 
         const result = await Promise.race([requestPromise, timeoutPromise]);
         return result;
       } catch (error) {
         const isLastAttempt = attempt === maxRetries - 1;
-        
+
         if (isLastAttempt) {
           // On last attempt, throw the error
           throw error;
@@ -299,7 +376,7 @@ class ApiService {
         // Calculate exponential backoff delay: 1s, 2s, 4s, 8s, 16s
         const delay = baseDelay * Math.pow(2, attempt);
         console.log(`⚠️ Health check attempt ${attempt + 1}/${maxRetries} failed, retrying in ${delay}ms...`);
-        
+
         // Wait before retrying
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -331,11 +408,142 @@ class ApiService {
 
   // Generate image
   async generateImage(request: GenerationRequest, signal?: AbortSignal): Promise<GenerationResponse> {
-    return this.makeRequest<GenerationResponse>('/api/generate', {
+    // Use API_BASE_URL (supports RunPod and local development)
+    const url = `${this.baseUrl}/`;
+
+    // Health check for RunPod endpoints (handle cold start)
+    if (IS_RUNPOD_ENDPOINT) {
+      const isHealthy = await this.healthCheckWithRetry(5, 10000);
+      if (!isHealthy) {
+        throw new Error(JSON.stringify({
+          status: 0,
+          error: 'RunPod worker failed to initialize. Please try again in a few moments.',
+          error_type: 'cold_start_timeout',
+          endpoint: '/',
+        }));
+      }
+    }
+
+    console.log('🌐 API Request:', {
       method: 'POST',
-      body: JSON.stringify(request),
-      signal,
+      url,
+      endpoint: IS_RUNPOD_ENDPOINT ? 'RunPod' : 'Local',
+      hasBody: true,
+      hasSignal: !!signal,
     });
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+        body: JSON.stringify(request),
+        signal,
+      });
+
+      console.log('📡 API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+      });
+
+      let responseData;
+      try {
+        const text = await response.text();
+        if (!text || text.trim() === '') {
+          throw new Error('Empty response from server');
+        }
+        responseData = JSON.parse(text);
+      } catch (parseError) {
+        console.error('❌ Failed to parse response as JSON:', parseError);
+        const text = await response.text().catch(() => 'Unable to read response');
+        console.error('Response text:', text);
+        throw new Error(JSON.stringify({
+          status: response.status,
+          error: `Invalid JSON response: ${text.substring(0, 100)}`,
+          endpoint: '/'
+        }));
+      }
+
+      if (!response.ok) {
+        let errorMessage = responseData?.detail || responseData?.error || responseData?.message;
+        if (!errorMessage || (typeof responseData === 'object' && Object.keys(responseData).length === 0)) {
+          errorMessage = `HTTP ${response.status}: ${response.statusText || 'Unknown error'}`;
+        }
+        let errorType = responseData?.error_type || 'unknown_error';
+
+        // Handle RunPod-specific timeout errors
+        if (IS_RUNPOD_ENDPOINT) {
+          if (response.status === 400) {
+            errorMessage = 'No worker available. The endpoint may be initializing. Please try again.';
+            errorType = 'no_worker_available';
+          } else if (response.status === 524) {
+            errorMessage = 'Request processing timeout (exceeded 5.5 minutes). The image may be too complex or the server is overloaded.';
+            errorType = 'processing_timeout';
+          } else if (response.status === 502) {
+            errorMessage = 'Worker misconfigured or unavailable. Please check the endpoint configuration.';
+            errorType = 'worker_misconfigured';
+          }
+        }
+
+        const errorDetails = {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorMessage,
+          error_type: errorType,
+          details: responseData?.details || null,
+          endpoint: '/'
+        };
+
+        console.error('API Error:', errorDetails);
+        throw new Error(JSON.stringify(errorDetails));
+      }
+
+      return responseData;
+    } catch (error) {
+      // Check if request was aborted
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log('🚫 Request cancelled by user');
+        throw new Error(JSON.stringify({
+          status: 0,
+          error: 'Request cancelled',
+          error_type: 'cancelled',
+          endpoint: '/'
+        }));
+      }
+
+      // Network or parsing error
+      const errorInfo = {
+        errorType: error instanceof Error ? error.constructor.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined,
+        endpoint: '/',
+        url,
+      };
+
+      console.error('❌ API Request Error:', errorInfo);
+      console.error('❌ Raw Error Object:', error);
+
+      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+        const endpointType = IS_RUNPOD_ENDPOINT ? 'RunPod' : 'Local';
+        const networkError = {
+          status: 0,
+          error: `Network error: Unable to connect to ${endpointType} endpoint at ${this.baseUrl}. Please check:
+1. Is the endpoint accessible?
+2. Are there any CORS issues?
+3. Is the endpoint URL correct?`,
+          endpoint: '/',
+          baseUrl: this.baseUrl,
+          fullUrl: url,
+        };
+        console.error('🌐 Network Error Details:', networkError);
+        throw new Error(JSON.stringify(networkError));
+      }
+
+      // Re-throw other errors
+      throw error;
+    }
   }
 
   // Generate image with preset
@@ -461,22 +669,47 @@ class ApiService {
     dilateAmount: number = 10,
     useBlur: boolean = false
   ): Promise<{ success: boolean; mask_base64: string; image_id?: string; error?: string }> {
-    return this.makeRequest<{
-      success: boolean;
-      mask_base64: string;
-      image_id?: string;
-      error?: string;
-    }>('/api/smart-mask', {
-      method: 'POST',
-      body: JSON.stringify({
-        image: image,
-        image_id: imageId,
-        bbox: bbox,
-        points: points,
-        dilate_amount: dilateAmount,
-        use_blur: useBlur,
-      }),
-    });
+    const url = `${this.baseUrl}/api/smart-mask`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          image: image,
+          image_id: imageId,
+          bbox: bbox,
+          points: points,
+          dilate_amount: dilateAmount,
+          use_blur: useBlur,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage =
+          errorData.detail ||
+          errorData.error ||
+          `Smart mask API error: HTTP ${response.status} ${response.statusText}`;
+        throw new Error(errorMessage);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('❌ Smart Mask Request Error:', error);
+
+      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+        throw new Error(
+          `Network error: Unable to connect to smart mask endpoint at ${url}. ` +
+          'Please check:\n1. Is the API server running?\n' +
+          '2. Is the endpoint URL correct?\n3. Are there any CORS/network issues?'
+        );
+      }
+
+      throw error;
+    }
   }
 
   // Download visualization images
@@ -503,7 +736,7 @@ class ApiService {
   }> {
     try {
       const formData = new FormData();
-      
+
       if (Array.isArray(file)) {
         // Folder upload: append all files with their relative paths
         file.forEach((f) => {
@@ -550,7 +783,7 @@ class ApiService {
   ): Promise<any> {
     try {
       const formData = new FormData();
-      
+
       if (Array.isArray(file)) {
         // Folder upload: append all files with their relative paths
         file.forEach((f) => {
@@ -563,7 +796,7 @@ class ApiService {
         formData.append('file', file);
         formData.append('upload_type', 'zip');
       }
-      
+
       formData.append('task_type', options.task_type || 'object-removal');
       // Prompt is required - will be used for ALL images
       formData.append('prompt', options.prompt || '');

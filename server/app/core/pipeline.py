@@ -4,23 +4,25 @@ import gc
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+
+if TYPE_CHECKING:
+    from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
 
 
 def is_pipeline_loaded(task_type: str | None = None) -> bool:
     """
-    Kiểm tra xem Qwen pipeline đã được load chưa (cho bất kỳ task nào).
+    Check if Qwen pipeline is loaded.
     
     Args:
-        task_type: "insertion", "removal", "white-balance", hoặc None để kiểm tra bất kỳ.
+        task_type: "insertion", "removal", "white-balance", or None to check if pipeline is loaded.
     
     Returns:
-        True nếu pipeline tương ứng đã được load.
+        True if pipeline is loaded (and adapter is loaded if task_type specified), False otherwise.
     """
     from .qwen_loader import is_qwen_pipeline_loaded
     return is_qwen_pipeline_loaded(task_type)
@@ -85,26 +87,26 @@ def get_device_info() -> Dict[str, Any]:
     return info
 
 
-def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
+async def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     """
-    Load Qwen pipeline cho task tương ứng.
+    Load Qwen pipeline for the specified task.
     
     Args:
-        task_type: "insertion", "removal", hoặc "white-balance"
+        task_type: "insertion", "removal", or "white-balance"
     
     Returns:
-        DiffusionPipeline đã load
+        Loaded DiffusionPipeline
     """
-    # Cả 3 task đều dùng chung Qwen loader, khác nhau ở checkpoint và tham số.
+    # All 3 tasks use the same Qwen loader, differing only in checkpoint and parameters.
     from .qwen_loader import load_qwen_pipeline
-    return load_qwen_pipeline(task_type)
+    return await load_qwen_pipeline(task_type)
 
 
 def clear_pipeline_cache() -> None:
-    """Xoá cache toàn bộ Qwen pipelines."""
+    """Clear cache for Qwen pipeline and all adapters."""
     from .qwen_loader import clear_qwen_cache
     
     clear_qwen_cache()
     gc.collect()
-    logger.info("🧹 Cleared all Qwen pipeline caches")
+    logger.info("🧹 Cleared Qwen pipeline cache")
 

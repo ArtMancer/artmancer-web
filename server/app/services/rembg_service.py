@@ -48,8 +48,8 @@ def remove_background(image_bytes: bytes) -> bytes:
         # alpha_matting=False: Faster processing, good enough for most cases
         # Set alpha_matting=True if you need extremely smooth edges (slower)
         #
-        # Đưa ảnh (sau khi resize nếu có) về PNG bytes rồi truyền vào rembg.
-        # rembg.remove(...) sẽ trả về bytes, phù hợp với type hint (không còn gọi .save trên bytes).
+        # Convert image (after resize if any) to PNG bytes then pass to rembg.
+        # rembg.remove(...) returns bytes, matching type hint (no longer calling .save on bytes).
         buffer = io.BytesIO()
         input_image.save(buffer, format="PNG")
         buffer.seek(0)
@@ -59,7 +59,7 @@ def remove_background(image_bytes: bytes) -> bytes:
             alpha_matting=False,
         )
 
-        # Chuẩn hoá kết quả về bytes để khớp type hint
+        # Normalize result to bytes to match type hint
         if isinstance(result, bytes):
             result_bytes = result
         elif isinstance(result, Image.Image):
@@ -68,7 +68,7 @@ def remove_background(image_bytes: bytes) -> bytes:
             out_buf.seek(0)
             result_bytes = out_buf.getvalue()
         else:
-            # rembg cũng có thể trả về ndarray; chuyển sang PNG bytes
+            # rembg may also return ndarray; convert to PNG bytes
             img = Image.fromarray(result)
             out_buf = io.BytesIO()
             img.save(out_buf, format="PNG")

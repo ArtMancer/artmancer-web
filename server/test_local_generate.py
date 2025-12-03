@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from typing import Any, Dict
@@ -15,13 +16,13 @@ def _load_image_base64(path: str) -> str:
 
 def build_sample_request() -> Dict[str, Any]:
     """
-    Tạo payload mẫu giống GenerationRequest để test trực tiếp GenerationService.
+    Build sample payload matching GenerationRequest to test GenerationService directly.
     """
-    # TODO: sửa lại các path này cho phù hợp với máy bạn
+    # TODO: Update these paths to match your machine
     input_image_b64 = _load_image_base64("dataset/image.png")
     mask_image_b64 = _load_image_base64("dataset/condition-1.png")
 
-    # conditional_images: phần tử đầu tiên là mask, các phần tử sau (nếu có) là extra conditionals
+    # conditional_images: first element is mask, subsequent elements (if any) are extra conditionals
     conditional_images = [mask_image_b64]
 
     return {
@@ -30,18 +31,18 @@ def build_sample_request() -> Dict[str, Any]:
         "num_inference_steps": 25,
         "guidance_scale": 4.0,
         "true_cfg_scale": 3.3,
-        "task_type": "object-insert",  # hoặc "object-removal" / "white-balance"
+        "task_type": "object-insert",  # or "object-removal" / "white-balance"
         "seed": 42,
         "input_quality": "medium",
         "conditional_images": conditional_images,
     }
 
 
-def main() -> None:
+async def main() -> None:
     payload = build_sample_request()
     service = GenerationService()
     request = GenerationRequest.model_validate(payload)
-    result = service.generate(request)
+    result = await service.generate(request)
     print("Result keys:", list(result.keys()))
     if not result.get("success", False):
         print("Error:", result)
@@ -57,6 +58,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 
 

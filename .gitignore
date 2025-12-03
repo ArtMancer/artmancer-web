@@ -296,3 +296,5 @@ server/*.sqlite3
 datasets/
 /server/dataset
 server/server.zip
+
+*.Identifier

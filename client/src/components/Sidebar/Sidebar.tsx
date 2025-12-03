@@ -37,6 +37,7 @@ interface SidebarProps {
   uploadedImage: string | null;
   referenceImage: string | null;
   aiTask: "white-balance" | "object-insert" | "object-removal" | "evaluation";
+  appMode?: "inference" | "benchmark"; // App mode: inference or benchmark
   isMaskingMode: boolean;
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
@@ -137,6 +138,42 @@ interface SidebarProps {
   onExportEvaluationJSON?: () => void;
   onExportEvaluationCSV?: () => void;
   onInputQualityChange: (value: InputQualityPreset) => void;
+  // Low-end optimization props
+  enable4BitTextEncoder?: boolean;
+  enableCpuOffload?: boolean;
+  enableMemoryOptimizations?: boolean;
+  enableFlowmatchScheduler?: boolean;
+  onEnable4BitTextEncoderChange?: (enabled: boolean) => void;
+  onEnableCpuOffloadChange?: (enabled: boolean) => void;
+  onEnableMemoryOptimizationsChange?: (enabled: boolean) => void;
+  onEnableFlowmatchSchedulerChange?: (enabled: boolean) => void;
+  // Benchmark mode props
+  benchmarkFolder?: string;
+  benchmarkValidation?: {
+    success: boolean;
+    message: string;
+    image_count?: number;
+    details?: Record<string, number>;
+  } | null;
+  isValidatingBenchmark?: boolean;
+  benchmarkSampleCount?: number;
+  benchmarkTask?: "white-balance" | "object-insert" | "object-removal";
+  isRunningBenchmark?: boolean;
+  benchmarkProgress?: {
+    current: number;
+    total: number;
+    currentImage?: string;
+  } | null;
+  benchmarkResults?: any;
+  benchmarkPrompt?: string;
+  onBenchmarkFolderChange?: (path: string) => void;
+  onBenchmarkFolderValidate?: (file: File | File[]) => void;
+  onBenchmarkSampleCountChange?: (count: number) => void;
+  onBenchmarkTaskChange?: (
+    task: "white-balance" | "object-insert" | "object-removal"
+  ) => void;
+  onBenchmarkPromptChange?: (prompt: string) => void;
+  onRunBenchmark?: () => void;
 }
 
 export default function Sidebar({
@@ -145,6 +182,7 @@ export default function Sidebar({
   uploadedImage,
   referenceImage,
   aiTask,
+  appMode = "inference", // Default to inference mode
   isMaskingMode,
   maskBrushSize,
   maskToolType = "brush",
@@ -219,6 +257,15 @@ export default function Sidebar({
   onExportEvaluationJSON,
   onExportEvaluationCSV,
   onInputQualityChange,
+  // Low-end optimization props with defaults
+  enable4BitTextEncoder = false,
+  enableCpuOffload = false,
+  enableMemoryOptimizations = false,
+  enableFlowmatchScheduler = false,
+  onEnable4BitTextEncoderChange,
+  onEnableCpuOffloadChange,
+  onEnableMemoryOptimizationsChange,
+  onEnableFlowmatchSchedulerChange,
 }: SidebarProps) {
   // Translation hook
   const { t } = useLanguage();
@@ -234,34 +281,17 @@ export default function Sidebar({
     description: string;
   }[] = [
     {
-      value: "super_low",
-      label: "Super Low",
-      ratio: "1/16",
-      description: "Nhanh nhất, phù hợp để duyệt bố cục trước khi tinh chỉnh.",
-    },
-    {
-      value: "low",
-      label: "Low",
-      ratio: "1/8",
-      description: "Tiết kiệm VRAM, phù hợp khi cần xem nhanh kết quả.",
-    },
-    {
-      value: "medium",
-      label: "Medium",
-      ratio: "1/4",
-      description: "Cân bằng giữa chất lượng và tốc độ.",
-    },
-    {
-      value: "high",
-      label: "High",
-      ratio: "1/2",
-      description: "Chi tiết cao nhưng vẫn tối ưu tài nguyên.",
+      value: "resized",
+      label: "Resize 1:1",
+      ratio: "1:1",
+      description:
+        "Resize về aspect ratio vuông (512x512, 1024x1024,...), tối ưu hiệu năng.",
     },
     {
       value: "original",
-      label: "Original",
-      ratio: "1/1",
-      description: "Giữ nguyên kích thước gốc, tốn tài nguyên nhất.",
+      label: "Ảnh gốc",
+      ratio: "Gốc",
+      description: "Giữ nguyên kích thước và tỷ lệ gốc, chi tiết cao nhất.",
     },
   ];
 
@@ -433,6 +463,7 @@ export default function Sidebar({
                       onClick={() => {
                         const apiUrl =
                           process.env.NEXT_PUBLIC_API_URL ||
+                          process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL ||
                           "http://localhost:8003";
                         window.open(
                           `${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`,
@@ -520,116 +551,113 @@ export default function Sidebar({
 
           {/* White Balance Controls */}
           {!isEditingDone && aiTask === "white-balance" && (
-              <div className="pb-4 border-b border-[var(--border-color)]">
-                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                  {t("sidebar.whiteBalanceSettings")}
-                </h3>
-                <div className="space-y-4">
-                  {/* Method Selection */}
+            <div className="pb-4 border-b border-[var(--border-color)]">
+              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                {t("sidebar.whiteBalanceSettings")}
+              </h3>
+              <div className="space-y-4">
+                {/* Method Selection */}
+                <div>
+                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                    {t("sidebar.method")}
+                  </label>
+                  <select
+                    onChange={(e) => {
+                      const method = e.target.value as "auto" | "manual" | "ai";
+                      onWhiteBalance?.(method);
+                    }}
+                    className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
+                  >
+                    <option value="auto">
+                      {t("sidebar.autoWhiteBalance")}
+                    </option>
+                    <option value="manual">
+                      {t("sidebar.manualWhiteBalance")}
+                    </option>
+                    <option value="ai">{t("sidebar.aiWhiteBalance")}</option>
+                  </select>
+                </div>
+
+                {/* Manual Controls */}
+                <div className="space-y-3">
                   <div>
                     <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.method")}
+                      {t("sidebar.temperature")}: {whiteBalanceTemperature}
                     </label>
-                    <select
-                      onChange={(e) => {
-                        const method = e.target.value as
-                          | "auto"
-                          | "manual"
-                          | "ai";
-                        onWhiteBalance?.(method);
-                      }}
-                      className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
-                    >
-                      <option value="auto">
-                        {t("sidebar.autoWhiteBalance")}
-                      </option>
-                      <option value="manual">
-                        {t("sidebar.manualWhiteBalance")}
-                      </option>
-                      <option value="ai">{t("sidebar.aiWhiteBalance")}</option>
-                    </select>
+                    <input
+                      type="range"
+                      min="-100"
+                      max="100"
+                      value={whiteBalanceTemperature}
+                      onChange={(e) =>
+                        onWhiteBalanceTemperatureChange?.(
+                          parseInt(e.target.value)
+                        )
+                      }
+                      className="w-full"
+                    />
                   </div>
-
-                  {/* Manual Controls */}
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                        {t("sidebar.temperature")}: {whiteBalanceTemperature}
-                      </label>
-                      <input
-                        type="range"
-                        min="-100"
-                        max="100"
-                        value={whiteBalanceTemperature}
-                        onChange={(e) =>
-                          onWhiteBalanceTemperatureChange?.(
-                            parseInt(e.target.value)
-                          )
-                        }
-                        className="w-full"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                        {t("sidebar.tint")}: {whiteBalanceTint}
-                      </label>
-                      <input
-                        type="range"
-                        min="-100"
-                        max="100"
-                        value={whiteBalanceTint}
-                        onChange={(e) =>
-                          onWhiteBalanceTintChange?.(parseInt(e.target.value))
-                        }
-                        className="w-full"
-                      />
-                    </div>
+                  <div>
+                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                      {t("sidebar.tint")}: {whiteBalanceTint}
+                    </label>
+                    <input
+                      type="range"
+                      min="-100"
+                      max="100"
+                      value={whiteBalanceTint}
+                      onChange={(e) =>
+                        onWhiteBalanceTintChange?.(parseInt(e.target.value))
+                      }
+                      className="w-full"
+                    />
                   </div>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
           {/* Reference Image Upload (only for object insert) */}
           {!isEditingDone && aiTask === "object-insert" && (
-              <div className="pb-4 border-b border-[var(--border-color)]">
-                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                  {t("sidebar.referenceImage")}
-                </h3>
-                <div className="space-y-3">
-                  <label
-                    htmlFor="reference-image-upload"
-                    className="w-full px-4 py-3 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-secondary)] hover:text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2 border-2 border-dashed border-[var(--primary-accent)]"
-                  >
-                    <FaImage className="w-4 h-4" />
-                    {t("sidebar.chooseReference")}
-                  </label>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/jpg,image/webp"
-                    onChange={onReferenceImageUpload}
-                    className="hidden"
-                    id="reference-image-upload"
-                  />
-                  {referenceImage && (
-                    <div className="space-y-2">
-                      <div className="relative w-full h-24 bg-[var(--secondary-bg)] rounded-lg overflow-hidden">
-                        <img
-                          src={referenceImage}
-                          alt="Reference"
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-                      <button
-                        onClick={onRemoveReferenceImage}
-                        className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
-                      >
-                        {t("sidebar.removeReference")}
-                      </button>
+            <div className="pb-4 border-b border-[var(--border-color)]">
+              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                {t("sidebar.referenceImage")}
+              </h3>
+              <div className="space-y-3">
+                <label
+                  htmlFor="reference-image-upload"
+                  className="w-full px-4 py-3 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-secondary)] hover:text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2 border-2 border-dashed border-[var(--primary-accent)]"
+                >
+                  <FaImage className="w-4 h-4" />
+                  {t("sidebar.chooseReference")}
+                </label>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg,image/webp"
+                  onChange={onReferenceImageUpload}
+                  className="hidden"
+                  id="reference-image-upload"
+                />
+                {referenceImage && (
+                  <div className="space-y-2">
+                    <div className="relative w-full h-24 bg-[var(--secondary-bg)] rounded-lg overflow-hidden">
+                      <img
+                        src={referenceImage}
+                        alt="Reference"
+                        className="w-full h-full object-cover"
+                      />
                     </div>
-                  )}
-                </div>
+                    <button
+                      onClick={onRemoveReferenceImage}
+                      className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
+                    >
+                      {t("sidebar.removeReference")}
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
+          )}
 
           {/* Benchmark Mode Section */}
           {!isEditingDone && appMode === "benchmark" && (
@@ -1602,29 +1630,29 @@ export default function Sidebar({
 
           {/* White Balance Settings (only for white balance task) */}
           {!isEditingDone && aiTask === "white-balance" && (
-              <div className="pb-4 border-b border-[var(--border-color)]">
-                <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                  {t("sidebar.whiteBalanceSettings")}
-                </h3>
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.autoCorrectionStrength")}: 80%
-                    </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      defaultValue="80"
-                      className="w-full accent-[var(--primary-accent)]"
-                    />
-                  </div>
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    {t("sidebar.aiAutoAdjust")}
-                  </p>
+            <div className="pb-4 border-b border-[var(--border-color)]">
+              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+                {t("sidebar.whiteBalanceSettings")}
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                    {t("sidebar.autoCorrectionStrength")}: 80%
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    defaultValue="80"
+                    className="w-full accent-[var(--primary-accent)]"
+                  />
                 </div>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  {t("sidebar.aiAutoAdjust")}
+                </p>
               </div>
-            )}
+            </div>
+          )}
 
           {/* Advanced Settings */}
           {!isEditingDone && (
@@ -1780,6 +1808,115 @@ export default function Sidebar({
                   <p className="text-xs text-[var(--text-secondary)] mt-2">
                     {t("sidebar.cfgGuidanceDescription")}
                   </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Low-End Optimizations */}
+          {!isEditingDone && (
+            <div className="pt-2 border-t border-[var(--border-color)] mt-4">
+              <h3 className="text-[var(--text-primary)] font-medium mb-4">
+                Tối ưu cho GPU thấp (Low-End)
+              </h3>
+              <div className="space-y-4">
+                <p className="text-xs text-[var(--text-secondary)] mb-3">
+                  Các tính năng này giúp giảm VRAM cho GPU 12GB hoặc thấp hơn.
+                  Lưu ý: Cần restart backend để áp dụng thay đổi.
+                </p>
+
+                {/* 4-bit Text Encoder */}
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
+                      4-bit Text Encoder
+                    </label>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Giảm ~4GB VRAM, chậm hơn một chút
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enable4BitTextEncoder}
+                      onChange={(e) =>
+                        onEnable4BitTextEncoderChange?.(e.target.checked)
+                      }
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
+                  </label>
+                </div>
+
+                {/* CPU Offload */}
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
+                      CPU Offload
+                    </label>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Offload transformer & VAE về CPU, tiết kiệm VRAM nhưng
+                      chậm hơn
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableCpuOffload}
+                      onChange={(e) =>
+                        onEnableCpuOffloadChange?.(e.target.checked)
+                      }
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
+                  </label>
+                </div>
+
+                {/* Memory Optimizations */}
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
+                      Memory Optimizations
+                    </label>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Safetensors, low_cpu_mem_usage, TF32 matmul
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableMemoryOptimizations}
+                      onChange={(e) =>
+                        onEnableMemoryOptimizationsChange?.(e.target.checked)
+                      }
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
+                  </label>
+                </div>
+
+                {/* FlowMatch Scheduler */}
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
+                      FlowMatch Scheduler
+                    </label>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Sử dụng FlowMatchEulerDiscreteScheduler thay vì scheduler
+                      mặc định
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableFlowmatchScheduler}
+                      onChange={(e) =>
+                        onEnableFlowmatchSchedulerChange?.(e.target.checked)
+                      }
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
+                  </label>
                 </div>
               </div>
             </div>

@@ -11,5 +11,5 @@ service = GenerationService()
 
 @router.post("/generate", response_model=GenerationResponse)
 async def generate_image(request: GenerationRequest):
-    return service.generate(request)
+    return await service.generate(request)
 

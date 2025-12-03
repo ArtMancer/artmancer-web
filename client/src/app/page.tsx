@@ -49,13 +49,13 @@ export default function Home() {
       case "object-removal":
         return {
           guidanceScale: 7.0, // Strict for removal (higher in 1-10 range)
-          inferenceSteps: 50, // High quality
+          inferenceSteps: 20, // Default 20 steps
           cfgScale: 4.0, // Keep default
         };
       case "object-insert":
         return {
           guidanceScale: 4.0, // Balanced for insertion (middle of 1-10 range)
-          inferenceSteps: 50, // High quality
+          inferenceSteps: 20, // Default 20 steps
           cfgScale: 4.0, // Keep default
         };
       case "white-balance":
@@ -67,7 +67,7 @@ export default function Home() {
       default:
         return {
           guidanceScale: 1.0,
-          inferenceSteps: 40,
+          inferenceSteps: 20,
           cfgScale: 4.0,
         };
     }
@@ -76,17 +76,27 @@ export default function Home() {
   const [guidanceScale, setGuidanceScale] = useState<number>(1.0);
   const [inferenceSteps, setInferenceSteps] = useState<number>(20); // Start with white-balance default
   const [cfgScale, setCfgScale] = useState<number>(4.0);
-  const [inputQuality, setInputQuality] = useState<InputQualityPreset>("high");
-  const QUALITY_SCALE_MAP: Record<InputQualityPreset, number> = useMemo(
-    () => ({
-      super_low: 1 / 16,
-      low: 1 / 8,
-      medium: 1 / 4,
-      high: 1 / 2,
-      original: 1,
-    }),
-    []
-  );
+  const [inputQuality, setInputQuality] =
+    useState<InputQualityPreset>("resized");
+
+  // Low-end optimization states
+  const [enable4BitTextEncoder, setEnable4BitTextEncoder] =
+    useState<boolean>(false);
+  const [enableCpuOffload, setEnableCpuOffload] = useState<boolean>(false);
+  const [enableMemoryOptimizations, setEnableMemoryOptimizations] =
+    useState<boolean>(false);
+  const [enableFlowmatchScheduler, setEnableFlowmatchScheduler] =
+    useState<boolean>(false);
+
+  // Helper to calculate 1:1 square size based on max dimension
+  const getSquareSize = useCallback((maxDim: number): number => {
+    if (maxDim <= 640) return 512;
+    if (maxDim <= 896) return 768;
+    if (maxDim <= 1280) return 1024;
+    if (maxDim <= 1792) return 1536;
+    return 2048;
+  }, []);
+
   const [baseImageData, setBaseImageData] = useState<string | null>(null);
   const [baseImageDimensions, setBaseImageDimensions] = useState<{
     width: number;
@@ -1203,12 +1213,11 @@ export default function Home() {
     string | null
   >(null);
 
-  const MIN_QUALITY_DIMENSION = 64;
-
   const scaleImageDataUrl = (
     dataUrl: string,
     targetWidth: number,
-    targetHeight: number
+    targetHeight: number,
+    preserveAspectRatio: boolean = false
   ): Promise<{ dataUrl: string; width: number; height: number }> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -1223,7 +1232,30 @@ export default function Home() {
         }
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+        if (preserveAspectRatio) {
+          // Fill canvas with black background
+          ctx.fillStyle = "#000000";
+          ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+          // Calculate scale to fit image within target size (preserve aspect ratio)
+          const scale = Math.min(
+            targetWidth / img.width,
+            targetHeight / img.height
+          );
+          const newWidth = img.width * scale;
+          const newHeight = img.height * scale;
+
+          // Center the image
+          const x = (targetWidth - newWidth) / 2;
+          const y = (targetHeight - newHeight) / 2;
+
+          ctx.drawImage(img, x, y, newWidth, newHeight);
+        } else {
+          // Force resize (may distort)
+          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+        }
+
         resolve({
           dataUrl: canvas.toDataURL("image/png"),
           width: targetWidth,
@@ -1270,7 +1302,6 @@ export default function Home() {
         return false;
       }
 
-      const scale = QUALITY_SCALE_MAP[quality] ?? QUALITY_SCALE_MAP.high;
       const requestId = ++qualityChangeRequestRef.current;
       setIsApplyingQuality(true);
 
@@ -1279,24 +1310,28 @@ export default function Home() {
         let targetHeight = sourceDimensions.height;
         let resultDataUrl = sourceData;
 
-        if (scale < 0.999) {
-          targetWidth = Math.max(
-            MIN_QUALITY_DIMENSION,
-            Math.round(sourceDimensions.width * scale)
+        // If quality is "resized", resize to 1:1 aspect ratio (square) with padding
+        if (quality === "resized") {
+          const maxDim = Math.max(
+            sourceDimensions.width,
+            sourceDimensions.height
           );
-          targetHeight = Math.max(
-            MIN_QUALITY_DIMENSION,
-            Math.round(sourceDimensions.height * scale)
-          );
+          const squareSize = getSquareSize(maxDim);
+
+          targetWidth = squareSize;
+          targetHeight = squareSize;
+
           const scaled = await scaleImageDataUrl(
             sourceData,
             targetWidth,
-            targetHeight
+            targetHeight,
+            true // preserveAspectRatio = true (pad with black)
           );
           resultDataUrl = scaled.dataUrl;
           targetWidth = scaled.width;
           targetHeight = scaled.height;
         }
+        // If quality is "original", keep original dimensions (do nothing)
 
         if (qualityChangeRequestRef.current !== requestId) {
           return false;
@@ -1316,7 +1351,7 @@ export default function Home() {
         if (!options?.silent) {
           console.log("✅ Applied input quality preset:", {
             quality,
-            scale,
+            mode: quality === "resized" ? "1:1 square" : "original",
             width: targetWidth,
             height: targetHeight,
           });
@@ -1339,7 +1374,7 @@ export default function Home() {
       }
     },
     [
-      QUALITY_SCALE_MAP,
+      getSquareSize,
       baseImageData,
       baseImageDimensions,
       clearMask,
@@ -1449,7 +1484,7 @@ export default function Home() {
     setComparisonSlider(50);
     resetMaskHistory();
     setBaseImage(null);
-    setInputQuality("high");
+    setInputQuality("resized");
     setLastRequestId(null);
     setIsApplyingQuality(false);
   };
@@ -1659,6 +1694,11 @@ export default function Home() {
         negative_prompt: negativePrompt || undefined,
         generator_seed: undefined, // Add seed if needed
         input_quality: inputQuality,
+        // Low-end optimization flags
+        enable_4bit_text_encoder: enable4BitTextEncoder,
+        enable_cpu_offload: enableCpuOffload,
+        enable_memory_optimizations: enableMemoryOptimizations,
+        enable_flowmatch_scheduler: enableFlowmatchScheduler,
       };
 
       // Use uploadedImage (current image) for API call
@@ -1793,27 +1833,27 @@ export default function Home() {
         console.error("⚠️ API connection failed after retries:", err);
 
         let errorMessage =
-          "Unable to connect to backend server. Please ensure the backend is running on port 8003.";
+          "Unable to connect to API server. Please ensure the API endpoint is reachable.";
 
         if (err instanceof Error) {
           try {
             // Try to parse as JSON if it's a JSON string
             const errorData = JSON.parse(err.message);
             if (errorData.baseUrl) {
-              errorMessage = `Cannot connect to ${errorData.baseUrl}. Please ensure the backend is running on port 8003.`;
+              errorMessage = `Cannot connect to ${errorData.baseUrl}. Please ensure the API endpoint is reachable.`;
             } else if (errorData.error) {
               // Only show detailed error if it's not a network error (status 0)
               if (errorData.status !== 0) {
                 errorMessage = errorData.error;
               } else {
                 errorMessage =
-                  "Backend server is not responding. Please check if the server is running on port 8003.";
+                  "API server is not responding. Please check if the API endpoint is running.";
               }
             } else if (errorData.status === 0) {
               errorMessage =
-                "Backend server is not responding. Please check if the server is running on port 8003.";
+                "API server is not responding. Please check if the API endpoint is running.";
             }
-          } catch (parseError) {
+          } catch {
             // If not JSON, use the error message directly
             if (
               err.message.includes("Failed to fetch") ||
@@ -1821,7 +1861,7 @@ export default function Home() {
               err.message.includes("timeout")
             ) {
               errorMessage =
-                "Backend server is not responding. Please check if the server is running on port 8003.";
+                "API server is not responding. Please check if the API endpoint is running.";
             } else {
               errorMessage = err.message || errorMessage;
             }
@@ -1847,7 +1887,7 @@ export default function Home() {
       }
       clearTimeout(initialDelay);
     };
-  }, []);
+  }, [setNotificationWithTimeout]);
 
   // Cleanup effect to clear notification timeouts
   useEffect(() => {
@@ -1857,25 +1897,28 @@ export default function Home() {
   }, [clearNotificationTimeout]);
 
   // Throttle function for better performance
-  const throttle = useCallback((func: Function, delay: number) => {
-    let timeoutId: NodeJS.Timeout | null = null;
-    let lastExecTime = 0;
+  const throttle = useCallback(
+    <T extends (...args: unknown[]) => void>(func: T, delay: number): T => {
+      let timeoutId: NodeJS.Timeout | null = null;
+      let lastExecTime = 0;
 
-    return (...args: any[]) => {
-      const currentTime = Date.now();
+      return ((...args: Parameters<T>) => {
+        const currentTime = Date.now();
 
-      if (currentTime - lastExecTime > delay) {
-        func(...args);
-        lastExecTime = currentTime;
-      } else {
-        if (timeoutId) clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
+        if (currentTime - lastExecTime > delay) {
           func(...args);
-          lastExecTime = Date.now();
-        }, delay - (currentTime - lastExecTime));
-      }
-    };
-  }, []);
+          lastExecTime = currentTime;
+        } else {
+          if (timeoutId) clearTimeout(timeoutId);
+          timeoutId = setTimeout(() => {
+            func(...args);
+            lastExecTime = Date.now();
+          }, delay - (currentTime - lastExecTime));
+        }
+      }) as T;
+    },
+    []
+  );
 
   // Resize handlers for the sidebar - optimized for performance
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -1894,7 +1937,7 @@ export default function Home() {
 
   // Throttled resize function for smoother performance
   const throttledResize = useMemo(
-    () => throttle(updateSidebarWidth, 16), // ~60fps
+    () => throttle(updateSidebarWidth as (e: MouseEvent) => void, 16), // ~60fps
     [throttle, updateSidebarWidth]
   );
 
@@ -2187,6 +2230,15 @@ export default function Home() {
           onExportEvaluationJSON={handleExportEvaluationJSON}
           onExportEvaluationCSV={handleExportEvaluationCSV}
           onInputQualityChange={handleInputQualityChange}
+          // Low-end optimization props
+          enable4BitTextEncoder={enable4BitTextEncoder}
+          enableCpuOffload={enableCpuOffload}
+          enableMemoryOptimizations={enableMemoryOptimizations}
+          enableFlowmatchScheduler={enableFlowmatchScheduler}
+          onEnable4BitTextEncoderChange={setEnable4BitTextEncoder}
+          onEnableCpuOffloadChange={setEnableCpuOffload}
+          onEnableMemoryOptimizationsChange={setEnableMemoryOptimizations}
+          onEnableFlowmatchSchedulerChange={setEnableFlowmatchScheduler}
           // Benchmark mode props
           benchmarkFolder={benchmarkFolder}
           benchmarkValidation={benchmarkValidation}

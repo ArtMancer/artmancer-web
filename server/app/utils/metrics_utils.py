@@ -1,35 +1,35 @@
 """
 Metrics utilities for image evaluation.
 
-Các metric và ý nghĩa (đầu vào giả định là ảnh đã chuẩn hóa về [0, 1], dạng tensor (B, C, H, W)):
+Metrics and their meanings (input assumed to be images normalized to [0, 1], tensor format (B, C, H, W)):
 
-- PSNR (Peak Signal-to-Noise Ratio) [dB] – Cao hơn là tốt:
-  + ~20–30 dB: chấp nhận được
-  + >30 dB: tốt
-  + >40 dB: rất tốt/xuất sắc
-  Lưu ý: tăng ~1 dB là cải thiện nhỏ; ~3 dB là đáng kể.
+- PSNR (Peak Signal-to-Noise Ratio) [dB] – Higher is better:
+  + ~20–30 dB: acceptable
+  + >30 dB: good
+  + >40 dB: very good/excellent
+  Note: ~1 dB increase is a small improvement; ~3 dB is significant.
 
-- SSIM (Structural Similarity) ∈ [0, 1] – Cao hơn là tốt:
-  + >0.90: tốt
-  + >0.95: rất tốt
-  + 1.0: trùng khớp hoàn hảo
+- SSIM (Structural Similarity) ∈ [0, 1] – Higher is better:
+  + >0.90: good
+  + >0.95: very good
+  + 1.0: perfect match
 
-- LPIPS (Learned Perceptual Image Patch Similarity) ∈ [0, 1] – Thấp hơn là tốt:
-  + <0.20: khá
-  + <0.10: tốt
-  + <0.05: rất tốt
-  Lưu ý: Với normalize=True, metric sẽ tự chuẩn hóa từ [0,1] sang [-1,1] nội bộ.
+- LPIPS (Learned Perceptual Image Patch Similarity) ∈ [0, 1] – Lower is better:
+  + <0.20: fair
+  + <0.10: good
+  + <0.05: very good
+  Note: With normalize=True, metric will internally normalize from [0,1] to [-1,1].
 
-- ΔE00 (Delta E 2000) ≥ 0 – Thấp hơn là tốt (đo sai khác màu trong không gian cảm nhận):
-  + <1.0: hầu như không thể nhận ra
-  + 1.0–2.0: khó nhận ra (quan sát kỹ)
-  + 2.0–5.0: nhận ra nhẹ
-  + 5.0–10.0: khác biệt rõ
-  + >10: khác biệt lớn
+- ΔE00 (Delta E 2000) ≥ 0 – Lower is better (measures color difference in perceptual space):
+  + <1.0: almost imperceptible
+  + 1.0–2.0: difficult to notice (with careful observation)
+  + 2.0–5.0: slightly noticeable
+  + 5.0–10.0: clearly different
+  + >10: large difference
 
-Gợi ý sử dụng:
-- Duy trì chuẩn hóa ảnh về [0, 1] trước khi tính PSNR/SSIM/LPIPS.
-- Batch size và device của tensor nên khớp với metric instance (đã chuyển .to(device)).
+Usage suggestions:
+- Maintain image normalization to [0, 1] before computing PSNR/SSIM/LPIPS.
+- Batch size and device of tensor should match metric instance (already moved .to(device)).
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ _clip_model = None
 _clip_preprocess = None
 
 def _get_clip_model():
-    """Lazy load CLIP model."""
+    """Lazy load CLIP model (unchanged)."""
     global _clip_model, _clip_preprocess
     if _clip_model is None:
         try:
@@ -100,10 +100,10 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
 
 def compute_psnr(img1: torch.Tensor, img2: torch.Tensor, metric_instance: PeakSignalNoiseRatio) -> torch.Tensor:
     """
-    Tính PSNR (dB). Cao hơn là tốt.
+    Compute PSNR (dB). Higher is better.
     
-    Đầu vào: img1, img2 dạng (B, C, H, W), giá trị ∈ [0, 1].
-    Gợi ý mức tốt: >30 dB (tốt), >40 dB (rất tốt).
+    Input: img1, img2 in format (B, C, H, W), values ∈ [0, 1].
+    Suggested good levels: >30 dB (good), >40 dB (very good).
     """
     img1 = img1.to(metric_instance.device)
     img2 = img2.to(metric_instance.device)
@@ -112,10 +112,10 @@ def compute_psnr(img1: torch.Tensor, img2: torch.Tensor, metric_instance: PeakSi
 
 def compute_lpips(img1: torch.Tensor, img2: torch.Tensor, metric_instance: LearnedPerceptualImagePatchSimilarity) -> torch.Tensor:
     """
-    Tính LPIPS. Thấp hơn là tốt.
+    Compute LPIPS. Lower is better.
     
-    Đầu vào: img1, img2 dạng (B, C, H, W), ∈ [0, 1]. Với normalize=True sẽ tự đổi về [-1, 1].
-    Gợi ý mức tốt: <0.10 (tốt), <0.05 (rất tốt).
+    Input: img1, img2 in format (B, C, H, W), ∈ [0, 1]. With normalize=True will automatically convert to [-1, 1].
+    Suggested good levels: <0.10 (good), <0.05 (very good).
     """
     img1 = img1.to(metric_instance.device)
     img2 = img2.to(metric_instance.device)
@@ -124,9 +124,9 @@ def compute_lpips(img1: torch.Tensor, img2: torch.Tensor, metric_instance: Learn
 
 def compute_ssim(img1: torch.Tensor, img2: torch.Tensor, metric_instance: StructuralSimilarityIndexMeasure) -> torch.Tensor:
     """
-    Tính SSIM ∈ [0, 1]. Cao hơn là tốt.
+    Compute SSIM ∈ [0, 1]. Higher is better.
     
-    Đầu vào: img1, img2 dạng (B, C, H, W), ∈ [0, 1].
+    Input: img1, img2 in format (B, C, H, W), ∈ [0, 1].
     """
     img1 = img1.to(metric_instance.device)
     img2 = img2.to(metric_instance.device)
@@ -135,19 +135,19 @@ def compute_ssim(img1: torch.Tensor, img2: torch.Tensor, metric_instance: Struct
 
 def compute_de00(img1: torch.Tensor, img2: torch.Tensor) -> float:
     """
-    Tính Delta E 2000 (độ sai khác màu). Thấp hơn là tốt.
+    Compute Delta E 2000 (color difference). Lower is better.
     
-    - Đầu vào: img1, img2 dạng (B, C, H, W), ∈ [0, 1].
-    - Trả về: trung bình ΔE00 của batch (float, CPU).
-    - <1.0: không thể nhận ra
-    - 1.0–2.0: khó nhận ra
-    - 2.0–5.0: nhận ra nhẹ
-    - 5.0–10.0: khác biệt rõ
-    - >10: khác biệt lớn
+    - Input: img1, img2 in format (B, C, H, W), ∈ [0, 1].
+    - Returns: average ΔE00 of batch (float, CPU).
+    - <1.0: imperceptible
+    - 1.0–2.0: difficult to notice
+    - 2.0–5.0: slightly noticeable
+    - 5.0–10.0: clearly different
+    - >10: large difference
     
-    Lưu ý: Hàm chạy trên CPU và chuyển sang numpy; có thể là bottleneck cho batch lớn.
+    Note: Function runs on CPU and converts to numpy; may be a bottleneck for large batches.
     """
-    # Chuyển về (B, H, W, C) cho skimage, giữ giá trị float [0, 1]
+    # Convert to (B, H, W, C) for skimage, keep float values [0, 1]
     img1_np = img1.permute(0, 2, 3, 1).cpu().numpy().astype(np.float32)
     img2_np = img2.permute(0, 2, 3, 1).cpu().numpy().astype(np.float32)
     

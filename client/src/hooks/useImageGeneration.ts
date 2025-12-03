@@ -1,5 +1,27 @@
 import { useState, useCallback, useRef } from 'react';
-import { apiService, GenerationRequest, GenerationResponse, ModelSettings, WhiteBalanceRequest, WhiteBalanceResponse } from '@/services/api';
+import { apiService, GenerationRequest, GenerationResponse, ModelSettings, WhiteBalanceRequest, WhiteBalanceResponse, TaskType } from '@/services/api';
+
+// Map UI task types to backend task types
+const mapUITaskTypeToBackend = (uiTaskType: "white-balance" | "object-insert" | "object-removal"): TaskType => {
+  switch (uiTaskType) {
+    case "object-insert":
+      return "insertion";
+    case "object-removal":
+      return "removal";
+    case "white-balance":
+      return "white-balance";
+    default:
+      return "removal"; // Default fallback
+  }
+};
+
+// Validate task type
+const validateTaskType = (taskType: TaskType): void => {
+  const validTypes: TaskType[] = ["insertion", "removal", "white-balance"];
+  if (!validTypes.includes(taskType)) {
+    throw new Error(`Invalid task_type: ${taskType}. Must be one of: ${validTypes.join(", ")}`);
+  }
+};
 
 export function useImageGeneration() {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -45,21 +67,40 @@ export function useImageGeneration() {
         ? inputImage.split(',')[1]
         : inputImage;
 
+      // Convert mask_image to conditional_images format (backend expects conditional_images[0] = mask)
       const base64MaskImage = maskImage.startsWith('data:')
         ? maskImage.split(',')[1]
         : maskImage;
 
-      const base64ReferenceImage = referenceImage
-        ? (referenceImage.startsWith('data:')
-          ? referenceImage.split(',')[1]
-          : referenceImage)
+      // Map UI task type to backend task type
+      const backendTaskType: TaskType | undefined = taskType 
+        ? mapUITaskTypeToBackend(taskType)
         : undefined;
+
+      // Validate task type if provided
+      if (backendTaskType) {
+        validateTaskType(backendTaskType);
+      }
+
+      // Build conditional_images array in correct order:
+      // [0] = mask (required for insertion/removal, optional for white-balance)
+      // [1+] = additional conditional images (if any in the future)
+      const conditional_images: string[] = [];
+      
+      // For white-balance, mask is optional (backend will create full white mask if not provided)
+      // For insertion/removal, mask is required
+      if (backendTaskType !== "white-balance" || base64MaskImage) {
+        if (base64MaskImage) {
+          conditional_images.push(base64MaskImage); // [0] = mask
+        }
+      }
 
       const request: GenerationRequest = {
         prompt: prompt.trim(),
         input_image: base64InputImage,
+        conditional_images: conditional_images.length > 0 ? conditional_images : undefined,
+        // Legacy fields kept for backward compatibility but not used by backend
         mask_image: base64MaskImage,
-        reference_image: base64ReferenceImage,
         num_inference_steps: settings?.num_inference_steps,
         guidance_scale: settings?.guidance_scale,
         true_cfg_scale: settings?.true_cfg_scale,
@@ -67,15 +108,21 @@ export function useImageGeneration() {
         seed: settings?.generator_seed,
         width: settings?.width,
         height: settings?.height,
-        task_type: taskType,
+        task_type: backendTaskType, // Use backend format: "insertion", "removal", or "white-balance"
         input_quality: settings?.input_quality,
+        // Low-end optimization flags
+        enable_4bit_text_encoder: settings?.enable_4bit_text_encoder,
+        enable_cpu_offload: settings?.enable_cpu_offload,
+        enable_memory_optimizations: settings?.enable_memory_optimizations,
+        enable_flowmatch_scheduler: settings?.enable_flowmatch_scheduler,
       };
 
       // Debug logging
       console.log("🔍 [Frontend API] Request details:", {
-        hasReferenceImage: !!request.reference_image,
-        referenceImageLength: request.reference_image?.length || 0,
-        inferredTaskType: request.reference_image ? "insertion" : "removal",
+        hasConditionalImages: !!request.conditional_images,
+        conditionalImagesCount: request.conditional_images?.length || 0,
+        taskType: request.task_type,
+        hasMask: !!request.mask_image,
       });
 
       const response = await apiService.generateImage(request, abortController.signal);
@@ -105,8 +152,10 @@ export function useImageGeneration() {
             // Don't set error for cancelled requests
             return null;
           } else if (errorData.status === 0) {
-          // Network error
-            errorMessage = errorData.error || 'Unable to connect to server. Please check if the API server is running on port 8003.';
+            // Network error
+            errorMessage =
+              errorData.error ||
+              'Unable to connect to API server. Please check your connection and API endpoint configuration.';
         } else if (errorData.status === 500) {
           // Server error
             errorMessage = errorData.error || 'Server error occurred. Please check the server logs and try again.';
