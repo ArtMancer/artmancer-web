@@ -218,6 +218,44 @@ curl http://localhost:80/api/health
   - Returns `204` when initializing
   - Returns error status when unhealthy
 
+### RunPod healthcheck helper (SDK-only)
+
+I added a helper script `runpod_healthcheck.py` at the repo root (`server/runpod_healthcheck.py`). It:
+- Uses the official `runpod` Python SDK and calls `Endpoint.health()` to verify endpoint status
+- Does not perform any HTTP fallback or DNS/TCP checks — using the SDK ensures consistent behavior and helps match the RunPod control plane
+
+Note: This tool requires `runpod` SDK to be installed in your environment. Install with:
+
+```bash
+# from server directory
+uv run python -m pip install runpod
+```
+
+Usage:
+
+```bash
+# Load the env or export variables manually
+export RUNPOD_API_KEY="your_api_key"
+export RUNPOD_URL="https://pov3ewvy1mejeo.api.runpod.ai"
+python runpod_healthcheck.py
+```
+
+This is useful to quickly verify endpoint status using the official SDK.
+
+Auth scheme options for `test_generate.py`:
+
+- `key` (default): `Authorization: Key <API_KEY>`
+- `bearer`: `Authorization: Bearer <API_KEY>`
+- `raw`: `Authorization: <API_KEY>` (no 'Key' prefix)
+- `x-api-key`: `x-api-key: <API_KEY>`
+
+If your endpoint returns 401, try alternate schemes using the `--auth-scheme` flag:
+
+```bash
+# from server directory
+uv run python test_generate.py --auth-scheme raw --api-key $(sed -n 's/^RUNPOD_API_KEY=//p' .env)
+``` 
+
 ## API Endpoints
 
 - `GET /ping` – Health check endpoint (required for RunPod Load Balancer)

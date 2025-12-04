@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Dict
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -15,6 +15,11 @@ from app.core.pipeline import is_pipeline_loaded
 from app.services.generation_service import GenerationService
 
 logger = logging.getLogger(__name__)
+
+# Simple in-memory counters to prevent spamming logs; aggregate ping counts and log periodically
+_ping_counts: dict[str, int] = {}
+_ping_last_log_ts: float = 0.0
+_PING_LOG_INTERVAL = 30.0  # seconds
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -62,7 +67,7 @@ def _get_service() -> GenerationService:
 
 # Bắt buộc: Health check endpoint cho RunPod Load Balancer
 @app.get("/ping", response_model=None)
-async def ping() -> Response:
+async def ping(request: Request) -> Response:
     """
     Health check endpoint required by RunPod Load Balancer.
     
@@ -72,6 +77,19 @@ async def ping() -> Response:
         - 500: Worker unhealthy
     """
     try:
+        # Log request origin and user-agent for diagnostics (avoid logging auth headers)
+        client_ip = request.client.host if request.client else "unknown"
+        ua = request.headers.get("user-agent", "<unknown>")
+        xff = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+        # Small aggregation to avoid log spam; aggregate counts and print summary periodically
+        now_ts = asyncio.get_event_loop().time()
+        _ping_counts[client_ip] = _ping_counts.get(client_ip, 0) + 1
+        global _ping_last_log_ts
+        if now_ts - _ping_last_log_ts > _PING_LOG_INTERVAL:
+            _ping_last_log_ts = now_ts
+            # Log aggregated table of counts
+            logger.info("/ping summary (last %d seconds): %s", int(_PING_LOG_INTERVAL), _ping_counts)
+            _ping_counts.clear()
         if is_pipeline_loaded():
             return Response(content='{"status": "healthy"}', media_type="application/json", status_code=200)
         else:

@@ -52,7 +52,7 @@ def build_sample_request() -> Dict[str, Any]:
     return {
         "prompt": "yellow rubber duck on white table, photorealistic",
         "input_image": input_image_b64,
-        "num_inference_steps": 25,
+        "num_inference_steps": 10,
         "guidance_scale": 4.0,
         "true_cfg_scale": 3.3,
         "task_type": "insertion",  # "insertion", "removal", or "white-balance"
@@ -62,7 +62,7 @@ def build_sample_request() -> Dict[str, Any]:
     }
 
 
-def get_auth_headers(api_key: Optional[str] = None) -> Dict[str, str]:
+def get_auth_headers(api_key: Optional[str] = None, scheme: str = "key") -> Dict[str, str]:
     """
     Get authentication headers for RunPod API requests.
     
@@ -79,16 +79,31 @@ def get_auth_headers(api_key: Optional[str] = None) -> Dict[str, str]:
         api_key = os.getenv("RUNPOD_API_KEY")
     
     if api_key:
-        # RunPod uses Authorization: Bearer <API_KEY> format
-        headers["Authorization"] = f"Bearer {api_key}"
-        print("🔑 Using API key for authentication")
+            s = (scheme or "key").strip().lower()
+            if s.startswith("b") or s == "bearer":
+                headers["Authorization"] = f"Bearer {api_key}"
+                print("🔑 Using API key with Authorization: Bearer <token>")
+            elif s in ("key", "runpod"):
+                headers["Authorization"] = f"Key {api_key}"
+                print("🔑 Using API key with Authorization: Key <token>")
+            elif s in ("raw", "none"):
+                # Send the raw key in Authorization header without scheme (some setups accept this)
+                headers["Authorization"] = api_key
+                print("🔑 Using API key with Authorization: <raw-token>")
+            elif s in ("x-api-key", "x-api"):
+                headers["x-api-key"] = api_key
+                print("🔑 Using API key with x-api-key header")
+            else:
+                # default to Key
+                headers["Authorization"] = f"Key {api_key}"
+                print("🔑 Using API key with Authorization: Key <token> (default)")
     else:
         print("⚠️  No API key provided - endpoint may require authentication")
     
     return headers
 
 
-def health_check(endpoint_url: str, api_key: Optional[str] = None, max_retries: int = 5, delay: int = 10) -> bool:
+def health_check(endpoint_url: str, api_key: Optional[str] = None, max_retries: int = 5, delay: int = 10, scheme: str = "key") -> bool:
     """
     Check if RunPod endpoint is healthy (handle cold start).
     
@@ -104,34 +119,42 @@ def health_check(endpoint_url: str, api_key: Optional[str] = None, max_retries: 
     ping_url = f"{endpoint_url}/ping"
     print(f"🏥 Checking health at {ping_url}...")
     
-    headers = get_auth_headers(api_key)
-    
+    # Use only the SDK health check - no HTTP fallback
+    try:
+        import runpod
+    except Exception:
+        print("❌ RunPod SDK not installed. Install with: pip install runpod")
+        return False
+
+    # Derive endpoint ID from the host if possible
+    host = endpoint_url.split('//')[-1].split('/')[0]
+    if host.endswith('.api.runpod.ai'):
+        endpoint_id = host.replace('.api.runpod.ai', '')
+    else:
+        print("⚠️ The endpoint URL doesn't look like <id>.api.runpod.ai; cannot derive endpoint id.")
+        return False
+
+    # Attempt repeated SDK health checks to handle cold start
     for attempt in range(max_retries):
         try:
-            response = requests.get(ping_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                print("✅ Health check passed - endpoint is ready")
-                return True
-            elif response.status_code == 204:
-                print(f"⏳ Endpoint initializing (attempt {attempt + 1}/{max_retries})...")
-            elif response.status_code == 401:
-                print("❌ Authentication failed (401) - API key may be required or invalid")
-                print("   Set RUNPOD_API_KEY environment variable or pass --api-key argument")
-                return False
-            else:
-                print(f"⚠️  Health check returned status {response.status_code}")
-        except Exception as e:
-            print(f"⚠️  Health check attempt {attempt + 1} failed: {e}")
-        
-        if attempt < max_retries - 1:
-            print(f"🔄 Retrying in {delay} seconds...")
-            time.sleep(delay)
-    
-    print("❌ Health check failed after all retries")
+            print(f"💡 SDK health attempt {attempt + 1}/{max_retries} for endpoint '{endpoint_id}'")
+            runpod.api_key = api_key or os.getenv('RUNPOD_API_KEY')
+            ep = runpod.Endpoint(endpoint_id)
+            sdk_health = ep.health(timeout=10)
+            print("🟢 SDK health check result:", sdk_health)
+            # A successful call indicates the endpoint is reachable; return True
+            return True
+        except Exception as sdk_exc:
+            print(f"⚠️ SDK health attempt {attempt + 1} failed: {type(sdk_exc).__name__}: {sdk_exc}")
+            if attempt < max_retries - 1:
+                print(f"🔄 Retrying in {delay} seconds...")
+                time.sleep(delay)
+
+    print("❌ SDK health check failed after all retries")
     return False
 
 
-def test_runpod_endpoint(endpoint_url: Optional[str] = None, api_key: Optional[str] = None) -> None:
+def test_runpod_endpoint(endpoint_url: Optional[str] = None, api_key: Optional[str] = None, auth_scheme: str = "key") -> None:
     """
     Test RunPod endpoint with sample generation request.
     
@@ -159,7 +182,7 @@ def test_runpod_endpoint(endpoint_url: Optional[str] = None, api_key: Optional[s
     print("=" * 80)
     
     # Health check first (handle cold start)
-    if not health_check(endpoint_url, api_key):
+    if not health_check(endpoint_url, api_key, scheme=auth_scheme):
         print("❌ Endpoint is not ready. Please try again later.")
         return
     
@@ -169,7 +192,7 @@ def test_runpod_endpoint(endpoint_url: Optional[str] = None, api_key: Optional[s
     
     # Prepare API request with authentication headers
     api_url = f"{endpoint_url}/api/generate"
-    headers = get_auth_headers(api_key)
+    headers = get_auth_headers(api_key, scheme=auth_scheme)
     
     print(f"\n🚀 Sending request to {api_url}...")
     print(f"   Prompt: {payload['prompt']}")
@@ -265,9 +288,38 @@ if __name__ == "__main__":
         default=None,
         help="RunPod API key (can also be set via RUNPOD_API_KEY env var or .env file)"
     )
+    parser.add_argument(
+        "--auth-scheme",
+        dest="auth_scheme",
+        default=None,
+        help="Authentication header scheme to use: 'key' (default) or 'bearer'"
+    )
+    parser.add_argument(
+        "--check-only",
+        dest="check_only",
+        action="store_true",
+        help="Only check /api/health (fast), don't send generation request",
+    )
     
     args = parser.parse_args()
     
-    test_runpod_endpoint(args.endpoint_url, args.api_key)
+    # Optional: only perform a fast /api/health check
+    if args.check_only:
+        # Build headers and do a quick health endpoint fetch
+        endpoint = args.endpoint_url or os.getenv("RUNPOD_ENDPOINT_URL", "https://pov3ewvy1mejeo.api.runpod.ai")
+        headers = get_auth_headers(args.api_key, scheme=args.auth_scheme or "key")
+        url = endpoint.rstrip("/") + "/api/health"
+        print(f"🔎 Checking {url}...")
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            print(f"Status: {r.status_code}")
+            try:
+                print(r.json())
+            except Exception:
+                print(r.text[:1024])
+        except Exception as e:
+            print("Check failed:", e)
+    else:
+        test_runpod_endpoint(args.endpoint_url, args.api_key, auth_scheme=args.auth_scheme or "key")
 
 
