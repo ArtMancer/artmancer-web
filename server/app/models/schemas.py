@@ -22,6 +22,11 @@ class GenerationRequest(BaseModel):
         default=None,
         description="Base64 encoded reference image (required for insertion task, used as object conditional)"
     )
+    # Reference mask R (for two-source mask workflow - isolates object in reference image)
+    reference_mask_R: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded mask image isolating object in reference image (Mask R - defines object shape for insertion)"
+    )
     width: Optional[int] = Field(None, ge=256, le=2048)
     height: Optional[int] = Field(None, ge=256, le=2048)
     num_inference_steps: Optional[int] = Field(10, ge=1, le=100)

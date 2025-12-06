@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from pathlib import Path
-from typing import Any, Dict, List
+import zipfile
+import io
+from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from ...services.debug_service import debug_service
 
@@ -168,4 +168,43 @@ async def get_debug_status() -> Dict[str, Any]:
         status["total_size_mb"] = round(total_size / (1024 * 1024), 2)
     
     return status
+
+
+@router.get("/sessions/{session_name}/download")
+async def download_debug_session(session_name: str):
+    """Download all debug files from a session as a ZIP archive."""
+    if not debug_service.enabled:
+        raise HTTPException(status_code=404, detail="Debug service is not enabled")
+    
+    try:
+        session_dir = debug_service.base_dir / session_name
+        if not session_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Session {session_name} not found")
+        
+        # Create ZIP archive in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            # Add all files in session directory
+            for file_path in session_dir.rglob("*"):
+                if file_path.is_file():
+                    # Use relative path within ZIP
+                    arcname = file_path.relative_to(session_dir)
+                    zip_file.write(file_path, arcname)
+        
+        zip_buffer.seek(0)
+        
+        # Return ZIP file as response
+        return Response(
+            content=zip_buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{session_name}.zip"'
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to download debug session")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 

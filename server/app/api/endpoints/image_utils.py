@@ -1,17 +1,14 @@
 """
 Image utility endpoints for image processing operations.
 """
-import asyncio
 import base64
 import io
 import logging
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import Response
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from PIL import Image
-
-from app.services.rembg_service import remove_background
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -29,55 +26,6 @@ class ExtractObjectResponse(BaseModel):
     success: bool
     extracted_image: Optional[str] = None  # Base64 encoded PNG with transparent bg
     error: Optional[str] = None
-
-
-@router.post("/remove-bg")
-async def remove_bg_endpoint(file: UploadFile = File(...)):
-    """
-    Remove background from an uploaded image.
-    
-    Args:
-        file: Uploaded image file (any format supported by PIL)
-        
-    Returns:
-        Response: PNG image with transparent background
-        
-    Raises:
-        HTTPException: If file is not an image or processing fails
-    """
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="File must be an image. Supported formats: PNG, JPEG, JPG, WEBP"
-        )
-    
-    try:
-        # Read file content
-        file_content = await file.read()
-        
-        if not file_content:
-            raise HTTPException(status_code=400, detail="File is empty")
-        
-        logger.info(f"Processing background removal for file: {file.filename} ({len(file_content)} bytes)")
-        
-        # Process removal (run CPU/GPU intensive work in thread pool)
-        processed_image = await asyncio.to_thread(remove_background, file_content)
-        
-        logger.info(f"Background removal successful. Returning {len(processed_image)} bytes")
-        
-        # Return as image/png
-        return Response(content=processed_image, media_type="image/png")
-        
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error removing background: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error removing background: {str(e)}"
-        )
 
 
 @router.post("/extract-object", response_model=ExtractObjectResponse)
@@ -101,20 +49,28 @@ async def extract_object_endpoint(request: ExtractObjectRequest):
         mask_data = base64.b64decode(request.mask)
         mask = Image.open(io.BytesIO(mask_data)).convert("L")  # Grayscale
         
-        # Resize mask if needed
+        # Resize mask if needed (use NEAREST for mask - faster and preserves binary nature)
         if mask.size != image.size:
-            mask = mask.resize(image.size, Image.Resampling.LANCZOS)
+            mask = mask.resize(image.size, Image.Resampling.NEAREST)
         
         logger.info(f"Extracting object: image={image.size}, mask={mask.size}")
         
-        # Apply mask as alpha channel
-        # White in mask = opaque, Black in mask = transparent
-        r, g, b, _ = image.split()
-        result = Image.merge("RGBA", (r, g, b, mask))
+        # Convert to numpy arrays for faster processing
+        image_array = np.array(image.convert("RGBA"), dtype=np.uint8)
+        mask_array = np.array(mask.convert("L"), dtype=np.uint8)
         
-        # Save to buffer
+        # Apply mask as alpha channel using numpy (much faster than PIL split/merge)
+        # White in mask = opaque, Black in mask = transparent
+        result_array = image_array.copy()
+        result_array[:, :, 3] = mask_array  # Set alpha channel to mask
+        
+        # Convert back to PIL Image
+        result = Image.fromarray(result_array, mode="RGBA")
+        
+        # Save to buffer with optimization
         buffer = io.BytesIO()
-        result.save(buffer, format="PNG")
+        # Use optimize=False for faster encoding (slight size trade-off)
+        result.save(buffer, format="PNG", optimize=False)
         buffer.seek(0)
         
         # Encode as base64

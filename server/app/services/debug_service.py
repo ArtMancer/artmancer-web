@@ -22,11 +22,13 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from uuid import uuid4
 
-import numpy as np
-from PIL import Image
+# numpy and PIL are imported lazily where needed to avoid requiring them in services that don't need them
+if TYPE_CHECKING:
+    import numpy as np
+    from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +86,7 @@ class DebugSession:
     
     def save_image(
         self,
-        image: Image.Image | np.ndarray | None,
+        image: Any | np.ndarray | None,  # type: ignore
         name: str,
         step: str,
         description: str = "",
@@ -105,6 +107,10 @@ class DebugSession:
             return None
         
         try:
+            # Lazy import PIL and numpy to avoid requiring them in services that don't need them
+            from PIL import Image
+            import numpy as np
+            
             # Convert numpy array to PIL Image if needed
             if isinstance(image, np.ndarray):
                 # Handle different array shapes
@@ -146,6 +152,15 @@ class DebugSession:
             return
         self.metadata["lora_info"].update(info)
         logger.debug(f"💾 Saved LoRA info: {info}")
+    
+    def save_research_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Save research metrics for worst case analysis."""
+        if not self.enabled:
+            return
+        if "research_metrics" not in self.metadata:
+            self.metadata["research_metrics"] = {}
+        self.metadata["research_metrics"].update(metrics)
+        logger.debug(f"💾 Saved research metrics: {len(metrics)} keys")
     
     def finalize(self, success: bool = True, error: Optional[str] = None) -> None:
         """

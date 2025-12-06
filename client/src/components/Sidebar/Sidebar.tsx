@@ -30,6 +30,7 @@ import {
   CheckCircle as CheckCircleIcon,
 } from "@mui/icons-material";
 import type { InputQualityPreset } from "@/services/api";
+import { apiService } from "@/services/api";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -84,11 +85,6 @@ interface SidebarProps {
   onInferenceStepsChange?: (value: number) => void;
   onCfgScaleChange?: (value: number) => void;
   // White balance props
-  onWhiteBalance?: (
-    method: "auto" | "manual" | "ai",
-    temperature?: number,
-    tint?: number
-  ) => void;
   whiteBalanceTemperature?: number;
   whiteBalanceTint?: number;
   onWhiteBalanceTemperatureChange?: (value: number) => void;
@@ -230,7 +226,6 @@ export default function Sidebar({
   onInferenceStepsChange,
   onCfgScaleChange,
   // White balance props with defaults
-  onWhiteBalance,
   whiteBalanceTemperature = 0,
   whiteBalanceTint = 0,
   onWhiteBalanceTemperatureChange,
@@ -357,13 +352,13 @@ export default function Sidebar({
     >
       {/* Customize Content - Scrollable content */}
       {isOpen && (
-          <div
-            className="flex-1 px-4 pt-2 pb-8 space-y-6 overflow-y-auto"
-            style={{
-              height: "100%", // Use full height instead of minHeight
-              paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
-            }}
-          >
+        <div
+          className="flex-1 px-4 pt-2 pb-8 space-y-6 overflow-y-auto"
+          style={{
+            height: "100%", // Use full height instead of minHeight
+            paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
+          }}
+        >
           {/* Image Upload Section */}
           {!isEditingDone && (
             <div className="pb-4 border-b border-[var(--border-color)]">
@@ -484,10 +479,9 @@ export default function Sidebar({
                 )}
                 {selectedQuality && (
                   <p className="text-xs text-[var(--text-secondary)] mt-2">
-                    {inputQuality === "resized" 
+                    {inputQuality === "resized"
                       ? `Ảnh sẽ được resize về ${customSquareSize}×${customSquareSize}`
-                      : `Đang chọn: ${selectedQuality.label} (${selectedQuality.ratio} kích thước gốc)`
-                    }
+                      : `Đang chọn: ${selectedQuality.label} (${selectedQuality.ratio} kích thước gốc)`}
                   </p>
                 )}
                 {isApplyingQuality && (
@@ -539,14 +533,7 @@ export default function Sidebar({
                   {lastRequestId && (
                     <button
                       onClick={() => {
-                        const apiUrl =
-                          process.env.NEXT_PUBLIC_API_URL ||
-                          process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL ||
-                          "https://nxan2911--artmancer-lightservice-serve.modal.run";
-                        window.open(
-                          `${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`,
-                          "_blank"
-                        );
+                        apiService.downloadVisualization(lastRequestId, "zip");
                       }}
                       className="px-3 py-2 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-[var(--border-color)]"
                       title="Download visualization (original + generated images)"
@@ -633,63 +620,42 @@ export default function Sidebar({
               <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                 {t("sidebar.whiteBalanceSettings")}
               </h3>
-              <div className="space-y-4">
-                {/* Method Selection */}
+              <div className="space-y-3">
                 <div>
                   <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.method")}
+                    {t("sidebar.temperature")}: {whiteBalanceTemperature}
                   </label>
-                  <select
-                    onChange={(e) => {
-                      const method = e.target.value as "auto" | "manual" | "ai";
-                      onWhiteBalance?.(method);
-                    }}
-                    className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
-                  >
-                    <option value="auto">
-                      {t("sidebar.autoWhiteBalance")}
-                    </option>
-                    <option value="manual">
-                      {t("sidebar.manualWhiteBalance")}
-                    </option>
-                    <option value="ai">{t("sidebar.aiWhiteBalance")}</option>
-                  </select>
+                  <input
+                    type="range"
+                    min="-100"
+                    max="100"
+                    value={whiteBalanceTemperature}
+                    onChange={(e) =>
+                      onWhiteBalanceTemperatureChange?.(
+                        parseInt(e.target.value)
+                      )
+                    }
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseMove={(e) => e.stopPropagation()}
+                    className="w-full accent-[var(--primary-accent)]"
+                  />
                 </div>
-
-                {/* Manual Controls */}
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.temperature")}: {whiteBalanceTemperature}
-                    </label>
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      value={whiteBalanceTemperature}
-                      onChange={(e) =>
-                        onWhiteBalanceTemperatureChange?.(
-                          parseInt(e.target.value)
-                        )
-                      }
-                      className="w-full accent-[var(--primary-accent)]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                      {t("sidebar.tint")}: {whiteBalanceTint}
-                    </label>
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      value={whiteBalanceTint}
-                      onChange={(e) =>
-                        onWhiteBalanceTintChange?.(parseInt(e.target.value))
-                      }
-                      className="w-full accent-[var(--primary-accent)]"
-                    />
-                  </div>
+                <div>
+                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
+                    {t("sidebar.tint")}: {whiteBalanceTint}
+                  </label>
+                  <input
+                    type="range"
+                    min="-100"
+                    max="100"
+                    value={whiteBalanceTint}
+                    onChange={(e) =>
+                      onWhiteBalanceTintChange?.(parseInt(e.target.value))
+                    }
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseMove={(e) => e.stopPropagation()}
+                    className="w-full accent-[var(--primary-accent)]"
+                  />
                 </div>
               </div>
             </div>
@@ -1681,6 +1647,8 @@ export default function Sidebar({
                               onChange={(e) =>
                                 onMaskBrushSizeChange(parseInt(e.target.value))
                               }
+                              onMouseDown={(e) => e.stopPropagation()}
+                              onMouseMove={(e) => e.stopPropagation()}
                               className="flex-1 accent-[var(--primary-accent)]"
                             />
                           </div>
@@ -1705,32 +1673,6 @@ export default function Sidebar({
                 </div>
               </div>
             )}
-
-          {/* White Balance Settings (only for white balance task) */}
-          {!isEditingDone && aiTask === "white-balance" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.whiteBalanceSettings")}
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.autoCorrectionStrength")}: 80%
-                  </label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    defaultValue="80"
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
-                </div>
-                <p className="text-xs text-[var(--text-secondary)]">
-                  {t("sidebar.aiAutoAdjust")}
-                </p>
-              </div>
-            </div>
-          )}
 
           {/* Advanced Settings */}
           {!isEditingDone && (
@@ -1761,7 +1703,9 @@ export default function Sidebar({
                     >
                       <span
                         className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                          isNegativePromptEnabled ? "translate-x-5" : "translate-x-0"
+                          isNegativePromptEnabled
+                            ? "translate-x-5"
+                            : "translate-x-0"
                         }`}
                       />
                     </button>
@@ -1815,12 +1759,10 @@ export default function Sidebar({
                     onChange={(e) =>
                       onGuidanceScaleChange?.(parseFloat(e.target.value))
                     }
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseMove={(e) => e.stopPropagation()}
                     className="w-full accent-[var(--primary-accent)]"
                   />
-                  <div className="flex justify-between items-center text-xs text-[var(--text-secondary)] mt-2 px-1">
-                    <span>{t("sidebar.moreCreative")}</span>
-                    <span>{t("sidebar.followPromptStrictly")}</span>
-                  </div>
                 </div>
 
                 {/* Steps (Updated from existing) */}
@@ -1859,6 +1801,8 @@ export default function Sidebar({
                     onChange={(e) =>
                       onInferenceStepsChange?.(parseInt(e.target.value))
                     }
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseMove={(e) => e.stopPropagation()}
                     className="w-full accent-[var(--primary-accent)]"
                   />
                   <div className="flex justify-between items-center text-xs text-[var(--text-secondary)] mt-2 px-1">
@@ -1869,51 +1813,52 @@ export default function Sidebar({
 
                 {/* True CFG Scale - only show when negative prompt has value */}
                 {negativePrompt.trim().length > 0 && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-[var(--text-secondary)] text-sm">
-                      {t("sidebar.cfgScale")}
-                    </label>
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-[var(--text-secondary)] text-sm">
+                        {t("sidebar.cfgScale")}
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="5"
+                        step="0.1"
+                        value={cfgScale.toFixed(1)}
+                        onChange={(e) => {
+                          const value = parseFloat(e.target.value);
+                          if (!isNaN(value)) {
+                            onCfgScaleChange?.(value);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          const value = parseFloat(e.target.value);
+                          if (isNaN(value) || value < 1) {
+                            onCfgScaleChange?.(1);
+                          } else if (value > 5) {
+                            onCfgScaleChange?.(5);
+                          }
+                        }}
+                        className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
+                      />
+                    </div>
                     <input
-                      type="number"
+                      type="range"
                       min="1"
                       max="5"
                       step="0.1"
-                      value={cfgScale.toFixed(1)}
-                      onChange={(e) => {
-                        const value = parseFloat(e.target.value);
-                        if (!isNaN(value)) {
-                          onCfgScaleChange?.(value);
-                        }
-                      }}
-                      onBlur={(e) => {
-                        const value = parseFloat(e.target.value);
-                        if (isNaN(value) || value < 1) {
-                          onCfgScaleChange?.(1);
-                        } else if (value > 5) {
-                          onCfgScaleChange?.(5);
-                        }
-                      }}
-                      className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
+                      value={cfgScale}
+                      onChange={(e) =>
+                        onCfgScaleChange?.(parseFloat(e.target.value))
+                      }
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onMouseMove={(e) => e.stopPropagation()}
+                      className="w-full accent-[var(--primary-accent)]"
                     />
+                    <p className="text-xs text-[var(--text-secondary)] mt-2">
+                      {t("sidebar.cfgGuidanceDescription")}
+                    </p>
                   </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="5"
-                    step="0.1"
-                    value={cfgScale}
-                    onChange={(e) =>
-                      onCfgScaleChange?.(parseFloat(e.target.value))
-                    }
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
-                  <p className="text-xs text-[var(--text-secondary)] mt-2">
-                    {t("sidebar.cfgGuidanceDescription")}
-                  </p>
-                </div>
                 )}
-
               </div>
             </div>
           )}
@@ -1984,7 +1929,7 @@ export default function Sidebar({
                       Memory Optimizations
                     </label>
                     <p className="text-xs text-[var(--text-secondary)]">
-                      Safetensors, low_cpu_mem_usage, TF32 matmul
+                      low_cpu_mem_usage, TF32 matmul
                     </p>
                   </div>
                   <label className="relative inline-flex items-center cursor-pointer">
@@ -1999,12 +1944,10 @@ export default function Sidebar({
                     <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
                   </label>
                 </div>
-
               </div>
             </div>
           )}
-
-          </div>
+        </div>
       )}
 
       {/* Resize Handle - Attached to sidebar for smooth movement */}

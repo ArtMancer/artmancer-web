@@ -43,7 +43,8 @@ export default function Home() {
     "white-balance" | "object-insert" | "object-removal" | "evaluation"
   >("white-balance");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  
+  const [referenceMaskR, setReferenceMaskR] = useState<string | null>(null);
+
   // Reference Image Editor state
   const [isRefEditorOpen, setIsRefEditorOpen] = useState(false);
   const [pendingRefImage, setPendingRefImage] = useState<string | null>(null);
@@ -100,7 +101,9 @@ export default function Home() {
     height: number;
   } | null>(null);
   // Store original upload data separately (not overwritten after generation)
-  const [originalUploadData, setOriginalUploadData] = useState<string | null>(null);
+  const [originalUploadData, setOriginalUploadData] = useState<string | null>(
+    null
+  );
   const [originalUploadDimensions, setOriginalUploadDimensions] = useState<{
     width: number;
     height: number;
@@ -253,14 +256,25 @@ export default function Home() {
 
   // Listen for server notifications from ServerContext
   useEffect(() => {
-    const handleServerNotification = (event: CustomEvent<{ type: 'success' | 'error' | 'info'; message: string }>) => {
+    const handleServerNotification = (
+      event: CustomEvent<{
+        type: "success" | "error" | "info";
+        message: string;
+      }>
+    ) => {
       const { type, message } = event.detail;
       setNotificationWithTimeout(type, message);
     };
 
-    window.addEventListener('server-notification', handleServerNotification as EventListener);
+    window.addEventListener(
+      "server-notification",
+      handleServerNotification as EventListener
+    );
     return () => {
-      window.removeEventListener('server-notification', handleServerNotification as EventListener);
+      window.removeEventListener(
+        "server-notification",
+        handleServerNotification as EventListener
+      );
     };
   }, [setNotificationWithTimeout]);
 
@@ -275,6 +289,13 @@ export default function Home() {
     setModifiedImage,
     setImageDimensions,
   } = useImageUpload();
+
+  // Generation progress state
+  const [generationProgress, setGenerationProgress] = useState<{
+    current: number;
+    total: number;
+    status?: string;
+  } | null>(null);
 
   // API integration
   const {
@@ -319,10 +340,11 @@ export default function Home() {
 
   const handleRefEditorSubmit = async (
     processedImage: string,
-    _maskData?: string | null
+    maskData?: string | null
   ) => {
-    void _maskData; // mask từ ref không còn dùng để apply lên mask chính
+    // Store both reference image and Mask R (for two-source mask workflow)
     setReferenceImage(processedImage);
+    setReferenceMaskR(maskData || null);
     setPendingRefImage(null);
     setIsRefEditorOpen(false);
   };
@@ -334,6 +356,7 @@ export default function Home() {
 
   const handleRemoveReferenceImage = () => {
     setReferenceImage(null);
+    setReferenceMaskR(null);
   };
 
   // Evaluation mode handlers
@@ -688,7 +711,8 @@ export default function Home() {
           num_inference_steps: inferenceSteps,
           guidance_scale: guidanceScale,
           // Only send true_cfg_scale if negative prompt is provided
-          true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
+          true_cfg_scale:
+            negativePrompt.trim().length > 0 ? cfgScale : undefined,
           negative_prompt: negativePrompt || undefined,
           input_quality: inputQuality,
         }
@@ -1108,7 +1132,8 @@ export default function Home() {
           num_inference_steps: inferenceSteps,
           guidance_scale: guidanceScale,
           // Only send true_cfg_scale if negative prompt is provided
-          true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
+          true_cfg_scale:
+            negativePrompt.trim().length > 0 ? cfgScale : undefined,
           negative_prompt: negativePrompt || undefined,
           input_quality: inputQuality,
         }
@@ -1150,15 +1175,16 @@ export default function Home() {
       // Switch back to inference mode if selecting other tasks (not evaluation)
       setAppMode("inference");
     }
-    // Clear reference image when switching away from object-insert
+    // Clear reference image and mask when switching away from object-insert
     if (task !== "object-insert") {
       console.log(
-        "🔍 [Frontend Debug] Clearing reference image (switched from object-insert)"
+        "🔍 [Frontend Debug] Clearing reference image and mask (switched from object-insert)"
       );
       setReferenceImage(null);
+      setReferenceMaskR(null);
     } else {
       console.log(
-        "🔍 [Frontend Debug] Keeping reference image (object-insert task)"
+        "🔍 [Frontend Debug] Keeping reference image and mask (object-insert task)"
       );
     }
   };
@@ -1298,14 +1324,17 @@ export default function Home() {
     ): Promise<boolean> => {
       // For "original" quality, always use the original upload data (never resized)
       // For "resized" quality, use current base image or source data
-      const useOriginalUpload = quality === "original" && originalUploadData && originalUploadDimensions;
-      const sourceData = useOriginalUpload 
-        ? originalUploadData 
-        : (options?.sourceData ?? baseImageData);
-      const sourceDimensions = useOriginalUpload 
-        ? originalUploadDimensions 
-        : (options?.sourceDimensions ?? baseImageDimensions);
-      
+      const useOriginalUpload =
+        quality === "original" &&
+        originalUploadData &&
+        originalUploadDimensions;
+      const sourceData = useOriginalUpload
+        ? originalUploadData
+        : options?.sourceData ?? baseImageData;
+      const sourceDimensions = useOriginalUpload
+        ? originalUploadDimensions
+        : options?.sourceDimensions ?? baseImageDimensions;
+
       if (!sourceData || !sourceDimensions) {
         return false;
       }
@@ -1645,10 +1674,14 @@ export default function Home() {
 
   // Handle image generation
   const handleEdit = async (prompt: string) => {
+    // Declare intervals outside try block so they can be cleared in catch
+    let pipelineInterval: NodeJS.Timeout | null = null;
+    let generationInterval: NodeJS.Timeout | null = null;
+
     try {
       clearAllNotifications();
       clearError();
-      
+
       // Clear debug info at the start of each generation to ensure fresh data
       setDebugInfo(null);
       setIsDebugPanelVisible(false);
@@ -1713,6 +1746,30 @@ export default function Home() {
         setOriginalImage(uploadedImage);
       }
 
+      // Initialize progress tracking
+      // Estimate: 30% for pipeline loading, 70% for generation steps
+      const pipelineProgress = Math.floor(inferenceSteps * 0.3);
+      setGenerationProgress({
+        current: 0,
+        total: inferenceSteps + pipelineProgress,
+        status: "loading_pipeline",
+      });
+
+      // Simulate pipeline loading progress (0-30%)
+      pipelineInterval = setInterval(() => {
+        setGenerationProgress((prev) => {
+          if (!prev) return null;
+          if (prev.current < pipelineProgress) {
+            return {
+              ...prev,
+              current: Math.min(prev.current + 1, pipelineProgress),
+              status: "loading_pipeline",
+            };
+          }
+          return prev;
+        });
+      }, 200); // Update every 200ms
+
       // Get settings from state
       // Note: width and height are not set - backend will use original image size automatically
       const settings = {
@@ -1735,11 +1792,18 @@ export default function Home() {
       const referenceImageForApi =
         aiTask === "object-insert" ? referenceImage : null;
 
+      // Include reference mask R if task is object-insert (for two-source mask workflow)
+      const referenceMaskRForApi =
+        aiTask === "object-insert" ? referenceMaskR : null;
+
       // Debug logging
       console.log("🔍 [Frontend Debug] Generation Request:", {
         aiTask,
         hasReferenceImage: !!referenceImage,
         referenceImageForApi: referenceImageForApi ? "provided" : "null",
+        hasReferenceMaskR: !!referenceMaskR,
+        referenceMaskRForApi: referenceMaskRForApi ? "provided" : "null",
+        usingTwoSourceMasks: !!(referenceImageForApi && referenceMaskRForApi),
         taskType: aiTask === "object-insert" ? "insertion" : "removal",
       });
 
@@ -1751,14 +1815,76 @@ export default function Home() {
           ? "object-insert"
           : "object-removal";
 
+      // For white-balance task, append temperature and tint to prompt
+      let finalPrompt = prompt;
+      if (aiTask === "white-balance") {
+        const temperatureText =
+          whiteBalanceTemperature !== 0
+            ? `temperature: ${whiteBalanceTemperature}`
+            : "";
+        const tintText =
+          whiteBalanceTint !== 0 ? `tint: ${whiteBalanceTint}` : "";
+
+        const wbParams = [temperatureText, tintText].filter(Boolean).join(", ");
+        if (wbParams) {
+          finalPrompt = prompt.trim()
+            ? `${prompt.trim()}, white balance: ${wbParams}`
+            : `white balance: ${wbParams}`;
+        }
+      }
+
+      // Start generation (pipeline should be loaded by now)
+      if (pipelineInterval) {
+        clearInterval(pipelineInterval);
+        pipelineInterval = null;
+      }
+      setGenerationProgress((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          current: pipelineProgress,
+          status: "processing",
+        };
+      });
+
+      // Simulate generation steps progress (30-100%)
+      generationInterval = setInterval(() => {
+        setGenerationProgress((prev) => {
+          if (!prev) return null;
+          const maxProgress = prev.total;
+          if (prev.current < maxProgress) {
+            // Gradually increase progress
+            const increment = Math.max(1, Math.floor(inferenceSteps / 20)); // Update every ~5% of steps
+            return {
+              ...prev,
+              current: Math.min(prev.current + increment, maxProgress),
+              status: "processing",
+            };
+          }
+          return prev;
+        });
+      }, 500); // Update every 500ms
+
       const result = await generateImage(
-        prompt,
+        finalPrompt,
         uploadedImage,
         maskImageData || "", // Empty string for white balance (mask not required)
         settings,
         referenceImageForApi,
+        referenceMaskRForApi,
         taskType
       );
+
+      // Clear intervals and progress when generation completes
+      if (pipelineInterval) {
+        clearInterval(pipelineInterval);
+        pipelineInterval = null;
+      }
+      if (generationInterval) {
+        clearInterval(generationInterval);
+        generationInterval = null;
+      }
+      setGenerationProgress(null);
 
       if (result && result.image) {
         const imageData = `data:image/png;base64,${result.image}`;
@@ -1803,6 +1929,7 @@ export default function Home() {
         const debugInfoWithPrompt = {
           ...(result.debug_info || {}),
           original_prompt: prompt,
+          debug_path: result.debug_path, // Include debug_path for download
         };
         setDebugInfo(debugInfoWithPrompt);
         // Auto-show debug panel when debug info is available
@@ -1825,6 +1952,16 @@ export default function Home() {
       }
     } catch (err) {
       console.error("Generation failed:", err);
+      // Clear any intervals and progress on error
+      if (pipelineInterval) {
+        clearInterval(pipelineInterval);
+        pipelineInterval = null;
+      }
+      if (generationInterval) {
+        clearInterval(generationInterval);
+        generationInterval = null;
+      }
+      setGenerationProgress(null);
       setNotificationWithTimeout(
         "error",
         "Failed to edit image. Please try again."
@@ -1998,6 +2135,7 @@ export default function Home() {
               <p className="text-[var(--text-primary)] font-medium">
                 {isGenerating ? "Generating image..." : "Evaluating images..."}
               </p>
+              {/* Evaluation Progress */}
               {isEvaluating && evaluationProgress && (
                 <div className="mt-4">
                   <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2">
@@ -2023,7 +2161,42 @@ export default function Home() {
                   </p>
                 </div>
               )}
-              {!evaluationProgress && (
+              {/* Generation Progress */}
+              {isGenerating && generationProgress && (
+                <div className="mt-4">
+                  <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2">
+                    <div
+                      className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${
+                          (generationProgress.current /
+                            generationProgress.total) *
+                          100
+                        }%`,
+                      }}
+                    ></div>
+                  </div>
+                  <p className="text-[var(--text-secondary)] text-sm">
+                    {generationProgress.status === "loading_pipeline"
+                      ? "Loading model..."
+                      : generationProgress.status === "processing"
+                      ? `Processing: ${generationProgress.current} / ${generationProgress.total} steps`
+                      : `Step ${generationProgress.current} / ${generationProgress.total}`}
+                    {generationProgress.total > 0 && (
+                      <span className="block text-xs mt-1 opacity-75">
+                        {Math.round(
+                          (generationProgress.current /
+                            generationProgress.total) *
+                            100
+                        )}
+                        %
+                      </span>
+                    )}
+                  </p>
+                </div>
+              )}
+              {/* Fallback message when no progress available */}
+              {!evaluationProgress && !generationProgress && (
                 <p className="text-[var(--text-secondary)] text-sm mt-1">
                   {isGenerating
                     ? "This may take a few seconds"
@@ -2146,7 +2319,6 @@ export default function Home() {
           onGuidanceScaleChange={handleGuidanceScaleChange}
           onInferenceStepsChange={handleInferenceStepsChange}
           onCfgScaleChange={handleCfgScaleChange}
-          onWhiteBalance={handleWhiteBalance}
           whiteBalanceTemperature={whiteBalanceTemperature}
           whiteBalanceTint={whiteBalanceTint}
           onWhiteBalanceTemperatureChange={handleWhiteBalanceTemperatureChange}

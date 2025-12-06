@@ -1,8 +1,18 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { ChevronDown, ChevronUp, Bug, X, ZoomIn, Image as ImageIcon, Info } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Bug,
+  X,
+  ZoomIn,
+  Image as ImageIcon,
+  Info,
+  Download,
+} from "lucide-react";
 import type { DebugInfo } from "@/services/api";
+import { apiService } from "@/services/api";
 
 interface DebugPanelProps {
   debugInfo: DebugInfo | null;
@@ -13,10 +23,62 @@ interface DebugPanelProps {
 
 type TabType = "images" | "info";
 
-export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: DebugPanelProps) {
+export default function DebugPanel({
+  debugInfo,
+  isVisible,
+  onOpen,
+}: DebugPanelProps) {
   const [isExpanded, setIsExpanded] = useState(true);
-  const [selectedImage, setSelectedImage] = useState<{ src: string; label: string } | null>(null);
+  const [selectedImage, setSelectedImage] = useState<{
+    src: string;
+    label: string;
+  } | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>("images");
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  // Extract session name from debug_path or use session_name
+  const getSessionName = (): string | null => {
+    if (debugInfo?.session_name) {
+      return debugInfo.session_name;
+    }
+    if (debugInfo?.debug_path) {
+      // Extract session name from path (e.g., "debug_output/20241206_123456_abc12345" -> "20241206_123456_abc12345")
+      const pathParts = debugInfo.debug_path.split("/");
+      return pathParts[pathParts.length - 1] || null;
+    }
+    return null;
+  };
+
+  const sessionName = getSessionName();
+
+  const handleDownload = async () => {
+    if (!sessionName) {
+      alert("Debug session name not available");
+      return;
+    }
+
+    setIsDownloading(true);
+    try {
+      const blob = await apiService.downloadDebugSession(sessionName);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${sessionName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Failed to download debug session:", error);
+      alert(
+        `Failed to download debug session: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   // Auto-show panel when debug info is available
   useEffect(() => {
@@ -44,7 +106,12 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
   // Default labels - should match backend order:
   // - Insertion: [ref_img, mask, masked_bg]
   // - Removal: [original, mask, mae]
-  const labels = debugInfo.conditional_labels || ["ref_img", "mask", "masked_bg", "mae"];
+  const labels = debugInfo.conditional_labels || [
+    "ref_img",
+    "mask",
+    "masked_bg",
+    "mae",
+  ];
 
   return (
     <>
@@ -56,16 +123,24 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
             <Bug size={12} />
             <span className="text-xs font-medium">Debug</span>
           </div>
-          <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="text-zinc-400 hover:text-zinc-200 transition-colors p-0.5"
-          >
-            {isExpanded ? (
-              <ChevronDown size={12} />
-            ) : (
-              <ChevronUp size={12} />
+          <div className="flex items-center gap-1.5">
+            {sessionName && (
+              <button
+                onClick={handleDownload}
+                disabled={isDownloading}
+                className="text-zinc-400 hover:text-amber-400 transition-colors p-0.5 disabled:opacity-50"
+                title="Download debug session"
+              >
+                <Download size={12} />
+              </button>
             )}
-          </button>
+            <button
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="text-zinc-400 hover:text-zinc-200 transition-colors p-0.5"
+            >
+              {isExpanded ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+            </button>
+          </div>
         </div>
 
         {/* Content */}
@@ -104,13 +179,15 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
                   {conditionalImages.length > 0 ? (
                     <div className="grid grid-cols-4 gap-1.5">
                       {conditionalImages.map((img, index) => (
-                        <div 
-                          key={index} 
+                        <div
+                          key={index}
                           className="relative group cursor-pointer"
-                          onClick={() => setSelectedImage({ 
-                            src: `data:image/png;base64,${img}`, 
-                            label: labels[index] || `Condition ${index + 1}` 
-                          })}
+                          onClick={() =>
+                            setSelectedImage({
+                              src: `data:image/png;base64,${img}`,
+                              label: labels[index] || `Condition ${index + 1}`,
+                            })
+                          }
                         >
                           <img
                             src={`data:image/png;base64,${img}`}
@@ -127,7 +204,9 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
                       ))}
                     </div>
                   ) : (
-                    <div className="text-xs text-zinc-500 text-center py-4">No conditional images</div>
+                    <div className="text-xs text-zinc-500 text-center py-4">
+                      No conditional images
+                    </div>
                   )}
                 </div>
               )}
@@ -137,19 +216,25 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
                   {/* Prompt Info */}
                   {debugInfo.original_prompt && (
                     <div className="space-y-1.5">
-                      <div className="text-[10px] text-zinc-400 font-medium">Prompt:</div>
+                      <div className="text-[10px] text-zinc-400 font-medium">
+                        Prompt:
+                      </div>
                       <div className="bg-zinc-800/50 rounded p-2 text-[10px]">
                         {debugInfo.prompt_was_refined ? (
                           <>
                             <div className="text-zinc-500 mb-1">
-                              <span className="text-zinc-400">Original:</span> {debugInfo.original_prompt}
+                              <span className="text-zinc-400">Original:</span>{" "}
+                              {debugInfo.original_prompt}
                             </div>
                             <div className="text-emerald-400/90">
-                              <span className="text-zinc-400">Refined ✨:</span> {debugInfo.refined_prompt}
+                              <span className="text-zinc-400">Refined ✨:</span>{" "}
+                              {debugInfo.refined_prompt}
                             </div>
                           </>
                         ) : (
-                          <div className="text-zinc-200">{debugInfo.original_prompt}</div>
+                          <div className="text-zinc-200">
+                            {debugInfo.original_prompt}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -158,25 +243,52 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
                   {/* Technical Info */}
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px]">
                     <div className="text-zinc-400">Input Size:</div>
-                    <div className="text-zinc-200 font-mono text-right">{debugInfo.input_image_size || "N/A"}</div>
-                    
+                    <div className="text-zinc-200 font-mono text-right">
+                      {debugInfo.input_image_size || "N/A"}
+                    </div>
+
                     <div className="text-zinc-400">Output Size:</div>
-                    <div className="text-zinc-200 font-mono text-right">{debugInfo.output_image_size || "N/A"}</div>
-                    
+                    <div className="text-zinc-200 font-mono text-right">
+                      {debugInfo.output_image_size || "N/A"}
+                    </div>
+
                     <div className="text-zinc-400">LoRA:</div>
-                    <div className="text-zinc-200 font-mono text-right text-[9px] truncate" title={debugInfo.lora_adapter || "None"}>
+                    <div
+                      className="text-zinc-200 font-mono text-right text-[9px] truncate"
+                      title={debugInfo.lora_adapter || "None"}
+                    >
                       {debugInfo.lora_adapter || "None"}
                     </div>
-                    
-                    {debugInfo.loaded_adapters && debugInfo.loaded_adapters.length > 0 && (
-                      <>
-                        <div className="text-zinc-400 col-span-2">Loaded:</div>
-                        <div className="text-zinc-200 font-mono text-[9px] col-span-2 text-right">
-                          {debugInfo.loaded_adapters.join(", ")}
-                        </div>
-                      </>
-                    )}
+
+                    {debugInfo.loaded_adapters &&
+                      debugInfo.loaded_adapters.length > 0 && (
+                        <>
+                          <div className="text-zinc-400 col-span-2">
+                            Loaded:
+                          </div>
+                          <div className="text-zinc-200 font-mono text-[9px] col-span-2 text-right">
+                            {debugInfo.loaded_adapters.join(", ")}
+                          </div>
+                        </>
+                      )}
                   </div>
+
+                  {/* Download Button */}
+                  {sessionName && (
+                    <div className="pt-2 border-t border-zinc-700/50">
+                      <button
+                        onClick={handleDownload}
+                        disabled={isDownloading}
+                        className="w-full px-3 py-2 bg-zinc-800/50 hover:bg-zinc-700/50 text-zinc-300 hover:text-amber-400 transition-colors rounded text-xs font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700/50"
+                        title="Download debug session"
+                      >
+                        <Download size={14} />
+                        {isDownloading
+                          ? "Downloading..."
+                          : "Download Debug Session"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -186,7 +298,7 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
 
       {/* Fullscreen Image Modal */}
       {selectedImage && (
-        <div 
+        <div
           className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-8"
           onClick={() => setSelectedImage(null)}
         >
@@ -212,4 +324,3 @@ export default function DebugPanel({ debugInfo, isVisible, onClose, onOpen }: De
     </>
   );
 }
-

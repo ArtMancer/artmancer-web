@@ -35,6 +35,7 @@ export function useImageGeneration() {
     maskImage: string,
     settings?: ModelSettings,
     referenceImage?: string | null,
+    referenceMaskR?: string | null,
     taskType?: "white-balance" | "object-insert" | "object-removal"
   ): Promise<GenerationResponse | null> => {
     // Prompt is optional for white balance
@@ -104,12 +105,22 @@ export function useImageGeneration() {
           : referenceImage;
       }
 
+      // Convert reference mask R to base64 if provided (for two-source mask workflow)
+      let base64ReferenceMaskR: string | undefined = undefined;
+      if (referenceMaskR) {
+        base64ReferenceMaskR = referenceMaskR.startsWith('data:')
+          ? referenceMaskR.split(',')[1]
+          : referenceMaskR;
+      }
+
       const request: GenerationRequest = {
         prompt: prompt.trim(),
         input_image: base64InputImage,
         conditional_images: conditional_images.length > 0 ? conditional_images : undefined,
         // Reference image for insertion task - use original image directly, no processing
         reference_image: base64ReferenceImage,
+        // Reference mask R for two-source mask workflow (Mask R - object shape)
+        reference_mask_R: base64ReferenceMaskR,
         // Legacy fields kept for backward compatibility but not used by backend
         mask_image: base64MaskImage,
         num_inference_steps: settings?.num_inference_steps,
@@ -136,6 +147,9 @@ export function useImageGeneration() {
         hasMask: !!request.mask_image,
         hasReferenceImage: !!request.reference_image,
         referenceImageLength: request.reference_image?.length || 0,
+        hasReferenceMaskR: !!request.reference_mask_R,
+        referenceMaskRLength: request.reference_mask_R?.length || 0,
+        usingTwoSourceMasks: !!(request.reference_image && request.reference_mask_R),
       });
 
       const response = await apiService.generateImage(request, abortController.signal);
@@ -169,15 +183,24 @@ export function useImageGeneration() {
             errorMessage =
               errorData.error ||
               'Unable to connect to API server. Please check your connection and API endpoint configuration.';
+        } else if (errorData.status === 503) {
+          // Service unavailable
+          errorMessage = errorData.error || 'Service temporarily unavailable. Please try again in a moment.';
         } else if (errorData.status === 500) {
           // Server error
-            errorMessage = errorData.error || 'Server error occurred. Please check the server logs and try again.';
+          errorMessage = errorData.error || 'Server error occurred. Please check the server logs and try again.';
         } else if (errorData.error) {
-          // API error with message
-          errorMessage = errorData.error;
-          } else if (errorData.detail) {
-            // FastAPI error format
+          // API error with message - ensure it's a string
+          errorMessage = typeof errorData.error === 'string' ? errorData.error : String(errorData.error);
+        } else if (errorData.detail) {
+          // FastAPI error format - handle both string and object
+          if (typeof errorData.detail === 'string') {
             errorMessage = errorData.detail;
+          } else if (typeof errorData.detail === 'object' && errorData.detail?.error) {
+            errorMessage = errorData.detail.error;
+          } else {
+            errorMessage = String(errorData.detail);
+          }
         }
 
         console.error('Generation error details:', errorData);
@@ -189,7 +212,9 @@ export function useImageGeneration() {
       }
 
       if (!isCancelled) {
-      setError(errorMessage);
+        // Ensure errorMessage is always a string
+        const finalErrorMessage = typeof errorMessage === 'string' ? errorMessage : String(errorMessage || 'Failed to generate image');
+        setError(finalErrorMessage);
       }
       return null;
     } finally {
@@ -237,15 +262,28 @@ export function useImageGeneration() {
     setError(null);
   }, []);
 
-  const cancelGeneration = useCallback(() => {
+  const cancelGeneration = useCallback(async () => {
+    // Cancel HTTP request
     if (abortControllerRef.current) {
       console.log('🚫 Cancelling image generation...');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      setIsGenerating(false);
-      setError(null);
     }
-  }, []);
+    
+    // Cancel backend task if we have request_id
+    if (lastGeneration?.request_id) {
+      try {
+        await apiService.cancelGenerationTask(lastGeneration.request_id);
+        console.log(`✅ Generation task ${lastGeneration.request_id} cancelled`);
+      } catch (error) {
+        console.warn(`⚠️ Failed to cancel generation task: ${error}`);
+        // Continue anyway - HTTP request is already aborted
+      }
+    }
+    
+    setIsGenerating(false);
+    setError(null);
+  }, [lastGeneration]);
 
   return {
     generateImage,

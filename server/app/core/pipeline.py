@@ -6,9 +6,10 @@ import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict
 
-import torch
+# torch is imported lazily where needed to avoid requiring it in services that don't need it (e.g., JobManagerService, ImageUtilsService)
 
 if TYPE_CHECKING:
+    import torch
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
@@ -29,10 +30,12 @@ def is_pipeline_loaded(task_type: str | None = None) -> bool:
 
 
 def _xpu_available() -> bool:
+    import torch  # Lazy import
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
-def _resolve_device(name: str) -> torch.device | None:
+def _resolve_device(name: str) -> Any:  # torch.device | None, but using Any to avoid torch import
+    import torch  # Lazy import
     normalized = name.strip().lower()
     if normalized in {"cuda", "gpu", "nvidia"} and torch.cuda.is_available():
         return torch.device("cuda")
@@ -45,7 +48,8 @@ def _resolve_device(name: str) -> torch.device | None:
     return None
 
 
-def get_device() -> torch.device:
+def get_device() -> Any:  # torch.device, but using Any to avoid torch import
+    import torch  # Lazy import
     forced = os.getenv("ARTMANCER_DEVICE", "").strip().lower()
     if forced:
         device = _resolve_device(forced)
@@ -63,6 +67,7 @@ def get_device() -> torch.device:
 
 @lru_cache(maxsize=1)
 def get_device_info() -> Dict[str, Any]:
+    import torch  # Lazy import
     device = get_device()
     info: Dict[str, Any] = {
         "device": str(device),

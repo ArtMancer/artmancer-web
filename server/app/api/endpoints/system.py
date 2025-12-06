@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...models import HealthResponse
+from ...services.container_state import get_container_state
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -14,11 +15,17 @@ def _get_device_info_safe():
         return get_device_info()
     except ImportError:
         # Light service doesn't have full pipeline dependencies
-        import torch
-        return {
-            "device": "cuda" if torch.cuda.is_available() else "cpu",
-            "cuda_available": torch.cuda.is_available(),
-        }
+        try:
+            import torch
+            return {
+                "device": "cuda" if torch.cuda.is_available() else "cpu",
+                "cuda_available": torch.cuda.is_available(),
+            }
+        except ImportError:
+            return {
+                "device": "cpu",
+                "cuda_available": False,
+            }
 
 
 def _is_pipeline_loaded_safe():
@@ -33,9 +40,20 @@ def _is_pipeline_loaded_safe():
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with container state."""
     device_info = _get_device_info_safe()
     pipeline_loaded = _is_pipeline_loaded_safe()
+    
+    # Get container state
+    container_state = get_container_state()
+    state_info = container_state.get_state_info()
+    
+    # Add state to device_info
+    device_info["state"] = state_info["state"]
+    if "model_load_time_ms" in state_info:
+        device_info["model_load_time_ms"] = state_info["model_load_time_ms"]
+    if "last_activity_seconds_ago" in state_info:
+        device_info["last_activity_seconds_ago"] = state_info["last_activity_seconds_ago"]
     
     return HealthResponse(
         status="healthy",

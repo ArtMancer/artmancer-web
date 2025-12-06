@@ -321,8 +321,10 @@ export default function ReferenceImageEditor({
     setLoadingMessage(hasPendingBrush ? "Detecting object from brush..." : "Auto-detecting object...");
     
     try {
-      const LIGHT_URL = process.env.NEXT_PUBLIC_API_URL || 
-        "https://nxan2911--artmancer-lightservice-serve.modal.run";
+      // Use API Gateway instead of direct service call
+      const API_GATEWAY_URL = process.env.NEXT_PUBLIC_API_GATEWAY_URL || 
+        process.env.NEXT_PUBLIC_API_URL ||
+        "https://nxan2911--api-gateway.modal.run";
       
       // Get ONLY pending brush data as guidance (not the confirmed mask)
       // This allows detecting new objects without interference from previously detected ones
@@ -361,8 +363,8 @@ export default function ReferenceImageEditor({
         }
       }
       
-      // Call FastSAM API
-      const response = await fetch(`${LIGHT_URL}/api/smart-mask/detect`, {
+      // Call FastSAM API through API Gateway
+      const response = await fetch(`${API_GATEWAY_URL}/api/smart-mask/detect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -465,8 +467,10 @@ export default function ReferenceImageEditor({
     setLoadingMessage("Extracting object...");
     
     try {
-      const LIGHT_URL = process.env.NEXT_PUBLIC_API_URL || 
-        "https://nxan2911--artmancer-lightservice-serve.modal.run";
+      // Use API Gateway instead of direct service call
+      const API_GATEWAY_URL = process.env.NEXT_PUBLIC_API_GATEWAY_URL || 
+        process.env.NEXT_PUBLIC_API_URL ||
+        "https://nxan2911--api-gateway.modal.run";
       const currentMaskDataUrl = getCurrentMaskDataUrl();
       
       // Get mask data
@@ -511,8 +515,8 @@ export default function ReferenceImageEditor({
       
       const maskData = tempCanvas.toDataURL("image/png").split(",")[1];
       
-      // Call extract API
-      const response = await fetch(`${LIGHT_URL}/api/image-utils/extract-object`, {
+      // Call extract API through API Gateway
+      const response = await fetch(`${API_GATEWAY_URL}/api/image-utils/extract-object`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -586,6 +590,8 @@ export default function ReferenceImageEditor({
             <Paintbrush size={16} className="text-zinc-400" />
             <input
               type="range"
+              onMouseDown={(e) => e.stopPropagation()}
+              onMouseMove={(e) => e.stopPropagation()}
               min="5"
               max="100"
               value={brushSize}

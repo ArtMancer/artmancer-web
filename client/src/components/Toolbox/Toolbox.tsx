@@ -63,6 +63,8 @@ export default function Toolbox({
                 onChange={(e) =>
                   onComparisonSliderChange(Number(e.target.value))
                 }
+                onMouseDown={(e) => e.stopPropagation()}
+                onMouseMove={(e) => e.stopPropagation()}
                 className="w-24 h-2 bg-[var(--primary-bg)] rounded-lg appearance-none cursor-pointer accent-[var(--primary-accent)]"
               />
               <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">

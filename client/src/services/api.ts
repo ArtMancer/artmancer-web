@@ -1,18 +1,17 @@
 // API service for ArtMancer backend integration
-// Light (general API) URL is configured via NEXT_PUBLIC_API_URL
-// Heavy (generation) URL is configured via NEXT_PUBLIC_RUNPOD_GENERATE_URL
-// Defaults point to Modal web endpoints if env vars are not provided
+// API Gateway is the single entry point for all requests
+// All requests go through API Gateway, which routes to appropriate services
 const sanitizeUrl = (url?: string | null) => url?.trim().replace(/\/+$/, '');
-const DEFAULT_LIGHT_ENDPOINT = 'https://nxan2911--artmancer-lightservice-serve.modal.run';
-const DEFAULT_HEAVY_ENDPOINT = 'https://nxan2911--artmancer-heavyservice-serve.modal.run';
+const DEFAULT_API_GATEWAY_ENDPOINT = 'https://nxan2911--api-gateway.modal.run';
 
 // @ts-ignore - process.env is available in Next.js runtime
-const RAW_LIGHT_API_URL = sanitizeUrl(process.env.NEXT_PUBLIC_API_URL);
-// @ts-ignore - process.env is available in Next.js runtime
-const RAW_HEAVY_API_URL = sanitizeUrl(process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL);
+const RAW_API_GATEWAY_URL = sanitizeUrl(
+  process.env.NEXT_PUBLIC_API_GATEWAY_URL ||
+  process.env.NEXT_PUBLIC_API_URL
+);
 
-const API_BASE_URL = RAW_LIGHT_API_URL ?? DEFAULT_LIGHT_ENDPOINT;
-const GENERATE_BASE_URL = RAW_HEAVY_API_URL ?? DEFAULT_HEAVY_ENDPOINT;
+// API Gateway is the main entry point
+const API_BASE_URL = RAW_API_GATEWAY_URL ?? DEFAULT_API_GATEWAY_ENDPOINT;
 
 const isRemoteEndpoint = (url: string) =>
   url.includes('modal.run') || url.includes('api.runpod.ai');
@@ -45,6 +44,7 @@ export interface GenerationRequest {
   // Legacy fields for backward compatibility (will be converted to conditional_images)
   mask_image?: string; // Base64 encoded mask image (will be converted to conditional_images[0])
   reference_image?: string; // Base64 encoded reference image (not used in new Qwen flow)
+  reference_mask_R?: string; // Base64 encoded mask isolating object in reference image (Mask R - for two-source mask workflow)
   width?: number;
   height?: number;
   num_inference_steps?: number;
@@ -72,6 +72,8 @@ export interface DebugInfo {
   original_prompt?: string;
   refined_prompt?: string;
   prompt_was_refined?: boolean;
+  session_name?: string; // Debug session name for downloading
+  debug_path?: string; // Debug session path
 }
 
 export interface GenerationResponse {
@@ -82,6 +84,7 @@ export interface GenerationResponse {
   parameters_used: Record<string, string | number | null>;
   request_id?: string; // Request ID for accessing visualization images
   debug_info?: DebugInfo; // Debug information (conditional images, parameters)
+  debug_path?: string; // Debug session path for downloading
 }
 
 export interface ApiError {
@@ -157,64 +160,10 @@ export interface EvaluationResponse {
 }
 
 class ApiService {
-  private baseUrl: string;
-  private generationUrl: string;
+  private baseUrl: string; // API Gateway (single entry point)
 
-  constructor(baseUrl: string = API_BASE_URL, generationUrl: string = GENERATE_BASE_URL) {
-    this.baseUrl = baseUrl;
-    this.generationUrl = generationUrl || baseUrl;
-  }
-
-  /**
-   * Health check with retry logic for RunPod/Modal cold start handling.
-   * Workers need time to initialize, so we retry the /ping endpoint.
-   * Returns true if healthy, false if not (but doesn't block generation).
-   */
-  private async healthCheckWithRetry(
-    targetBaseUrl: string,
-    maxRetries: number = 3,
-    delay: number = 5000
-  ): Promise<boolean> {
-    if (!isRemoteEndpoint(targetBaseUrl)) {
-      // Skip health check for local endpoints
-      return true;
-    }
-
-    const pingUrl = `${targetBaseUrl}/ping`;
-    console.log(`🏥 Starting health check for remote endpoint ${targetBaseUrl} ...`);
-
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        const response = await fetch(pingUrl, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          signal: AbortSignal.timeout(30000), // 30 second timeout per check (increased for cold start)
-        });
-
-        if (response.status === 200) {
-          console.log('✓ Health check passed - worker is ready');
-          return true;
-        } else if (response.status === 204) {
-          // Worker is initializing, retry
-          console.log(`⏳ Worker initializing (attempt ${attempt + 1}/${maxRetries})...`);
-        } else {
-          console.warn(`⚠️ Health check returned status ${response.status}`);
-          // Don't fail immediately, worker might still be starting
-        }
-      } catch (error) {
-        console.log(`⚠️ Health check attempt ${attempt + 1} failed:`, error);
-      }
-
-      if (attempt < maxRetries - 1) {
-        console.log(`🔄 Retrying health check in ${delay / 1000} seconds...`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    }
-
-    console.warn('⚠️ Health check failed after retries - will still attempt generation');
-    return true; // Return true to allow generation to proceed anyway
+  constructor(baseUrl: string = API_BASE_URL) {
+    this.baseUrl = baseUrl; // API Gateway
   }
 
   private async makeRequest<T>(
@@ -424,24 +373,13 @@ class ApiService {
 
   // Generate image
   async generateImage(request: GenerationRequest, signal?: AbortSignal): Promise<GenerationResponse> {
-    // Use dedicated generation endpoint (heavy Modal app)
-    const generationBaseUrl = this.generationUrl || this.baseUrl;
-    const url = `${generationBaseUrl}/api/generate`;
-    const isRemoteGenerationEndpoint = isRemoteEndpoint(generationBaseUrl);
-
-    // Health check for remote endpoints (handle cold start)
-    // This is a soft check - we'll still try to generate even if health check fails
-    if (isRemoteGenerationEndpoint) {
-      await this.healthCheckWithRetry(generationBaseUrl, 3, 5000);
-      // Continue with generation regardless of health check result
-      // The actual request will timeout or succeed on its own
-    }
+    // Use API Gateway endpoint
+    const url = `${this.baseUrl}/api/generate`;
 
     console.log('🌐 API Request:', {
       method: 'POST',
       url,
-      endpoint: isRemoteGenerationEndpoint ? 'Remote' : 'Local',
-      generationBaseUrl,
+      endpoint: 'API Gateway',
       hasBody: true,
       hasSignal: !!signal,
     });
@@ -481,24 +419,45 @@ class ApiService {
       }
 
       if (!response.ok) {
-        let errorMessage = responseData?.detail || responseData?.error || responseData?.message;
-        if (!errorMessage || (typeof responseData === 'object' && Object.keys(responseData).length === 0)) {
+        // Extract error message - handle both string and object formats
+        let errorMessage: string;
+        if (typeof responseData?.detail === 'string') {
+          errorMessage = responseData.detail;
+        } else if (typeof responseData?.detail === 'object' && responseData?.detail?.error) {
+          errorMessage = responseData.detail.error;
+        } else if (typeof responseData?.error === 'string') {
+          errorMessage = responseData.error;
+        } else if (typeof responseData?.error === 'object' && responseData?.error?.error) {
+          errorMessage = responseData.error.error;
+        } else if (typeof responseData?.message === 'string') {
+          errorMessage = responseData.message;
+        } else {
           errorMessage = `HTTP ${response.status}: ${response.statusText || 'Unknown error'}`;
         }
-        let errorType = responseData?.error_type || 'unknown_error';
 
-        // Handle remote timeout errors
-        if (isRemoteGenerationEndpoint) {
-          if (response.status === 400) {
-            errorMessage = 'No worker available. The endpoint may be initializing. Please try again.';
-            errorType = 'no_worker_available';
-          } else if (response.status === 524) {
-            errorMessage = 'Request processing timeout (exceeded 5.5 minutes). The image may be too complex or the server is overloaded.';
-            errorType = 'processing_timeout';
-          } else if (response.status === 502) {
-            errorMessage = 'Worker misconfigured or unavailable. Please check the endpoint configuration.';
-            errorType = 'worker_misconfigured';
+        // Ensure errorMessage is always a string
+        if (typeof errorMessage !== 'string') {
+          errorMessage = String(errorMessage || `HTTP ${response.status}: ${response.statusText || 'Unknown error'}`);
+        }
+
+        let errorType = responseData?.error_type || responseData?.detail?.error_type || 'unknown_error';
+
+        // Handle specific error status codes
+        if (response.status === 400) {
+          errorMessage = 'No worker available. The endpoint may be initializing. Please try again.';
+          errorType = 'no_worker_available';
+        } else if (response.status === 503) {
+          // Service unavailable - generation service may be cold starting
+          if (!errorMessage || errorMessage.includes('HTTP 503')) {
+            errorMessage = 'Service temporarily unavailable. The generation service may be starting up. Please try again in a moment.';
           }
+          errorType = 'service_unavailable';
+        } else if (response.status === 524) {
+          errorMessage = 'Request processing timeout (exceeded 5.5 minutes). The image may be too complex or the server is overloaded.';
+          errorType = 'processing_timeout';
+        } else if (response.status === 502) {
+          errorMessage = 'Worker misconfigured or unavailable. Please check the endpoint configuration.';
+          errorType = 'worker_misconfigured';
         }
 
         const errorDetails = {
@@ -540,15 +499,14 @@ class ApiService {
       console.error('❌ Raw Error Object:', error);
 
       if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-        const endpointType = isRemoteGenerationEndpoint ? 'Remote' : 'Local';
         const networkError = {
           status: 0,
-          error: `Network error: Unable to connect to ${endpointType} endpoint at ${generationBaseUrl}. Please check:
-1. Is the endpoint accessible?
+          error: `Network error: Unable to connect to API Gateway at ${this.baseUrl}. Please check:
+1. Is the API Gateway accessible?
 2. Are there any CORS issues?
-3. Is the endpoint URL correct?`,
+3. Is the API Gateway URL correct?`,
           endpoint: '/api/generate',
-          baseUrl: generationBaseUrl,
+          baseUrl: this.baseUrl,
           fullUrl: url,
         };
         console.error('🌐 Network Error Details:', networkError);
@@ -657,7 +615,10 @@ class ApiService {
         formData.append('tint', options.tint.toString());
       }
 
-      const response = await fetch(`${this.baseUrl}/api/white-balance`, {
+      // White-balance endpoint (if exists, otherwise use baseUrl)
+      // Note: white-balance may not be available in image-utils service
+      const whiteBalanceUrl = `${this.baseUrl}/api/image-utils/white-balance`;
+      const response = await fetch(whiteBalanceUrl, {
         method: 'POST',
         body: formData,
       });
@@ -683,6 +644,7 @@ class ApiService {
     dilateAmount: number = 10,
     useBlur: boolean = false
   ): Promise<{ success: boolean; mask_base64: string; image_id?: string; error?: string }> {
+    // Smart-mask through API Gateway
     const url = `${this.baseUrl}/api/smart-mask`;
 
     try {
@@ -707,6 +669,42 @@ class ApiService {
           errorData.detail ||
           errorData.error ||
           `Smart mask API error: HTTP ${response.status} ${response.statusText}`;
+
+        // If 404 and error mentions image_id expired/not found, and we have image but used imageId
+        // This indicates the image cache expired, we should retry with image instead
+        if (response.status === 404 &&
+          imageId &&
+          image &&
+          (errorMessage.includes('Image ID not found') || errorMessage.includes('expired'))) {
+          console.log('🔄 Image ID expired, retrying with image data...');
+          // Retry with image instead of image_id
+          const retryResponse = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              image: image,
+              image_id: null, // Clear image_id
+              bbox: bbox,
+              points: points,
+              dilate_amount: dilateAmount,
+              use_blur: useBlur,
+            }),
+          });
+
+          if (!retryResponse.ok) {
+            const retryErrorData = await retryResponse.json().catch(() => ({}));
+            const retryErrorMessage =
+              retryErrorData.detail ||
+              retryErrorData.error ||
+              `Smart mask API error: HTTP ${retryResponse.status} ${retryResponse.statusText}`;
+            throw new Error(retryErrorMessage);
+          }
+
+          return await retryResponse.json();
+        }
+
         throw new Error(errorMessage);
       }
 
@@ -716,9 +714,9 @@ class ApiService {
 
       if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
         throw new Error(
-          `Network error: Unable to connect to smart mask endpoint at ${url}. ` +
-          'Please check:\n1. Is the API server running?\n' +
-          '2. Is the endpoint URL correct?\n3. Are there any CORS/network issues?'
+          `Network error: Unable to connect to API Gateway at ${this.baseUrl}. ` +
+          'Please check:\n1. Is the API Gateway running?\n' +
+          '2. Is the API Gateway URL correct?\n3. Are there any CORS/network issues?'
         );
       }
 
@@ -726,7 +724,58 @@ class ApiService {
     }
   }
 
+  // Download debug session as ZIP
+  async downloadDebugSession(sessionName: string): Promise<Blob> {
+    const url = `${this.baseUrl}/api/debug/sessions/${sessionName}/download`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to download debug session: HTTP ${response.status}`);
+      }
+
+      return await response.blob();
+    } catch (error) {
+      console.error('Error downloading debug session:', error);
+      throw error;
+    }
+  }
+
   // Download visualization images
+  // Cancel generation task
+  async cancelGenerationTask(taskId: string): Promise<{ success: boolean; message: string; task_id: string }> {
+    return this.makeRequest<{ success: boolean; message: string; task_id: string }>(
+      `/api/generate/cancel/${taskId}`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  // Cancel async generation task
+  async cancelAsyncGenerationTask(taskId: string): Promise<{ success: boolean; message: string; task_id: string }> {
+    return this.makeRequest<{ success: boolean; message: string; task_id: string }>(
+      `/api/generate/async/cancel/${taskId}`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  // Cancel smart mask segmentation
+  async cancelSmartMask(requestId: string): Promise<{ success: boolean; message: string; request_id: string }> {
+    return this.makeRequest<{ success: boolean; message: string; request_id: string }>(
+      `/api/smart-mask/cancel/${requestId}`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
   async downloadVisualization(requestId: string, format: string = "zip"): Promise<void> {
     const url = `${this.baseUrl}/api/visualization/${requestId}/download?format=${format}`;
     window.open(url, '_blank');
