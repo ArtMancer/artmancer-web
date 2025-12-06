@@ -183,9 +183,9 @@ def generate_mae_image(
     mask_gray = mask.convert("L")
     mask_array = np.array(mask_gray, dtype=np.uint8)
     
-    # Invert mask for OpenCV inpainting (OpenCV expects mask where region to inpaint is non-zero)
-    # Our mask is white where object is, so we need to invert it
-    mask_inverted = 255 - mask_array
+    # OpenCV inpainting expects mask where region to inpaint is non-zero (white)
+    # Our mask is already white where object/edit area is, so use it directly (no inversion needed)
+    mask_for_inpaint = mask_array
     
     # MAE requires OpenCV; raise clear error if missing
     if not CV2_AVAILABLE:
@@ -201,7 +201,7 @@ def generate_mae_image(
     try:
         mae_array = cv2.inpaint(
             original_array,
-            mask_inverted,
+            mask_for_inpaint,
             inpaintRadius=3,
             flags=cv2.INPAINT_TELEA,
         )
@@ -215,12 +215,60 @@ def generate_mae_image(
         ) from exc
 
 
+def generate_canny_image(
+    image: Image.Image,
+    low_threshold: int = 100,
+    high_threshold: int = 200,
+) -> Image.Image:
+    """
+    Generate Canny edge detection image.
+    
+    Uses OpenCV Canny algorithm to extract edges from input image.
+    
+    Args:
+        image: Input RGB image
+        low_threshold: Lower threshold for edge detection (default: 100)
+        high_threshold: Upper threshold for edge detection (default: 200)
+    
+    Returns:
+        Canny edge image: RGB image with white edges on black background
+    """
+    if not CV2_AVAILABLE:
+        raise RuntimeError(
+            "OpenCV library (cv2) is not installed in the runtime environment. "
+            "Cannot generate Canny edge image. "
+            "Please install 'opencv-python-headless' (recommended) or 'opencv-python' package."
+        )
+    
+    try:
+        # Convert to numpy array
+        image_array = np.array(image, dtype=np.uint8)
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+        
+        # Apply Canny edge detection
+        edges = cv2.Canny(gray, low_threshold, high_threshold)
+        
+        # Convert to RGB (white edges on black background)
+        canny_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+        canny_image = Image.fromarray(canny_rgb, mode="RGB")
+        
+        logger.info("✅ Generated Canny edge image")
+        return canny_image
+    except Exception as exc:
+        logger.error("❌ Canny edge detection failed: %s", exc)
+        raise RuntimeError(
+            f"Canny edge detection failed: {exc}"
+        ) from exc
+
+
 def prepare_mask_conditionals(
     original: Image.Image,
     mask: Image.Image,
     include_mae: bool = True,
 ) -> Tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
-    """Create conditional images for the model: mask, background, object, mae.
+    """Create conditional images for the model: mask, masked_bg, masked_object, mae.
     
     Args:
         original: Original RGB image
@@ -229,9 +277,13 @@ def prepare_mask_conditionals(
     
     Returns:
         - mask_rgb: RGB mask image
-        - background_rgb: Background image (black where mask is, original elsewhere)
-        - object_rgb: Object image (original where mask is, black elsewhere)
-        - mae_image: MAE image (inpainted preview) if include_mae=True, otherwise same as background
+        - masked_bg: Background with mask area removed (original - mask region = black)
+        - masked_object: Object extracted from mask area (NOT used for insertion - use ref_img instead)
+        - mae_image: MAE inpainted preview if include_mae=True, otherwise same as masked_bg
+    
+    Note:
+        For insertion task, do NOT use masked_object. Use ref_img (reference image) from frontend instead.
+        masked_object is only kept for backward compatibility with removal task debugging.
     """
 
     # Resize mask to match original image size if needed
@@ -249,13 +301,15 @@ def prepare_mask_conditionals(
 
     mask_stack = np.repeat(mask_array[..., None], 3, axis=2)
 
-    # Create object image: keep original where mask is, black (0,0,0) elsewhere
-    object_rgb = original_array * mask_stack
-    object_img = Image.fromarray(np.uint8(object_rgb * 255), mode="RGB")
+    # Create masked_object: keep original where mask is, black (0,0,0) elsewhere
+    # NOTE: This is NOT used for insertion - use ref_img from frontend instead
+    masked_object_array = original_array * mask_stack
+    masked_object = Image.fromarray(np.uint8(masked_object_array * 255), mode="RGB")
 
-    # Create background image: keep original where mask is NOT, black (0,0,0) where mask is
-    background_rgb = original_array * (1.0 - mask_stack)
-    background_img = Image.fromarray(np.uint8(background_rgb * 255), mode="RGB")
+    # Create masked_bg: keep original where mask is NOT, black (0,0,0) where mask is
+    # This is the background with the mask area removed
+    masked_bg_array = original_array * (1.0 - mask_stack)
+    masked_bg = Image.fromarray(np.uint8(masked_bg_array * 255), mode="RGB")
 
     # Mask RGB (for model input, keep as RGB)
     mask_rgb = mask.convert("RGB")
@@ -263,11 +317,11 @@ def prepare_mask_conditionals(
     # Generate MAE image if requested
     if include_mae:
         mae_image = generate_mae_image(original, mask)
-        logger.info("🧩 Generated conditional images (mask/background/object/mae)")
+        logger.info("🧩 Generated conditional images (mask/masked_bg/masked_object/mae)")
     else:
-        # Fallback: use background image as MAE (backward compatibility)
-        mae_image = background_img
-        logger.info("🧩 Generated conditional images (mask/background/object) - MAE disabled")
+        # Fallback: use masked_bg as MAE (backward compatibility)
+        mae_image = masked_bg
+        logger.info("🧩 Generated conditional images (mask/masked_bg/masked_object) - MAE disabled")
 
-    return mask_rgb, background_img, object_img, mae_image
+    return mask_rgb, masked_bg, masked_object, mae_image
 

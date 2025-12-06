@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 
 
 @router.get("/sessions")
-def list_debug_sessions() -> Dict[str, Any]:
+async def list_debug_sessions() -> Dict[str, Any]:
     """List all debug sessions."""
     if not debug_service.enabled:
         return {"enabled": False, "sessions": []}
@@ -64,7 +65,7 @@ def list_debug_sessions() -> Dict[str, Any]:
 
 
 @router.get("/sessions/{session_name}")
-def get_debug_session(session_name: str) -> Dict[str, Any]:
+async def get_debug_session(session_name: str) -> Dict[str, Any]:
     """Get details of a specific debug session."""
     if not debug_service.enabled:
         raise HTTPException(status_code=404, detail="Debug service is not enabled")
@@ -107,7 +108,7 @@ def get_debug_session(session_name: str) -> Dict[str, Any]:
 
 
 @router.get("/sessions/{session_name}/images/{image_name}")
-def get_debug_image(session_name: str, image_name: str):
+async def get_debug_image(session_name: str, image_name: str):
     """Get a specific debug image."""
     if not debug_service.enabled:
         raise HTTPException(status_code=404, detail="Debug service is not enabled")
@@ -127,7 +128,7 @@ def get_debug_image(session_name: str, image_name: str):
 
 
 @router.post("/cleanup")
-def cleanup_debug_sessions(keep_last_n: int = 50) -> Dict[str, Any]:
+async def cleanup_debug_sessions(keep_last_n: int = 50) -> Dict[str, Any]:
     """Clean up old debug sessions, keeping only the most recent N."""
     if not debug_service.enabled:
         return {"enabled": False, "deleted": 0}
@@ -145,7 +146,7 @@ def cleanup_debug_sessions(keep_last_n: int = 50) -> Dict[str, Any]:
 
 
 @router.get("/status")
-def get_debug_status() -> Dict[str, Any]:
+async def get_debug_status() -> Dict[str, Any]:
     """Get debug service status."""
     status = {
         "enabled": debug_service.enabled,

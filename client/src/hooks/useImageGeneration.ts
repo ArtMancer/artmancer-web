@@ -95,10 +95,21 @@ export function useImageGeneration() {
         }
       }
 
+      // Convert reference image to base64 if provided (for insertion task)
+      // IMPORTANT: Use reference image directly without any processing
+      let base64ReferenceImage: string | undefined = undefined;
+      if (referenceImage) {
+        base64ReferenceImage = referenceImage.startsWith('data:')
+          ? referenceImage.split(',')[1]
+          : referenceImage;
+      }
+
       const request: GenerationRequest = {
         prompt: prompt.trim(),
         input_image: base64InputImage,
         conditional_images: conditional_images.length > 0 ? conditional_images : undefined,
+        // Reference image for insertion task - use original image directly, no processing
+        reference_image: base64ReferenceImage,
         // Legacy fields kept for backward compatibility but not used by backend
         mask_image: base64MaskImage,
         num_inference_steps: settings?.num_inference_steps,
@@ -123,6 +134,8 @@ export function useImageGeneration() {
         conditionalImagesCount: request.conditional_images?.length || 0,
         taskType: request.task_type,
         hasMask: !!request.mask_image,
+        hasReferenceImage: !!request.reference_image,
+        referenceImageLength: request.reference_image?.length || 0,
       });
 
       const response = await apiService.generateImage(request, abortController.signal);

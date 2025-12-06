@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime
@@ -13,6 +12,7 @@ from ..core.config import settings
 from ..core.pipeline import get_device, load_pipeline
 from ..services.image_processing import (
     base64_to_image,
+    generate_canny_image,
     image_to_base64,
     prepare_mask_conditionals,
     resize_with_aspect_ratio_pad,
@@ -42,7 +42,7 @@ class GenerationService:
         # Pipeline is now managed centrally by qwen_loader, no need to cache here
         pass
 
-    async def _ensure_pipeline(self, task_type: str = "insertion"):
+    def _ensure_pipeline(self, task_type: str = "insertion"):
         """
         Get or load pipeline for the specified task type.
         
@@ -53,7 +53,7 @@ class GenerationService:
             Loaded DiffusionPipeline (single instance shared across all tasks)
         """
         # Pipeline is managed centrally, just load/switch adapter as needed
-        return await load_pipeline(task_type=task_type)
+        return load_pipeline(task_type=task_type)
 
     def _resolve_quality(
         self, override: str | None = None
@@ -161,16 +161,22 @@ class GenerationService:
         extra_cond_b64s: list[str] = []
 
         if task_type == "white-balance":
-            # White-balance: mask may not be sent, in which case use full white mask.
+            # White-balance: conditionals are [input_image, canny_edge]
+            # No mask needed for white-balance
             original, _, _ = self._apply_input_quality(
                 original, quality_override=request.input_quality
             )
-            if cond_list:
-                mask_b64 = cond_list[0]
-                extra_cond_b64s = cond_list[1:]
-                mask = base64_to_image(mask_b64)
-            else:
-                mask = Image.new("RGB", original.size, (255, 255, 255))
+            
+            # Generate canny edge from input image
+            canny_image = generate_canny_image(original)
+            
+            # White-balance conditionals: input + canny
+            conditional_images: list[Image.Image] = [original, canny_image]
+            mask = Image.new("RGB", original.size, (255, 255, 255))  # Dummy mask for compatibility
+            
+            logger.info(
+                "🔍 [Backend Debug] White-balance conditionals: input + canny"
+            )
         else:
             # insertion / removal: must have at least 1 condition as mask
             if not cond_list:
@@ -188,21 +194,71 @@ class GenerationService:
             # Apply input_quality for insert/remove
             original, mask, _ = self._apply_input_quality(
                 original, mask, None, quality_override=request.input_quality
-        )
-        
-        if mask is None:
-            raise RuntimeError("Mask image missing after preprocessing")
+            )
+            
+            if mask is None:
+                raise RuntimeError("Mask image missing after preprocessing")
 
-        # From mask build basic conditions: mask/background/object/mae
-        mask_cond, background_rgb, obj_rgb, mae_image = prepare_mask_conditionals(
-            original, mask
-        )
-        conditional_images: list[Image.Image] = [
-            mask_cond,
-            background_rgb,
-            obj_rgb,
-            mae_image,
-        ]
+            # From mask build basic conditions based on task type:
+            # - Removal: mask, masked_bg, mae (no ref_img)
+            # - Insertion: mask, masked_bg, ref_img (no mae)
+            #   For insertion, ref_img should be reference_image from frontend, NOT masked_object
+            include_mae = task_type == "removal"
+            include_ref_img = task_type != "removal"  # ref_img only for insertion
+            mask_cond, masked_bg, _masked_object, mae_image = prepare_mask_conditionals(
+                original, mask, include_mae=include_mae
+            )
+            # Note: _masked_object is NOT used - we use ref_img from frontend for insertion
+            # Order for insertion: [ref_img, mask, masked_bg]
+            # Order for removal: [original, mask, mae] - no masked_bg
+            
+            # For insertion: use ref_img from frontend (required, no fallback)
+            # IMPORTANT: Use reference image directly without any processing (no extraction, no background removal)
+            # Just decode from base64 and resize to match original size if needed
+            # NOTE: _masked_object from prepare_mask_conditionals is NOT used - we only use ref_img from frontend
+            ref_img = None
+            if include_ref_img:
+                logger.info(
+                    "🔍 [Insertion Debug] request.reference_image present: %s (length: %d bytes)",
+                    bool(request.reference_image),
+                    len(request.reference_image) if request.reference_image else 0
+                )
+                if request.reference_image:
+                    # Decode ref_img from base64 - use original image directly
+                    ref_img = base64_to_image(request.reference_image)
+                    logger.info(
+                        "📥 [Insertion] Received ref_img from frontend: %s (decoded from base64)",
+                        ref_img.size
+                    )
+                    # Only resize if size doesn't match (required for model input)
+                    # But keep the image as-is, no other processing
+                    if ref_img.size != original.size:
+                        logger.info(
+                            "🔄 Resizing ref_img from %s to %s for insertion (keeping original content)",
+                            ref_img.size,
+                            original.size,
+                        )
+                        ref_img = ref_img.resize(
+                            original.size, Image.Resampling.LANCZOS
+                        )
+                else:
+                    # No ref_img provided for insertion - skip ref_img conditional
+                    logger.warning("⚠️ No ref_img provided for insertion task - ref_img conditional will be omitted")
+                    logger.warning("   → _masked_object is NOT used as fallback - insertion requires ref_img from frontend")
+            
+            # Build conditional_images with correct order based on task type
+            if include_ref_img and ref_img is not None:
+                # Insertion: [ref_img, mask, masked_bg]
+                conditional_images = [ref_img, mask_cond, masked_bg]
+                logger.info("✅ [Insertion] Conditional images order: [ref_img, mask, masked_bg]")
+            elif include_mae:
+                # Removal: [original, mask, mae] - use original image, not masked_bg
+                conditional_images = [original, mask_cond, mae_image]
+                logger.info("✅ [Removal] Conditional images order: [original, mask, mae]")
+            else:
+                # Fallback (insertion without ref_img): [mask, masked_bg]
+                conditional_images = [mask_cond, masked_bg]
+                logger.warning("⚠️ [Insertion] No ref_img, using fallback: [mask, masked_bg]")
         
         # Append additional conditions from client (any base64 images)
         if extra_cond_b64s:
@@ -232,12 +288,21 @@ class GenerationService:
                 )
                 conditional_images.extend(extra_images)
         
+        # Log conditional images based on task type
+        if task_type == "white-balance":
+            cond_desc = "input/canny"
+        elif task_type == "removal":
+            cond_desc = "mask/masked_bg/mae"
+        else:
+            cond_desc = "mask/masked_bg/ref_img"
         logger.info(
-            "🔍 [Backend Debug] Conditional images count: %d (>=4: base conditionals + optional extras)",
+            "🔍 [Backend Debug] Conditional images count: %d (task: %s - %s)",
             len(conditional_images),
+            task_type,
+            cond_desc,
         )
-        # reference is no longer used in the new Qwen flow
-        return original, mask, conditional_images, None
+        # Return ref_img if it was used (for insertion task)
+        return original, mask, conditional_images, ref_img if task_type == "insertion" else None
 
     def _build_params(
         self,
@@ -310,7 +375,7 @@ class GenerationService:
             "image": original,
             "mask_image": mask,
             "conditional_images": conditional_images,
-            "num_inference_steps": request.num_inference_steps or 20,
+            "num_inference_steps": request.num_inference_steps or 10,
             "guidance_scale": request.guidance_scale or 1.0,
             "width": output_width,
             "height": output_height,
@@ -332,7 +397,15 @@ class GenerationService:
 
         return params
 
-    async def generate(self, request: GenerationRequest) -> Dict[str, Any]:
+    def generate(self, request: GenerationRequest) -> Dict[str, Any]:
+        """
+        Generate image using Qwen pipeline.
+        
+        Uses sync def because:
+        - Runs on Heavy Worker (A100) where PyTorch/GPU tasks are blocking
+        - Modal automatically wraps sync functions in thread pool
+        - No benefit from async for CPU/GPU bound tasks (Python GIL)
+        """
         start = time.time()
         
         # Create debug session
@@ -376,7 +449,7 @@ class GenerationService:
                     "Note: Pipeline uses config settings. To change, update config and restart."
                 )
             
-            pipeline = await self._ensure_pipeline(task_type=task_type)
+            pipeline = self._ensure_pipeline(task_type=task_type)
             pipeline_callable = cast(Any, pipeline)
             
             # Log LoRA info from qwen_loader
@@ -392,15 +465,26 @@ class GenerationService:
             
             # Save debug images
             debug_session.save_image(original, "input_image", "01", "Original input image")
-            debug_session.save_image(mask, "mask_image", "02", "Mask image (first conditional)")
             
-            # Save conditional images
-            if len(conditionals) > 1:
-                debug_session.save_image(conditionals[1], "mask_background", "03", "Mask background (original with mask applied)")
-            if len(conditionals) > 2:
-                debug_session.save_image(conditionals[2], "canny_edge", "05", "Canny edge detection")
-            if len(conditionals) > 3:
-                debug_session.save_image(conditionals[3], "mae_output", "06", "MAE feature map")
+            # Save conditional images based on task type
+            if task_type == "white-balance":
+                # White-balance: conditionals = [input, canny]
+                if len(conditionals) > 0:
+                    debug_session.save_image(conditionals[0], "wb_input", "02", "White-balance input image")
+                if len(conditionals) > 1:
+                    debug_session.save_image(conditionals[1], "canny_edge", "03", "Canny edge detection")
+            else:
+                # Removal/Insertion: conditionals = [mask, masked_bg, mae/ref_img]
+                debug_session.save_image(mask, "mask_image", "02", "Mask image")
+                if len(conditionals) > 1:
+                    debug_session.save_image(conditionals[1], "masked_bg", "03", "Masked background (original with mask area removed)")
+                if len(conditionals) > 2:
+                    if task_type == "removal":
+                        # Removal: conditionals[2] is MAE
+                        debug_session.save_image(conditionals[2], "mae_output", "05", "MAE inpainted preview")
+                    else:
+                        # Insertion: conditionals[2] is ref_img (reference image from frontend)
+                        debug_session.save_image(conditionals[2], "ref_img", "05", "Reference image (from frontend upload)")
             
             if reference is not None:
                 debug_session.save_image(reference, "reference_image", "04", "Reference image (optional)")
@@ -448,7 +532,7 @@ class GenerationService:
                     qwen_params = {
                         "image": image_list,
                         "prompt": request.prompt or "",
-                        "num_inference_steps": request.num_inference_steps or 20,
+                        "num_inference_steps": request.num_inference_steps or 10,
                         "true_cfg_scale": request.true_cfg_scale or request.guidance_scale or (3.3 if task_type == "white-balance" else 4.0),
                         "height": original.height,
                         "width": original.width,
@@ -462,8 +546,8 @@ class GenerationService:
                         qwen_params["generator"] = torch.Generator(device=device).manual_seed(request.seed)
                     
                     logger.info(f"📥 Calling QwenImageEditPlusPipeline with {len(image_list)} conditional images for task={task_type}")
-                    # Run blocking inference in thread pool
-                    result = await asyncio.to_thread(pipeline_callable, **qwen_params)
+                    # Run inference (sync - Modal handles threading)
+                    result = pipeline_callable(**qwen_params)
                     
                     # QwenImageEditPlusPipeline returns QwenImagePipelineOutput with images attribute
                     if hasattr(result, "images"):
@@ -482,8 +566,8 @@ class GenerationService:
                 else:
                     # For standard StableDiffusionInpaintPipeline, use existing params
                     params = self._build_params(request, original, mask, conditionals, task_type=task_type)
-                    # Run blocking inference in thread pool
-                    result = await asyncio.to_thread(pipeline_callable, **params)
+                    # Run inference (sync - Modal handles threading)
+                    result = pipeline_callable(**params)
                     generated = (
                         result.images[0]
                         if hasattr(result, "images")
@@ -550,6 +634,71 @@ class GenerationService:
             debug_session.log_lora("=" * 80)
             debug_session.finalize(success=True)
             
+            # Build debug_info with conditional images
+            # Always create debug_info to ensure frontend gets updated info for each generation
+            # This ensures debug panel shows correct info even when switching between tasks
+            debug_info = None
+            try:
+                # Convert conditional images to base64 for frontend debug
+                conditional_images_b64 = []
+                # Labels depend on task_type:
+                # - White-balance: input, canny
+                # - Removal: mask, masked_bg, mae (no ref_img)
+                # - Insertion: mask, masked_bg, ref_img (no mae)
+                if task_type == "white-balance":
+                    conditional_labels = ["input", "canny"]
+                    max_conditionals = 2
+                elif task_type == "removal":
+                    conditional_labels = ["original", "mask", "mae"]
+                    max_conditionals = 3
+                else:
+                    # Insertion: [ref_img, mask, masked_bg]
+                    conditional_labels = ["ref_img", "mask", "masked_bg"]
+                    max_conditionals = 3
+                
+                for i, cond_img in enumerate(conditionals[:max_conditionals]):
+                    try:
+                        cond_b64 = image_to_base64(cond_img)
+                        conditional_images_b64.append(cond_b64)
+                    except Exception as e:
+                        logger.warning(f"Failed to encode conditional image {i}: {e}")
+                        # Continue with other images even if one fails
+                
+                # Get LoRA info
+                from ..core.qwen_loader import _current_adapter, _loaded_adapters
+                
+                # Always create debug_info, even if some images failed to encode
+                # This ensures frontend gets updated info for each generation
+                debug_info = {
+                    "conditional_images": conditional_images_b64,
+                    "conditional_labels": conditional_labels[:len(conditional_images_b64)],
+                    "input_image_size": f"{original.width}x{original.height}",
+                    "output_image_size": f"{generated.width}x{generated.height}",
+                    "lora_adapter": _current_adapter,
+                    "loaded_adapters": list(_loaded_adapters) if _loaded_adapters else [],
+                }
+            except Exception as e:
+                # Even if building debug_info fails, try to create minimal info
+                logger.warning(f"Failed to build debug_info: {e}")
+                try:
+                    from ..core.qwen_loader import _current_adapter, _loaded_adapters
+                    debug_info = {
+                        "conditional_images": [],
+                        "conditional_labels": [],
+                        "input_image_size": f"{original.width}x{original.height}",
+                        "output_image_size": f"{generated.width}x{generated.height}",
+                        "lora_adapter": _current_adapter,
+                        "loaded_adapters": list(_loaded_adapters) if _loaded_adapters else [],
+                    }
+                except Exception:
+                    # Last resort: create empty debug_info
+                    debug_info = {
+                        "conditional_images": [],
+                        "conditional_labels": [],
+                        "input_image_size": f"{original.width}x{original.height}",
+                        "output_image_size": f"{generated.width}x{generated.height}",
+                    }
+            
             # Add debug session path to response
             response = {
                 "success": True,
@@ -558,6 +707,7 @@ class GenerationService:
                 "model_used": f"qwen_local_{task_type}",
                 "parameters_used": metadata,
                 "request_id": request_id,  # Include request_id for visualization access
+                "debug_info": debug_info,
             }
             
             # Include debug path if enabled

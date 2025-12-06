@@ -15,14 +15,17 @@ import {
   useImageTransform,
   useImageGeneration,
 } from "@/hooks";
-import type { InputQualityPreset } from "@/services/api";
+import type { InputQualityPreset, DebugInfo } from "@/services/api";
+import DebugPanel from "@/components/DebugPanel";
+import ReferenceImageEditor from "@/components/ReferenceImageEditor";
 
 export default function Home() {
   // Basic UI state
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(true);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  // Legacy error/success state - kept for backward compatibility with notification system
+  const [, setError] = useState<string | null>(null);
+  const [, setSuccess] = useState<string | null>(null);
 
   // Enhanced notification state
   const [notificationType, setNotificationType] =
@@ -40,6 +43,10 @@ export default function Home() {
     "white-balance" | "object-insert" | "object-removal" | "evaluation"
   >("white-balance");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  
+  // Reference Image Editor state
+  const [isRefEditorOpen, setIsRefEditorOpen] = useState(false);
+  const [pendingRefImage, setPendingRefImage] = useState<string | null>(null);
 
   // Advanced options state
   const [negativePrompt, setNegativePrompt] = useState<string>("");
@@ -74,10 +81,11 @@ export default function Home() {
   }, []);
 
   const [guidanceScale, setGuidanceScale] = useState<number>(1.0);
-  const [inferenceSteps, setInferenceSteps] = useState<number>(20); // Start with white-balance default
+  const [inferenceSteps, setInferenceSteps] = useState<number>(10); // Default steps
   const [cfgScale, setCfgScale] = useState<number>(4.0);
   const [inputQuality, setInputQuality] =
     useState<InputQualityPreset>("resized");
+  const [customSquareSize, setCustomSquareSize] = useState<number>(1024);
 
   // Low-end optimization states
   const [enable4BitTextEncoder, setEnable4BitTextEncoder] =
@@ -85,20 +93,15 @@ export default function Home() {
   const [enableCpuOffload, setEnableCpuOffload] = useState<boolean>(false);
   const [enableMemoryOptimizations, setEnableMemoryOptimizations] =
     useState<boolean>(false);
-  const [enableFlowmatchScheduler, setEnableFlowmatchScheduler] =
-    useState<boolean>(false);
-
-  // Helper to calculate 1:1 square size based on max dimension
-  const getSquareSize = useCallback((maxDim: number): number => {
-    if (maxDim <= 640) return 512;
-    if (maxDim <= 896) return 768;
-    if (maxDim <= 1280) return 1024;
-    if (maxDim <= 1792) return 1536;
-    return 2048;
-  }, []);
 
   const [baseImageData, setBaseImageData] = useState<string | null>(null);
   const [baseImageDimensions, setBaseImageDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  // Store original upload data separately (not overwritten after generation)
+  const [originalUploadData, setOriginalUploadData] = useState<string | null>(null);
+  const [originalUploadDimensions, setOriginalUploadDimensions] = useState<{
     width: number;
     height: number;
   } | null>(null);
@@ -112,6 +115,12 @@ export default function Home() {
 
   // Visualization request ID state
   const [lastRequestId, setLastRequestId] = useState<string | null>(null);
+
+  // Debug panel state
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+  const [isDebugPanelVisible, setIsDebugPanelVisible] = useState(false);
+
+  // Auto-refine prompt state
 
   // Benchmark mode state
   const [benchmarkFolder, setBenchmarkFolder] = useState<string>("");
@@ -180,7 +189,6 @@ export default function Home() {
   // Resizable panel state - start with default, then load from localStorage
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);
-  const resizeRef = useRef<HTMLDivElement>(null);
 
   // Load sidebar width from localStorage after hydration
   useEffect(() => {
@@ -243,12 +251,24 @@ export default function Home() {
     setIsNotificationVisible(false);
   }, [clearNotificationTimeout]);
 
+  // Listen for server notifications from ServerContext
+  useEffect(() => {
+    const handleServerNotification = (event: CustomEvent<{ type: 'success' | 'error' | 'info'; message: string }>) => {
+      const { type, message } = event.detail;
+      setNotificationWithTimeout(type, message);
+    };
+
+    window.addEventListener('server-notification', handleServerNotification as EventListener);
+    return () => {
+      window.removeEventListener('server-notification', handleServerNotification as EventListener);
+    };
+  }, [setNotificationWithTimeout]);
+
   // Custom hooks
   const {
     uploadedImage,
     imageDimensions,
     displayScale,
-    handleImageUpload,
     removeImage,
     handleImageClick,
     setUploadedImage,
@@ -262,20 +282,15 @@ export default function Home() {
     applyWhiteBalance,
     isGenerating,
     error: generationError,
-    lastGeneration,
     clearError,
     cancelGeneration,
   } = useImageGeneration();
 
   const {
     viewportZoom,
-    isDragging,
     imageContainerRef,
     containerRef,
     handleWheel,
-    handleMouseDown,
-    handleMouseMove,
-    handleMouseUp,
     zoomViewportIn,
     zoomViewportOut,
     resetViewportZoom,
@@ -292,12 +307,29 @@ export default function Home() {
       const reader = new FileReader();
       reader.onload = (e) => {
         if (e.target && typeof e.target.result === "string") {
-          setReferenceImage(e.target.result);
+          // Open editor instead of setting directly
+          setPendingRefImage(e.target.result);
+          setIsRefEditorOpen(true);
           setError(null);
         }
       };
       reader.readAsDataURL(file);
     }
+  };
+
+  const handleRefEditorSubmit = async (
+    processedImage: string,
+    _maskData?: string | null
+  ) => {
+    void _maskData; // mask từ ref không còn dùng để apply lên mask chính
+    setReferenceImage(processedImage);
+    setPendingRefImage(null);
+    setIsRefEditorOpen(false);
+  };
+
+  const handleRefEditorClose = () => {
+    setPendingRefImage(null);
+    setIsRefEditorOpen(false);
   };
 
   const handleRemoveReferenceImage = () => {
@@ -583,26 +615,6 @@ export default function Home() {
     }
   };
 
-  const handleEvaluationInputImageUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      // Legacy function - not used in benchmark mode
-      // setEvaluationInputImage(base64);
-    } catch (error) {
-      console.error("Error reading file:", error);
-      setNotificationWithTimeout("error", "Failed to load input image");
-    }
-  };
-
   const handleEvaluate = async (prompt: string) => {
     // If in benchmark mode, run benchmark instead of evaluation
     if (appMode === "benchmark") {
@@ -675,7 +687,8 @@ export default function Home() {
           sample_count: benchmarkSampleCount,
           num_inference_steps: inferenceSteps,
           guidance_scale: guidanceScale,
-          true_cfg_scale: cfgScale,
+          // Only send true_cfg_scale if negative prompt is provided
+          true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
           negative_prompt: negativePrompt || undefined,
           input_quality: inputQuality,
         }
@@ -918,21 +931,6 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const handleAppModeChange = (mode: "inference" | "benchmark") => {
-    setAppMode(mode);
-    // Auto-switch to benchmark when in benchmark mode
-    if (mode === "benchmark") {
-      // Reset benchmark state
-      setBenchmarkFolder("");
-      setBenchmarkValidation(null);
-      setBenchmarkSampleCount(0);
-      setBenchmarkFile(null);
-    } else {
-      // Reset to white-balance when switching back to inference
-      setAiTask("white-balance");
-    }
-  };
-
   // Benchmark handlers
   const [benchmarkFile, setBenchmarkFile] = useState<File | null>(null);
 
@@ -1109,7 +1107,8 @@ export default function Home() {
           sample_count: benchmarkSampleCount,
           num_inference_steps: inferenceSteps,
           guidance_scale: guidanceScale,
-          true_cfg_scale: cfgScale,
+          // Only send true_cfg_scale if negative prompt is provided
+          true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
           negative_prompt: negativePrompt || undefined,
           input_quality: inputQuality,
         }
@@ -1294,10 +1293,19 @@ export default function Home() {
         sourceData?: string;
         sourceDimensions?: { width: number; height: number };
         silent?: boolean;
+        squareSize?: number; // Custom square size override
       }
     ): Promise<boolean> => {
-      const sourceData = options?.sourceData ?? baseImageData;
-      const sourceDimensions = options?.sourceDimensions ?? baseImageDimensions;
+      // For "original" quality, always use the original upload data (never resized)
+      // For "resized" quality, use current base image or source data
+      const useOriginalUpload = quality === "original" && originalUploadData && originalUploadDimensions;
+      const sourceData = useOriginalUpload 
+        ? originalUploadData 
+        : (options?.sourceData ?? baseImageData);
+      const sourceDimensions = useOriginalUpload 
+        ? originalUploadDimensions 
+        : (options?.sourceDimensions ?? baseImageDimensions);
+      
       if (!sourceData || !sourceDimensions) {
         return false;
       }
@@ -1312,11 +1320,8 @@ export default function Home() {
 
         // If quality is "resized", resize to 1:1 aspect ratio (square) with padding
         if (quality === "resized") {
-          const maxDim = Math.max(
-            sourceDimensions.width,
-            sourceDimensions.height
-          );
-          const squareSize = getSquareSize(maxDim);
+          // Use custom size if provided, otherwise use state value
+          const squareSize = options?.squareSize ?? customSquareSize;
 
           targetWidth = squareSize;
           targetHeight = squareSize;
@@ -1331,7 +1336,7 @@ export default function Home() {
           targetWidth = scaled.width;
           targetHeight = scaled.height;
         }
-        // If quality is "original", keep original dimensions (do nothing)
+        // If quality is "original", use the original upload dimensions (already set above)
 
         if (qualityChangeRequestRef.current !== requestId) {
           return false;
@@ -1374,9 +1379,11 @@ export default function Home() {
       }
     },
     [
-      getSquareSize,
+      customSquareSize,
       baseImageData,
       baseImageDimensions,
+      originalUploadData,
+      originalUploadDimensions,
       clearMask,
       initializeHistory,
       resetMaskHistory,
@@ -1463,6 +1470,9 @@ export default function Home() {
       const img = document.createElement("img");
       img.onload = () => {
         const dims = { width: img.width, height: img.height };
+        // Store original upload data (never overwritten)
+        setOriginalUploadData(imageData);
+        setOriginalUploadDimensions(dims);
         setBaseImage(imageData, dims);
         void applyInputQualityPreset(inputQuality, {
           sourceData: imageData,
@@ -1484,6 +1494,9 @@ export default function Home() {
     setComparisonSlider(50);
     resetMaskHistory();
     setBaseImage(null);
+    // Clear original upload data
+    setOriginalUploadData(null);
+    setOriginalUploadDimensions(null);
     setInputQuality("resized");
     setLastRequestId(null);
     setIsApplyingQuality(false);
@@ -1542,6 +1555,17 @@ export default function Home() {
         return;
       }
       await applyInputQualityPreset(quality);
+    },
+    [applyInputQualityPreset, baseImageData, inputQuality]
+  );
+
+  const handleCustomSquareSizeChange = useCallback(
+    async (size: number) => {
+      setCustomSquareSize(size);
+      // Re-apply quality preset with new size if in resized mode
+      if (inputQuality === "resized" && baseImageData) {
+        await applyInputQualityPreset("resized", { squareSize: size });
+      }
     },
     [applyInputQualityPreset, baseImageData, inputQuality]
   );
@@ -1624,6 +1648,10 @@ export default function Home() {
     try {
       clearAllNotifications();
       clearError();
+      
+      // Clear debug info at the start of each generation to ensure fresh data
+      setDebugInfo(null);
+      setIsDebugPanelVisible(false);
 
       if (!uploadedImage) {
         setNotificationWithTimeout(
@@ -1690,7 +1718,8 @@ export default function Home() {
       const settings = {
         num_inference_steps: inferenceSteps,
         guidance_scale: guidanceScale,
-        true_cfg_scale: cfgScale,
+        // Only send true_cfg_scale if negative prompt is provided
+        true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
         negative_prompt: negativePrompt || undefined,
         generator_seed: undefined, // Add seed if needed
         input_quality: inputQuality,
@@ -1698,7 +1727,6 @@ export default function Home() {
         enable_4bit_text_encoder: enable4BitTextEncoder,
         enable_cpu_offload: enableCpuOffload,
         enable_memory_optimizations: enableMemoryOptimizations,
-        enable_flowmatch_scheduler: enableFlowmatchScheduler,
       };
 
       // Use uploadedImage (current image) for API call
@@ -1769,6 +1797,19 @@ export default function Home() {
           setLastRequestId(result.request_id);
         }
 
+        // Always update debug_info (even if null) to ensure fresh data for each generation
+        // This ensures debug panel shows correct info for current generation, not previous one
+        // Merge backend debug_info with prompt info from frontend
+        const debugInfoWithPrompt = {
+          ...(result.debug_info || {}),
+          original_prompt: prompt,
+        };
+        setDebugInfo(debugInfoWithPrompt);
+        // Auto-show debug panel when debug info is available
+        if (result.debug_info) {
+          setIsDebugPanelVisible(true);
+        }
+
         setNotificationWithTimeout(
           "success",
           `Image edited successfully! (${result.generation_time.toFixed(1)}s)`
@@ -1779,6 +1820,7 @@ export default function Home() {
           time: result.generation_time,
           parameters: result.parameters_used,
           request_id: result.request_id,
+          debug_info: result.debug_info,
         });
       }
     } catch (err) {
@@ -1798,96 +1840,9 @@ export default function Home() {
   }, [generationError, setNotificationWithTimeout]);
 
   // Check API connectivity on mount with retry logic
-  useEffect(() => {
-    let isMounted = true;
-    const retryTimeout: NodeJS.Timeout | null = null;
-
-    const checkApiHealth = async (isRetry = false) => {
-      // Don't show loading message on initial check, only on retries
-      if (isRetry) {
-        console.log("🔄 Retrying API health check...");
-      } else {
-        console.log("🔍 Checking API health...");
-      }
-
-      try {
-        const { apiService } = await import("@/services/api");
-
-        // Use healthCheck with retry options
-        const health = await apiService.healthCheck({
-          retries: 5, // Try 5 times
-          retryDelay: 1000, // Start with 1 second delay
-          timeout: 8000, // 8 seconds timeout per request
-        });
-
-        if (!isMounted) return;
-
-        console.log("✅ API connection successful:", health);
-        setNotificationWithTimeout(
-          "success",
-          `Connected to backend (${health.device || "unknown device"})`
-        );
-      } catch (err) {
-        if (!isMounted) return;
-
-        console.error("⚠️ API connection failed after retries:", err);
-
-        let errorMessage =
-          "Unable to connect to API server. Please ensure the API endpoint is reachable.";
-
-        if (err instanceof Error) {
-          try {
-            // Try to parse as JSON if it's a JSON string
-            const errorData = JSON.parse(err.message);
-            if (errorData.baseUrl) {
-              errorMessage = `Cannot connect to ${errorData.baseUrl}. Please ensure the API endpoint is reachable.`;
-            } else if (errorData.error) {
-              // Only show detailed error if it's not a network error (status 0)
-              if (errorData.status !== 0) {
-                errorMessage = errorData.error;
-              } else {
-                errorMessage =
-                  "API server is not responding. Please check if the API endpoint is running.";
-              }
-            } else if (errorData.status === 0) {
-              errorMessage =
-                "API server is not responding. Please check if the API endpoint is running.";
-            }
-          } catch {
-            // If not JSON, use the error message directly
-            if (
-              err.message.includes("Failed to fetch") ||
-              err.message.includes("NetworkError") ||
-              err.message.includes("timeout")
-            ) {
-              errorMessage =
-                "API server is not responding. Please check if the API endpoint is running.";
-            } else {
-              errorMessage = err.message || errorMessage;
-            }
-          }
-        } else {
-          errorMessage = String(err) || errorMessage;
-        }
-
-        // Only show error notification after all retries have failed
-        setNotificationWithTimeout("error", errorMessage);
-      }
-    };
-
-    // Add a small delay before first check to give backend time to start
-    const initialDelay = setTimeout(() => {
-      checkApiHealth(false);
-    }, 500); // 500ms delay before first check
-
-    return () => {
-      isMounted = false;
-      if (retryTimeout) {
-        clearTimeout(retryTimeout);
-      }
-      clearTimeout(initialDelay);
-    };
-  }, [setNotificationWithTimeout]);
+  // Removed automatic backend health check notification
+  // Backend status is now managed by ServerContext and displayed in Header
+  // This reduces redundant API calls and improves cost optimization
 
   // Cleanup effect to clear notification timeouts
   useEffect(() => {
@@ -1898,7 +1853,8 @@ export default function Home() {
 
   // Throttle function for better performance
   const throttle = useCallback(
-    <T extends (...args: unknown[]) => void>(func: T, delay: number): T => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    <T extends (...args: any[]) => void>(func: T, delay: number): T => {
       let timeoutId: NodeJS.Timeout | null = null;
       let lastExecTime = 0;
 
@@ -2013,15 +1969,13 @@ export default function Home() {
     <div className="min-h-screen max-h-screen bg-[var(--primary-bg)] text-[var(--text-primary)] flex flex-col dots-pattern-small overflow-hidden">
       {/* Header */}
       <Header
-        onSummon={handleEdit}
-        onEvaluate={handleEvaluate}
+        onSummon={appMode === "benchmark" ? handleEvaluate : handleEdit}
         isCustomizeOpen={isCustomizeOpen}
         onToggleCustomize={() => setIsCustomizeOpen(!isCustomizeOpen)}
-        isGenerating={isGenerating}
-        isEvaluating={isEvaluating}
-        appMode={appMode}
-        onAppModeChange={handleAppModeChange}
+        isGenerating={isGenerating || isEvaluating}
         aiTask={aiTask}
+        isDebugPanelVisible={isDebugPanelVisible}
+        onDebugPanelVisibilityChange={setIsDebugPanelVisible}
       />
 
       {/* Main Content - Optimized transitions */}
@@ -2108,6 +2062,7 @@ export default function Home() {
           isMaskingMode={isMaskingMode}
           isMaskDrawing={isMaskDrawing}
           maskBrushSize={maskBrushSize}
+          maskToolType={maskToolType}
           isSmartMaskLoading={isSmartMaskLoading}
           originalImage={originalImage}
           modifiedImage={modifiedImageForComparison}
@@ -2135,7 +2090,6 @@ export default function Home() {
           onZoomViewportOut={zoomViewportOut}
           onResetViewportZoom={resetViewportZoom}
           onToggleHelp={() => setIsHelpOpen(!isHelpOpen)}
-          appMode={appMode}
           evaluationImagePairs={evaluationImagePairs}
           evaluationDisplayLimit={evaluationDisplayLimit}
           onEvaluationDisplayLimitChange={setEvaluationDisplayLimit}
@@ -2159,6 +2113,7 @@ export default function Home() {
           aiTask={aiTask}
           appMode={appMode}
           inputQuality={inputQuality}
+          customSquareSize={customSquareSize}
           isApplyingQuality={isApplyingQuality}
           onImageUpload={handleImageUploadWrapper}
           onRemoveImage={handleRemoveImage}
@@ -2230,15 +2185,17 @@ export default function Home() {
           onExportEvaluationJSON={handleExportEvaluationJSON}
           onExportEvaluationCSV={handleExportEvaluationCSV}
           onInputQualityChange={handleInputQualityChange}
+          onCustomSquareSizeChange={handleCustomSquareSizeChange}
           // Low-end optimization props
           enable4BitTextEncoder={enable4BitTextEncoder}
           enableCpuOffload={enableCpuOffload}
           enableMemoryOptimizations={enableMemoryOptimizations}
-          enableFlowmatchScheduler={enableFlowmatchScheduler}
           onEnable4BitTextEncoderChange={setEnable4BitTextEncoder}
           onEnableCpuOffloadChange={setEnableCpuOffload}
           onEnableMemoryOptimizationsChange={setEnableMemoryOptimizations}
-          onEnableFlowmatchSchedulerChange={setEnableFlowmatchScheduler}
+          // Debug panel props
+          isDebugPanelVisible={isDebugPanelVisible}
+          onDebugPanelVisibilityChange={setIsDebugPanelVisible}
           // Benchmark mode props
           benchmarkFolder={benchmarkFolder}
           benchmarkValidation={benchmarkValidation}
@@ -2257,6 +2214,24 @@ export default function Home() {
           onRunBenchmark={handleRunBenchmark}
         />
       </main>
+
+      {/* Debug Panel - Hidden by default, shows conditional images */}
+      <DebugPanel
+        debugInfo={debugInfo}
+        isVisible={isDebugPanelVisible}
+        onClose={() => setIsDebugPanelVisible(false)}
+        onOpen={() => setIsDebugPanelVisible(true)}
+      />
+
+      {/* Reference Image Editor Modal */}
+      {pendingRefImage && (
+        <ReferenceImageEditor
+          isOpen={isRefEditorOpen}
+          imageData={pendingRefImage}
+          onClose={handleRefEditorClose}
+          onSubmit={handleRefEditorSubmit}
+        />
+      )}
     </div>
   );
 }

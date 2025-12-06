@@ -28,239 +28,219 @@ or use the helper script:
 ./start_server.sh
 ```
 
-## RunPod Serverless Deployment
+## Modal Deployment
 
 ### Prerequisites
 
-- RunPod account with API access
-- Docker Hub or GitHub Container Registry account
+- Modal account (sign up at [modal.com](https://modal.com))
 - Checkpoint files (insertion_cp.safetensors, removal_cp.safetensors, wb_cp.safetensors)
+- Python 3.12+
 
-### Step 1: Setup Network Volume
+### Step 1: Install and Setup Modal
 
-1. Create a network volume on RunPod console for checkpoints
-   - Go to Storage → New Network Volume
-   - Select datacenter (EU-RO-1 recommended for S3 API support)
-   - Set size (e.g., 10GB for 3 checkpoint files ~850MB total)
-   - Note: S3-compatible API is available for: EUR-IS-1, EU-RO-1, EU-CZ-1, US-KS-2, US-CA-2
-   - Reference: https://docs.runpod.io/storage/network-volumes
+1. Install Modal:
 
-2. **Create S3 API Key** (separate from your regular RunPod API key):
-   - Go to RunPod Console → Settings → S3 API Keys
-   - Click "Create an S3 API key"
-   - Save the **access key** (user_XXXXX) and **secret** (rps_XXXXX)
-   - The access key is your User ID (found in the key description)
-   - Reference: https://docs.runpod.io/storage/s3-api#setup-and-authentication
+   ```bash
+   pip install modal
+   ```
 
-3. Upload checkpoint files to the volume using S3-compatible API:
+   Or if using uv:
 
-   **Option A: Use the provided Python upload script (recommended)**
+   ```bash
+   uv pip install modal
+   ```
+
+2. Authenticate with Modal:
+
+   ```bash
+   modal setup
+   ```
+
+   This will open a browser to authenticate. Follow the instructions to complete setup.
+
+### Step 2: Upload Checkpoints to Modal Volume
+
+1. **Create and upload checkpoints to Modal Volume**:
 
    ```bash
    cd server
 
-   # Create .env file with S3 API credentials
-   echo 'RUNPOD_S3_USER_ID=user_XXXXX' > .env
-   echo 'RUNPOD_S3_SECRET=rps_XXXXX' >> .env
-   echo 'RUNPOD_S3_BUCKET=YOUR_VOLUME_ID' >> .env
+   # Start a Modal shell to upload files
+   modal run modal_app.py::volume
 
-   # Run upload script
-   uv run python upload_checkpoints_to_runpod.py
+   # Or use Modal CLI to upload files
+   # First, create a temporary function to upload files
    ```
 
-   Or set environment variables directly:
+   **Alternative: Use Modal Volume API directly**
+
+   Create a temporary script to upload checkpoints:
+
+   ```python
+   # upload_checkpoints_modal.py
+   import modal
+
+   app = modal.App("upload-checkpoints")
+   volume = modal.Volume.from_name("artmancer-checkpoints", create_if_missing=True)
+
+   @app.function(volumes={"/checkpoints": volume})
+   def upload_files():
+       import shutil
+       from pathlib import Path
+       
+       local_checkpoints = Path("./checkpoints")
+       modal_checkpoints = Path("/checkpoints/checkpoints")
+       modal_checkpoints.mkdir(parents=True, exist_ok=True)
+       
+       for file in ["insertion_cp.safetensors", "removal_cp.safetensors", "wb_cp.safetensors"]:
+           local_file = local_checkpoints / file
+           if local_file.exists():
+               shutil.copy2(local_file, modal_checkpoints / file)
+               print(f"Uploaded {file}")
+           else:
+               print(f"Warning: {file} not found")
+       
+       volume.commit()
+
+   if __name__ == "__main__":
+       with app.run():
+           upload_files.remote()
+   ```
+
+   Run the upload script:
 
    ```bash
-   export RUNPOD_S3_USER_ID='user_XXXXX'
-   export RUNPOD_S3_SECRET='rps_XXXXX'
-   export RUNPOD_S3_BUCKET='YOUR_VOLUME_ID'
-   uv run python upload_checkpoints_to_runpod.py
+   modal run upload_checkpoints_modal.py
    ```
 
-   **Option B: Manual upload with AWS CLI**
+   **Or use Modal Volume mount locally**:
 
    ```bash
-   # Install AWS CLI if not already installed
-   pip install awscli
-
-   # Configure AWS CLI with S3 API credentials
-   aws configure
-   # AWS Access Key ID: Enter your User ID (user_XXXXX)
-   # AWS Secret Access Key: Enter your S3 API secret (rps_XXXXX)
-   # Default region: eu-ro-1 (or your datacenter)
-   # Default output format: json
-
-   # Upload each file (replace YOUR_VOLUME_ID with your Network Volume ID)
-   aws s3 cp checkpoints/insertion_cp.safetensors \
-     s3://YOUR_VOLUME_ID/checkpoints/insertion_cp.safetensors \
-     --region eu-ro-1 \
-     --endpoint-url https://s3api-eu-ro-1.runpod.io
-
-   aws s3 cp checkpoints/removal_cp.safetensors \
-     s3://YOUR_VOLUME_ID/checkpoints/removal_cp.safetensors \
-     --region eu-ro-1 \
-     --endpoint-url https://s3api-eu-ro-1.runpod.io
-
-   aws s3 cp checkpoints/wb_cp.safetensors \
-     s3://YOUR_VOLUME_ID/checkpoints/wb_cp.safetensors \
-     --region eu-ro-1 \
-     --endpoint-url https://s3api-eu-ro-1.runpod.io
-
-   # Verify upload
-   aws s3 ls --region eu-ro-1 --endpoint-url https://s3api-eu-ro-1.runpod.io s3://YOUR_VOLUME_ID/checkpoints/
+   # Mount volume locally (if supported)
+   modal volume mount artmancer-checkpoints /tmp/modal-volume
+   cp checkpoints/*.safetensors /tmp/modal-volume/checkpoints/
+   modal volume unmount artmancer-checkpoints
    ```
 
-3. **Important**: Files uploaded to `s3://bucket/checkpoints/` will be accessible at `/runpod-volume/checkpoints/` on Serverless workers
+### Step 3: Deploy to Modal
 
-### Step 2: Build Docker Image
-
-**Option A: Build locally and push to Docker Hub**
+Deploy both endpoints:
 
 ```bash
-cd server  # Important: build from server/ directory
-docker build --platform linux/amd64 -t yourusername/artmancer:latest .
-
-# Push to Docker Hub
-docker push yourusername/artmancer:latest
+cd server
+modal deploy modal_app.py
 ```
 
-**Option B: Deploy directly from GitHub (RunPod)**
+This will deploy two web endpoints:
+- **Heavy endpoint** (`fastapi_app_heavy`): A100 80GB GPU for `/api/generate`
+- **Light endpoint** (`fastapi_app_light`): T4 GPU for lightweight tasks
 
-When deploying from GitHub on RunPod:
+### Step 4: Get Endpoint URLs
 
-1. Repository: `ArtMancer/artmancer-web`
-2. Branch: `main` (or your branch)
-3. **Docker Build Context**: Set to `server` (important!)
-4. Dockerfile Path: `server/Dockerfile` (or just `Dockerfile` if context is `server`)
+After deployment, Modal will provide URLs for both endpoints. You can find them:
 
-### Step 3: Deploy on RunPod
+1. In the terminal output after `modal deploy`
+2. In the Modal dashboard at [modal.com](https://modal.com)
+3. Using Modal CLI:
 
-1. Go to RunPod Console → Serverless → New Endpoint
-2. Select **Load Balancer** endpoint type (not Queue)
-3. Configure endpoint:
+   ```bash
+   modal app list
+   modal app show artmancer
+   ```
 
-   - **Container Image**: `docker.io/yourusername/artmancer:latest`
-   - **GPU**: A100-80GB (or test with smaller GPU for cost optimization)
-   - **Network Volumes**: Mount your checkpoint volume at `/runpod-volume/`
-   - **Environment Variables**:
-     - `PORT=80`
-     - `PORT_HEALTH=80`
-     - `PYTORCH_ALLOC_CONF=expandable_segments:True`
-     - `MODEL_FILE_INSERTION=/runpod-volume/checkpoints/insertion_cp.safetensors`
-     - `MODEL_FILE_REMOVAL=/runpod-volume/checkpoints/removal_cp.safetensors`
-     - `MODEL_FILE_WHITE_BALANCE=/runpod-volume/checkpoints/wb_cp.safetensors`
-   - **Expose HTTP Ports**: Port 80
-   - **FlashBoot**: Enable (reduces cold start <200ms)
-   - **Worker Configuration**:
-     - Min workers: 0 or 1
-     - Max workers: 3-5
-     - Timeout: 600 seconds
+Example URLs:
+- Heavy endpoint: `https://your-username--artmancer-fastapi-app-heavy.modal.run`
+- Light endpoint: `https://your-username--artmancer-fastapi-app-light.modal.run`
 
-4. Click **Deploy Endpoint**
-
-### Step 4: Test Deployment
+### Step 5: Test Deployment
 
 1. Test health check endpoint:
 
    ```bash
-   curl https://YOUR_ENDPOINT_ID.api.runpod.ai/ping
+   curl https://YOUR_HEAVY_ENDPOINT_URL/ping
    ```
 
-   Should return `{"status": "healthy"}` when ready, or `204` when initializing.
+   Should return `{"status": "healthy"}`.
 
-2. Test generation endpoint:
+2. Test generation endpoint (heavy):
+
    ```bash
-   curl -X POST https://YOUR_ENDPOINT_ID.api.runpod.ai/api/generate \
+   curl -X POST https://YOUR_HEAVY_ENDPOINT_URL/api/generate \
      -H "Content-Type: application/json" \
      -d '{"prompt": "test", "input_image": "base64..."}'
    ```
 
-### Step 5: Update Frontend (Optional)
+3. Test light endpoint:
 
-The frontend is already configured to use the default RunPod endpoint: `https://pov3ewvy1mejeo.api.runpod.ai`
+   ```bash
+   curl https://YOUR_LIGHT_ENDPOINT_URL/api/health
+   ```
 
-To use a different endpoint, set environment variable in `.env.local`:
+### Step 6: Update Frontend
 
+Update your frontend to use the Modal endpoints. Set environment variables in `.env.local`:
+
+```env
+# Heavy endpoint for generation
+NEXT_PUBLIC_API_GENERATE_URL=https://YOUR_HEAVY_ENDPOINT_URL
+
+# Light endpoint for other tasks
+NEXT_PUBLIC_API_LIGHT_URL=https://YOUR_LIGHT_ENDPOINT_URL
+
+# Or use a single base URL and route appropriately
+NEXT_PUBLIC_API_URL=https://YOUR_HEAVY_ENDPOINT_URL
 ```
-NEXT_PUBLIC_RUNPOD_GENERATE_URL=https://YOUR_ENDPOINT_ID.api.runpod.ai
-```
 
-Or use `NEXT_PUBLIC_API_URL` to override all endpoints.
+### Local Testing with Modal
 
-### Local Testing
-
-Test the RunPod handler locally:
+Test the Modal app locally before deploying:
 
 ```bash
-# Install uvicorn if not already installed
-pip install uvicorn
+# Serve locally (development mode)
+modal serve modal_app.py
 
-# Run the handler
-uvicorn rp_handler:app --host 0.0.0.0 --port 80
-
-# Test health check
-curl http://localhost:80/ping
-
-# Test API endpoint
-curl http://localhost:80/api/health
+# Or run a specific function
+modal run modal_app.py::fastapi_app_heavy
 ```
 
-### RunPod-Specific Notes
+### Modal-Specific Notes
 
+- **Auto-scaling**: Modal automatically scales endpoints based on traffic
+- **Cold starts**: Sub-second cold starts with Modal's optimized containers
+- **GPU availability**: Modal pools capacity across major clouds for better availability
+- **Pricing**: Pay per second of GPU/CPU usage
+- **Volumes**: Modal Volumes are persistent and shared across function invocations
+- **Concurrency**: 
+  - Heavy endpoint: 3 concurrent requests (A100 is expensive)
+  - Light endpoint: 20 concurrent requests (T4 is cheaper)
 - **Timeouts**:
-  - Request timeout: 2 minutes (no worker available) → 400 error
-  - Processing timeout: 5.5 minutes → 524 error
-  - Misconfigured timeout: 8 minutes → 502 error
-- **Payload Limit**: 30 MB for both requests and responses
-- **Cold Start**: Workers need time to initialize. Frontend includes retry logic.
-- **Health Check**: `/ping` endpoint is required by RunPod Load Balancer
-  - Returns `200` when healthy
-  - Returns `204` when initializing
-  - Returns error status when unhealthy
+  - Heavy endpoint: 10 minutes (600 seconds)
+  - Light endpoint: 5 minutes (300 seconds)
 
-### RunPod healthcheck helper (SDK-only)
+### Updating Checkpoints
 
-I added a helper script `runpod_healthcheck.py` at the repo root (`server/runpod_healthcheck.py`). It:
-- Uses the official `runpod` Python SDK and calls `Endpoint.health()` to verify endpoint status
-- Does not perform any HTTP fallback or DNS/TCP checks — using the SDK ensures consistent behavior and helps match the RunPod control plane
-
-Note: This tool requires `runpod` SDK to be installed in your environment. Install with:
+To update checkpoints in the Modal Volume:
 
 ```bash
-# from server directory
-uv run python -m pip install runpod
-```
-
-Usage:
-
-```bash
-# Load the env or export variables manually
-export RUNPOD_API_KEY="your_api_key"
-export RUNPOD_URL="https://pov3ewvy1mejeo.api.runpod.ai"
-python runpod_healthcheck.py
-```
-
-This is useful to quickly verify endpoint status using the official SDK.
-
-Auth scheme options for `test_generate.py`:
-
-- `key` (default): `Authorization: Key <API_KEY>`
-- `bearer`: `Authorization: Bearer <API_KEY>`
-- `raw`: `Authorization: <API_KEY>` (no 'Key' prefix)
-- `x-api-key`: `x-api-key: <API_KEY>`
-
-If your endpoint returns 401, try alternate schemes using the `--auth-scheme` flag:
-
-```bash
-# from server directory
-uv run python test_generate.py --auth-scheme raw --api-key $(sed -n 's/^RUNPOD_API_KEY=//p' .env)
+# Use the upload script again, or
+modal volume ls artmancer-checkpoints
+modal volume download artmancer-checkpoints /path/to/local
+# Make changes, then upload back
 ``` 
 
 ## API Endpoints
 
-- `GET /ping` – Health check endpoint (required for RunPod Load Balancer)
+The backend is deployed as two separate Modal endpoints:
+
+### Heavy Endpoint (A100 80GB)
+- `GET /ping` – Health check endpoint
 - `GET /api/health` – Device + pipeline status (detailed health info)
-- `POST /api/generate` – Edit an image using prompt + mask with 3 conditional inputs (mask/background/object)
+- `POST /api/generate` – Edit an image using prompt + mask with 3 conditional inputs (mask/background/object) - **Requires A100 80GB**
+
+### Light Endpoint (T4/CPU)
+- `GET /ping` – Health check endpoint
+- `GET /api/health` – Device + pipeline status
+- `GET /api/` – Root endpoint
 - `POST /api/clear-cache` – Release GPU / CPU memory
 - `POST /api/smart-mask` – Generate smart mask using FastSAM
 - `POST /api/image-utils/*` – Image utilities (background removal, etc.)

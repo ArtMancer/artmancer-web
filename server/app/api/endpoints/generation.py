@@ -10,6 +10,14 @@ service = GenerationService()
 
 
 @router.post("/generate", response_model=GenerationResponse)
-async def generate_image(request: GenerationRequest):
-    return await service.generate(request)
+def generate_image(request: GenerationRequest):
+    """
+    Generate image endpoint.
+    
+    Uses sync def because:
+    - This runs on Heavy Worker (A100) where PyTorch/GPU tasks are blocking
+    - Modal automatically wraps sync functions in thread pool
+    - No benefit from async for CPU/GPU bound tasks (Python GIL)
+    """
+    return service.generate(request)
 

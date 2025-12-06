@@ -9,10 +9,16 @@ from pydantic_settings import BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
+# Check for Modal Volume mount point first
+# Modal volumes are mounted at /checkpoints by default
+MODAL_VOLUME_PATH = Path("/checkpoints")
+if MODAL_VOLUME_PATH.exists() and MODAL_VOLUME_PATH.is_dir():
+    # Use Modal Volume if available (Modal deployment)
+    # Volume is mounted at /checkpoints, checkpoints are stored directly there
+    CHECKPOINTS_DIR = MODAL_VOLUME_PATH
 # Check for RunPod network volume mount point
 # RunPod mounts volumes at /runpod-volume/ by default, but can be configured
-RUNPOD_VOLUME_PATH = Path("/runpod-volume")
-if RUNPOD_VOLUME_PATH.exists() and RUNPOD_VOLUME_PATH.is_dir():
+elif (RUNPOD_VOLUME_PATH := Path("/runpod-volume")).exists() and RUNPOD_VOLUME_PATH.is_dir():
     # Use network volume if available (RunPod deployment)
     CHECKPOINTS_DIR = RUNPOD_VOLUME_PATH / "checkpoints"
 else:

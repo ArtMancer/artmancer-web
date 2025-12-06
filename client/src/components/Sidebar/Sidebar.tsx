@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
   FaCamera,
   FaDownload,
@@ -44,6 +44,7 @@ interface SidebarProps {
   isResizing?: boolean; // For resize handle styling
   imageDimensions?: { width: number; height: number } | null;
   inputQuality: InputQualityPreset;
+  customSquareSize?: number; // Custom size for 1:1 ratio (e.g., 512, 768, 1024)
   isApplyingQuality?: boolean;
   onImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onReferenceImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
@@ -138,15 +139,17 @@ interface SidebarProps {
   onExportEvaluationJSON?: () => void;
   onExportEvaluationCSV?: () => void;
   onInputQualityChange: (value: InputQualityPreset) => void;
+  onCustomSquareSizeChange?: (size: number) => void; // Handler for custom square size
   // Low-end optimization props
   enable4BitTextEncoder?: boolean;
   enableCpuOffload?: boolean;
   enableMemoryOptimizations?: boolean;
-  enableFlowmatchScheduler?: boolean;
   onEnable4BitTextEncoderChange?: (enabled: boolean) => void;
   onEnableCpuOffloadChange?: (enabled: boolean) => void;
   onEnableMemoryOptimizationsChange?: (enabled: boolean) => void;
-  onEnableFlowmatchSchedulerChange?: (enabled: boolean) => void;
+  // Debug panel props
+  isDebugPanelVisible?: boolean;
+  onDebugPanelVisibilityChange?: (visible: boolean) => void;
   // Benchmark mode props
   benchmarkFolder?: string;
   benchmarkValidation?: {
@@ -189,6 +192,7 @@ export default function Sidebar({
   isResizing = false,
   imageDimensions = null,
   inputQuality,
+  customSquareSize = 1024,
   isApplyingQuality = false,
   onImageUpload,
   onReferenceImageUpload,
@@ -219,7 +223,7 @@ export default function Sidebar({
   // Advanced options with defaults
   negativePrompt = "",
   guidanceScale = 1.0,
-  inferenceSteps = 40,
+  inferenceSteps = 10,
   cfgScale = 4.0,
   onNegativePromptChange,
   onGuidanceScaleChange,
@@ -257,18 +261,48 @@ export default function Sidebar({
   onExportEvaluationJSON,
   onExportEvaluationCSV,
   onInputQualityChange,
+  onCustomSquareSizeChange,
+  // Benchmark mode props with defaults
+  benchmarkFolder = "",
+  benchmarkValidation = null,
+  isValidatingBenchmark = false,
+  benchmarkSampleCount = 0,
+  benchmarkTask = "object-removal",
+  isRunningBenchmark = false,
+  benchmarkProgress = null,
+  benchmarkResults = null,
+  benchmarkPrompt = "",
+  onBenchmarkFolderChange,
+  onBenchmarkFolderValidate,
+  onBenchmarkSampleCountChange,
+  onBenchmarkTaskChange,
+  onBenchmarkPromptChange,
+  onRunBenchmark,
   // Low-end optimization props with defaults
   enable4BitTextEncoder = false,
   enableCpuOffload = false,
   enableMemoryOptimizations = false,
-  enableFlowmatchScheduler = false,
   onEnable4BitTextEncoderChange,
   onEnableCpuOffloadChange,
   onEnableMemoryOptimizationsChange,
-  onEnableFlowmatchSchedulerChange,
+  // Debug panel props with defaults
+  isDebugPanelVisible = false,
+  onDebugPanelVisibilityChange,
 }: SidebarProps) {
   // Translation hook
   const { t } = useLanguage();
+
+  // State for negative prompt toggle - enabled if negativePrompt has value
+  const [isNegativePromptEnabled, setIsNegativePromptEnabled] = useState(
+    () => negativePrompt.trim().length > 0
+  );
+
+  // Sync toggle state when negativePrompt changes externally
+  useEffect(() => {
+    if (negativePrompt.trim().length > 0 && !isNegativePromptEnabled) {
+      setIsNegativePromptEnabled(true);
+    }
+  }, [negativePrompt, isNegativePromptEnabled]);
 
   // Determine if we're in "editing done" state (comparison mode)
   const isEditingDone =
@@ -323,13 +357,13 @@ export default function Sidebar({
     >
       {/* Customize Content - Scrollable content */}
       {isOpen && (
-        <div
-          className="flex-1 px-4 pt-2 pb-8 space-y-6 overflow-y-auto"
-          style={{
-            height: "100%", // Use full height instead of minHeight
-            paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
-          }}
-        >
+          <div
+            className="flex-1 px-4 pt-2 pb-8 space-y-6 overflow-y-auto"
+            style={{
+              height: "100%", // Use full height instead of minHeight
+              paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
+            }}
+          >
           {/* Image Upload Section */}
           {!isEditingDone && (
             <div className="pb-4 border-b border-[var(--border-color)]">
@@ -405,10 +439,55 @@ export default function Sidebar({
                     </button>
                   ))}
                 </div>
+                {/* Custom size input for 1:1 mode */}
+                {inputQuality === "resized" && (
+                  <div className="mt-3 space-y-2">
+                    <label className="text-xs text-[var(--text-secondary)] block">
+                      Kích thước vuông (px):
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={256}
+                        max={2048}
+                        step={64}
+                        value={customSquareSize}
+                        onChange={(e) => {
+                          const value = parseInt(e.target.value) || 1024;
+                          const clamped = Math.max(256, Math.min(2048, value));
+                          onCustomSquareSizeChange?.(clamped);
+                        }}
+                        disabled={isApplyingQuality}
+                        className="w-24 px-2 py-1 text-sm bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:border-[var(--primary-accent)] focus:outline-none"
+                      />
+                      <span className="text-xs text-[var(--text-secondary)]">
+                        × {customSquareSize}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {[512, 768, 1024, 1536, 2048].map((size) => (
+                        <button
+                          key={size}
+                          onClick={() => onCustomSquareSizeChange?.(size)}
+                          disabled={isApplyingQuality}
+                          className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                            customSquareSize === size
+                              ? "bg-[var(--primary-accent)] text-white border-[var(--primary-accent)]"
+                              : "bg-[var(--secondary-bg)] text-[var(--text-secondary)] border-[var(--border-color)] hover:bg-[var(--hover-bg)]"
+                          }`}
+                        >
+                          {size}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {selectedQuality && (
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Đang chọn: {selectedQuality.label} ({selectedQuality.ratio}{" "}
-                    kích thước gốc)
+                  <p className="text-xs text-[var(--text-secondary)] mt-2">
+                    {inputQuality === "resized" 
+                      ? `Ảnh sẽ được resize về ${customSquareSize}×${customSquareSize}`
+                      : `Đang chọn: ${selectedQuality.label} (${selectedQuality.ratio} kích thước gốc)`
+                    }
                   </p>
                 )}
                 {isApplyingQuality && (
@@ -419,8 +498,7 @@ export default function Sidebar({
                 {showOriginalWarning && (
                   <p className="text-xs text-yellow-400">
                     Ảnh lớn ({imageDimensions?.width}×{imageDimensions?.height}
-                    ). Mức Original có thể tốn rất nhiều VRAM, cân nhắc chọn
-                    High hoặc Medium nếu gặp lỗi OOM.
+                    ). Có thể tốn rất nhiều thời gian và VRAM.
                   </p>
                 )}
               </div>
@@ -464,7 +542,7 @@ export default function Sidebar({
                         const apiUrl =
                           process.env.NEXT_PUBLIC_API_URL ||
                           process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL ||
-                          "https://pov3ewvy1mejeo.api.runpod.ai";
+                          "https://nxan2911--artmancer-lightservice-serve.modal.run";
                         window.open(
                           `${apiUrl}/api/visualization/${lastRequestId}/download?format=zip`,
                           "_blank"
@@ -594,7 +672,7 @@ export default function Sidebar({
                           parseInt(e.target.value)
                         )
                       }
-                      className="w-full"
+                      className="w-full accent-[var(--primary-accent)]"
                     />
                   </div>
                   <div>
@@ -609,7 +687,7 @@ export default function Sidebar({
                       onChange={(e) =>
                         onWhiteBalanceTintChange?.(parseInt(e.target.value))
                       }
-                      className="w-full"
+                      className="w-full accent-[var(--primary-accent)]"
                     />
                   </div>
                 </div>
@@ -635,6 +713,10 @@ export default function Sidebar({
                   type="file"
                   accept="image/png,image/jpeg,image/jpg,image/webp"
                   onChange={onReferenceImageUpload}
+                  onClick={(e) => {
+                    // Reset value to allow re-selecting the same file
+                    (e.target as HTMLInputElement).value = "";
+                  }}
                   className="hidden"
                   id="reference-image-upload"
                 />
@@ -1570,15 +1652,11 @@ export default function Sidebar({
                             <input
                               type="number"
                               min="1"
-                              max="50"
+                              max="100"
                               value={maskBrushSize}
                               onChange={(e) => {
                                 const value = parseInt(e.target.value);
-                                if (
-                                  !isNaN(value) &&
-                                  value >= 1 &&
-                                  value <= 50
-                                ) {
+                                if (!isNaN(value)) {
                                   onMaskBrushSizeChange(value);
                                 }
                               }}
@@ -1586,8 +1664,8 @@ export default function Sidebar({
                                 const value = parseInt(e.target.value);
                                 if (isNaN(value) || value < 1) {
                                   onMaskBrushSizeChange(1);
-                                } else if (value > 50) {
-                                  onMaskBrushSizeChange(50);
+                                } else if (value > 100) {
+                                  onMaskBrushSizeChange(100);
                                 }
                               }}
                               className="w-16 px-2 py-1 text-sm bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
@@ -1598,7 +1676,7 @@ export default function Sidebar({
                             <input
                               type="range"
                               min="1"
-                              max="50"
+                              max="100"
                               value={maskBrushSize}
                               onChange={(e) =>
                                 onMaskBrushSizeChange(parseInt(e.target.value))
@@ -1661,18 +1739,42 @@ export default function Sidebar({
                 {t("sidebar.advanced")}
               </h3>
               <div className="space-y-6">
-                {/* Negative Prompt */}
+                {/* Negative Prompt with Toggle */}
                 <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.negativePrompt")}
-                  </label>
-                  <textarea
-                    placeholder={t("sidebar.negativePromptPlaceholder")}
-                    rows={2}
-                    value={negativePrompt}
-                    onChange={(e) => onNegativePromptChange?.(e.target.value)}
-                    className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
-                  />
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-[var(--text-secondary)] text-sm">
+                      {t("sidebar.negativePrompt")}
+                    </label>
+                    <button
+                      onClick={() => {
+                        const newEnabled = !isNegativePromptEnabled;
+                        setIsNegativePromptEnabled(newEnabled);
+                        if (!newEnabled) {
+                          onNegativePromptChange?.("");
+                        }
+                      }}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${
+                        isNegativePromptEnabled
+                          ? "bg-[var(--primary-accent)]"
+                          : "bg-[var(--border-color)]"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                          isNegativePromptEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  {isNegativePromptEnabled && (
+                    <textarea
+                      placeholder={t("sidebar.negativePromptPlaceholder")}
+                      rows={2}
+                      value={negativePrompt}
+                      onChange={(e) => onNegativePromptChange?.(e.target.value)}
+                      className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
+                    />
+                  )}
                 </div>
 
                 {/* Guidance Scale */}
@@ -1729,19 +1831,19 @@ export default function Sidebar({
                     </label>
                     <input
                       type="number"
-                      min="10"
+                      min="1"
                       max="100"
                       value={inferenceSteps}
                       onChange={(e) => {
                         const value = parseInt(e.target.value);
-                        if (!isNaN(value) && value >= 10 && value <= 100) {
+                        if (!isNaN(value)) {
                           onInferenceStepsChange?.(value);
                         }
                       }}
                       onBlur={(e) => {
                         const value = parseInt(e.target.value);
-                        if (isNaN(value) || value < 10) {
-                          onInferenceStepsChange?.(10);
+                        if (isNaN(value) || value < 1) {
+                          onInferenceStepsChange?.(1);
                         } else if (value > 100) {
                           onInferenceStepsChange?.(100);
                         }
@@ -1751,7 +1853,7 @@ export default function Sidebar({
                   </div>
                   <input
                     type="range"
-                    min="10"
+                    min="1"
                     max="100"
                     value={inferenceSteps}
                     onChange={(e) =>
@@ -1765,7 +1867,8 @@ export default function Sidebar({
                   </div>
                 </div>
 
-                {/* True CFG Scale */}
+                {/* True CFG Scale - only show when negative prompt has value */}
+                {negativePrompt.trim().length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="text-[var(--text-secondary)] text-sm">
@@ -1779,7 +1882,7 @@ export default function Sidebar({
                       value={cfgScale.toFixed(1)}
                       onChange={(e) => {
                         const value = parseFloat(e.target.value);
-                        if (!isNaN(value) && value >= 1 && value <= 5) {
+                        if (!isNaN(value)) {
                           onCfgScaleChange?.(value);
                         }
                       }}
@@ -1809,6 +1912,8 @@ export default function Sidebar({
                     {t("sidebar.cfgGuidanceDescription")}
                   </p>
                 </div>
+                )}
+
               </div>
             </div>
           )}
@@ -1895,33 +2000,11 @@ export default function Sidebar({
                   </label>
                 </div>
 
-                {/* FlowMatch Scheduler */}
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
-                      FlowMatch Scheduler
-                    </label>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Sử dụng FlowMatchEulerDiscreteScheduler thay vì scheduler
-                      mặc định
-                    </p>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={enableFlowmatchScheduler}
-                      onChange={(e) =>
-                        onEnableFlowmatchSchedulerChange?.(e.target.checked)
-                      }
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
-                  </label>
-                </div>
               </div>
             </div>
           )}
-        </div>
+
+          </div>
       )}
 
       {/* Resize Handle - Attached to sidebar for smooth movement */}

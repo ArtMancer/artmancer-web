@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Global model instance (lazy loaded)
 _fastsam_model: Optional[FastSAM] = None
-_model_path = "FastSAM-s.pt"  # Will auto-download on first use
+_model_path = "FastSAM-x.pt"  # FastSAM-x: larger, more accurate (~145MB)
 
 
 def get_model() -> FastSAM:
@@ -40,11 +40,11 @@ def get_model() -> FastSAM:
                 "FastSAM may run slowly or fail."
             )
         
-        logger.info("Loading FastSAM-s model (this may take a moment on first use)...")
+        logger.info("Loading FastSAM-x model (this may take a moment on first use)...")
         try:
-            # FastSAM-s will auto-download if not present
+            # FastSAM-x will auto-download if not present (~145MB)
             _fastsam_model = FastSAM(_model_path)
-            logger.info("FastSAM-s model loaded successfully")
+            logger.info("FastSAM-x model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load FastSAM model: {e}")
             raise RuntimeError(f"Failed to load FastSAM model: {e}")

@@ -6,9 +6,11 @@ import {
   MdLightMode,
   MdDarkMode,
   MdCheck,
+  MdBugReport,
 } from "react-icons/md";
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useTheme, useLanguage } from "@/contexts";
+import { useTheme, useLanguage, useServer } from "@/contexts";
+import ServerControl from "@/components/ServerControl";
 
 interface HeaderProps {
   onSummon: (prompt: string) => void;
@@ -17,6 +19,9 @@ interface HeaderProps {
   isGenerating?: boolean;
   aiTask?: "white-balance" | "object-insert" | "object-removal" | "evaluation";
   onCancel?: () => void;
+  // Debug panel props
+  isDebugPanelVisible?: boolean;
+  onDebugPanelVisibilityChange?: (visible: boolean) => void;
 }
 
 export default function Header({
@@ -26,6 +31,9 @@ export default function Header({
   isGenerating = false,
   aiTask,
   onCancel,
+  // Debug panel props
+  isDebugPanelVisible = false,
+  onDebugPanelVisibilityChange,
 }: HeaderProps) {
   const [prompt, setPrompt] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -35,6 +43,7 @@ export default function Header({
 
   const { theme, toggleTheme } = useTheme();
   const { language, setLanguage, t } = useLanguage();
+  const { isReady } = useServer();
 
   // Function to handle modal opening with animation
   const handleOpenModal = useCallback(() => {
@@ -75,6 +84,7 @@ export default function Header({
   }, [isSettingsOpen, isClosing, handleCloseModal]);
 
   const handleSubmit = () => {
+    if (!isReady) return; // Không cho submit nếu server chưa sẵn sàng
     const promptValue = prompt.trim();
     if (aiTask === "white-balance" || promptValue) {
       onSummon(promptValue);
@@ -103,20 +113,31 @@ export default function Header({
         </div>
 
         {/* Input Field and Edit Button */}
-        <div className="flex-1 max-w-2xl mx-4 flex gap-3 items-center">
+        <div className="flex-1 max-w-2xl mx-4 flex gap-3 items-center relative">
+          {!isReady && (
+            <div className="absolute inset-0 bg-gray-100/80 dark:bg-gray-900/80 backdrop-blur-sm z-10 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-600 grid place-items-center">
+              <p className="text-gray-500 dark:text-gray-400 font-medium text-center text-sm">
+                Hệ thống đang Offline
+              </p>
+            </div>
+          )}
           <input
             type="text"
             placeholder={t("header.placeholder")}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isGenerating}
-            className="flex-1 px-4 py-3 bg-transparent border-2 border-[var(--primary-accent)] rounded-lg text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--highlight-accent)] focus:outline-none transition-colors text-sm h-12 disabled:opacity-50"
+            disabled={isGenerating || !isReady}
+            className={`flex-1 px-4 py-3 bg-transparent border-2 border-[var(--primary-accent)] rounded-lg text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--highlight-accent)] focus:outline-none transition-colors h-12 disabled:opacity-50 ${
+              isReady ? "text-sm" : "text-xs"
+            }`}
           />
           {isGenerating && onCancel ? (
             <button
               onClick={onCancel}
-              className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12"
+              className={`px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors flex-shrink-0 h-12 ${
+                isReady ? "text-sm" : "text-xs"
+              }`}
             >
               {t("header.cancel")}
             </button>
@@ -124,9 +145,13 @@ export default function Header({
             <button
               onClick={handleSubmit}
               disabled={
-                isGenerating || (!prompt.trim() && aiTask !== "white-balance")
+                !isReady ||
+                isGenerating ||
+                (!prompt.trim() && aiTask !== "white-balance")
               }
-              className="px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors text-sm flex-shrink-0 h-12 disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`px-6 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white font-semibold rounded-lg transition-colors flex-shrink-0 h-12 disabled:opacity-50 disabled:cursor-not-allowed ${
+                isReady ? "text-sm" : "text-xs"
+              }`}
             >
               {isGenerating ? t("header.generating") : t("header.edit")}
             </button>
@@ -135,6 +160,9 @@ export default function Header({
 
         {/* Header Actions */}
         <div className="flex items-center gap-4 flex-shrink-0">
+          {/* Server Control */}
+          <ServerControl />
+          
           {/* Settings Button */}
           <button
             onClick={() => {
@@ -286,7 +314,29 @@ export default function Header({
                 </div>
               </div>
 
-              {/* Benchmark mode toggle removed */}
+              {/* Debug Panel Setting */}
+              <div>
+                <h4 className="text-[var(--text-primary)] font-medium mb-4 flex items-center gap-2">
+                  <MdBugReport
+                    className="text-[var(--primary-accent)]"
+                    size={18}
+                  />
+                  Debug
+                </h4>
+                <div className="flex items-center justify-between">
+                  <label className="relative inline-flex items-center cursor-pointer ml-4">
+                    <input
+                      type="checkbox"
+                      checked={isDebugPanelVisible}
+                      onChange={(e) =>
+                        onDebugPanelVisibilityChange?.(e.target.checked)
+                      }
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
+                  </label>
+                </div>
+              </div>
             </div>
 
             {/* Modal Footer */}

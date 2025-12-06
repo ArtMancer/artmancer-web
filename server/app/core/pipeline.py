@@ -87,9 +87,13 @@ def get_device_info() -> Dict[str, Any]:
     return info
 
 
-async def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
+def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     """
     Load Qwen pipeline for the specified task.
+    
+    Uses sync def because:
+    - Runs on Heavy Worker (A100) where model loading is blocking
+    - Modal automatically handles threading for sync functions
     
     Args:
         task_type: "insertion", "removal", or "white-balance"
@@ -99,7 +103,7 @@ async def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     """
     # All 3 tasks use the same Qwen loader, differing only in checkpoint and parameters.
     from .qwen_loader import load_qwen_pipeline
-    return await load_qwen_pipeline(task_type)
+    return load_qwen_pipeline(task_type)
 
 
 def clear_pipeline_cache() -> None:

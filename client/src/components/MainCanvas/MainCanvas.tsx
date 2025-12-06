@@ -11,6 +11,7 @@ import MaskCanvasLayer from "./layers/MaskCanvasLayer";
 import EdgeOverlayLayer from "./layers/EdgeOverlayLayer";
 import UIOverlayLayer from "./layers/UIOverlayLayer";
 import LoadingOverlayLayer from "./layers/LoadingOverlayLayer";
+import BrushPreviewLayer from "./layers/BrushPreviewLayer";
 
 interface CanvasProps {
   // Image state
@@ -26,6 +27,7 @@ interface CanvasProps {
   isMaskingMode: boolean;
   isMaskDrawing: boolean;
   maskBrushSize: number;
+  maskToolType?: "brush" | "box";
   isSmartMaskLoading?: boolean;
 
   // Toolbox state
@@ -85,6 +87,7 @@ export default function Canvas({
   isMaskingMode,
   isMaskDrawing,
   maskBrushSize,
+  maskToolType = "brush",
   isSmartMaskLoading = false,
   originalImage,
   modifiedImage,
@@ -319,6 +322,8 @@ export default function Canvas({
                 ? "wait"
                 : isComparisonMode
                 ? "col-resize"
+                : isMaskingMode && maskToolType === "brush"
+                ? "none"
                 : isMaskingMode
                 ? "crosshair"
                 : "default"
@@ -379,6 +384,17 @@ export default function Canvas({
                     maskCanvasRef={maskCanvasRef}
                     imageDimensions={imageDimensions}
                     displayScale={displayScale}
+                  />
+                  <BrushPreviewLayer
+                    isMaskingMode={isMaskingMode}
+                    maskBrushSize={maskBrushSize}
+                    imageDimensions={imageDimensions}
+                    displayScale={displayScale}
+                    transform={transform}
+                    viewportZoom={viewportZoom}
+                    imageContainerRef={imageContainerRef}
+                    maskCanvasRef={maskCanvasRef}
+                    maskToolType={maskToolType}
                   />
                   {edgeOverlayCanvasRef && (
                     <EdgeOverlayLayer

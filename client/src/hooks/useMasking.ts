@@ -57,10 +57,6 @@ class CanvasDrawCommand implements Command {
   }
 
   hasContent(): boolean {
-    console.log('🔍 CanvasDrawCommand.hasContent():', {
-      currentStateHasContent: this.currentState.hasContent,
-      previousStateHasContent: this.previousState.hasContent
-    });
     return this.currentState.hasContent;
   }
 
@@ -174,16 +170,8 @@ class CommandHistory {
   hasContent(): boolean {
     if (this.currentIndex >= 0 && this.currentIndex < this.commands.length) {
       const command = this.commands[this.currentIndex];
-      const hasContent = command.hasContent();
-      console.log('🔍 CommandHistory.hasContent() check:', {
-        currentIndex: this.currentIndex,
-        commandsLength: this.commands.length,
-        commandType: command.constructor.name,
-        commandHasContent: hasContent
-      });
-      return hasContent;
+      return command.hasContent();
     }
-    console.log('🔍 CommandHistory.hasContent() - no valid command at current index');
     return false;
   }
 
@@ -222,7 +210,7 @@ export function useMasking(
   // Masking state
   const [isMaskingMode, setIsMaskingMode] = useState(false);
   const [isMaskDrawing, setIsMaskDrawing] = useState(false);
-  const [maskBrushSize, setMaskBrushSize] = useState(40);
+  const [maskBrushSize, setMaskBrushSize] = useState(20); // Default 20% for better visibility
   const [maskToolType, setMaskToolType] = useState<'brush' | 'box'>('brush');
   const [enableEdgeDetection, setEnableEdgeDetection] = useState(false);
   const [enableFloodFill, setEnableFloodFill] = useState(false);
@@ -245,7 +233,7 @@ export function useMasking(
   const strokeStartTimeRef = useRef<number>(0);
   const strokeStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const strokeMovementRef = useRef<number>(0); // Total movement distance in pixels
-
+  
   // Command Pattern for undo/redo
   const commandHistory = useRef(new CommandHistory(20));
   const [historyState, setHistoryState] = useState({
@@ -271,7 +259,6 @@ export function useMasking(
       currentIndex: history.getCurrentIndex()
     };
 
-    console.log('🔄 Updating history state:', newState);
     setHistoryState(newState);
   }, []);
 
@@ -312,7 +299,6 @@ export function useMasking(
     generateEdgeMask().then((mask) => {
       if (!isCancelled) {
         setEdgeMask(mask);
-        console.log('✅ Edge mask generated:', mask ? 'success' : 'failed');
       }
     }).catch((error) => {
       if (!isCancelled) {
@@ -346,7 +332,6 @@ export function useMasking(
     // Only clear history when transitioning from masking mode to non-masking mode
     // This ensures we don't clear history when entering masking mode
     if (!isMaskingMode) {
-      console.log('Exiting masking mode - clearing command history');
       commandHistory.current.clear();
       updateHistoryState();
 
@@ -356,11 +341,8 @@ export function useMasking(
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          console.log('Canvas cleared on masking mode exit');
         }
       }
-    } else {
-      console.log('Entering masking mode - starting with fresh history');
     }
   }, [isMaskingMode, updateHistoryState]);
 
@@ -368,7 +350,6 @@ export function useMasking(
   useEffect(() => {
     const canvas = maskCanvasRef.current;
     if (!canvas) {
-      console.log('Canvas not found during initialization');
       return;
     }
 
@@ -380,38 +361,35 @@ export function useMasking(
 
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      console.log('Could not get canvas context');
       return;
     }
 
-    console.log('Initializing canvas context');
     // Set brush to maximum hardness with sharp edges
     ctx.lineCap = 'butt';  // Sharp line ends instead of round
     ctx.lineJoin = 'miter';  // Sharp corners instead of round
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
 
-    // Disable anti-aliasing for maximum hardness (crisp edges)
-    ctx.imageSmoothingEnabled = false;
+    // Enable anti-aliasing for smooth brush edges (like Krita/Photoshop)
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     // Set initial drawing properties
     if (imageDimensions) {
       const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
-      const brushSize = (maskBrushSize / 100) * (baseImageSize / 10);
+      // Dynamic brush size: scale from 0.5% to 10% of base image size
+      // This gives better range: for 1024px image, brush ranges from ~5px to ~100px
+      const brushSize = (maskBrushSize / 100) * (baseImageSize / 5);
       ctx.lineWidth = brushSize;
     } else {
       ctx.lineWidth = 5; // Default line width
     }
+    ctx.lineCap = 'round'; // Round brush tip like Krita/Photoshop
+    ctx.lineJoin = 'round'; // Round line joins
     ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
     ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
 
     ctxRef.current = ctx;
-    console.log('Canvas context initialized with:', {
-      canvasSize: `${canvas.width}x${canvas.height}`,
-      lineWidth: ctx.lineWidth,
-      strokeStyle: ctx.strokeStyle,
-      fillStyle: ctx.fillStyle
-    });
   }, [imageDimensions, maskBrushSize]);
 
   // Update canvas drawing properties when brush settings change
@@ -421,22 +399,21 @@ export function useMasking(
 
     // Calculate brush size relative to the base image size
     const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
-    // Don't scale brush size by viewport zoom - keep it consistent relative to image
-    const brushSize = (maskBrushSize / 100) * (baseImageSize / 10);
+    // Dynamic brush size: scale from 0.5% to 10% of base image size
+    // This gives better range: for 1024px image, brush ranges from ~5px to ~100px
+    const brushSize = (maskBrushSize / 100) * (baseImageSize / 5);
     const opacity = 0.5; // Fixed 50% opacity
-
-    console.log('Updating canvas properties:', {
-      maskBrushSize,
-      brushSize,
-      opacity,
-      baseImageSize
-    });
 
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
     ctx.lineWidth = brushSize;
+    ctx.lineCap = 'round'; // Round brush tip like Krita/Photoshop
+    ctx.lineJoin = 'round'; // Round line joins
     ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
     ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
+    // Enable anti-aliasing for smooth brush edges
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
   }, [maskBrushSize, imageDimensions]);
 
   // Helper function to capture current canvas state
@@ -454,49 +431,21 @@ export function useMasking(
     }
 
     try {
-      console.log('Capturing canvas state:', {
-        canvasSize: `${canvas.width}x${canvas.height}`,
-        contextExists: !!ctx
-      });
-
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
       let hasContent = false;
-      let pixelsChecked = 0;
-      const nonZeroPixels = 0;
-      let rgbPixels = 0;
-      let alphaPixels = 0;
 
-      // Check if canvas has any visible content (RGB or alpha > 0)
+      // Check full buffer to avoid missing sparse masks
       for (let i = 0; i < data.length; i += 4) {
-        pixelsChecked++;
         const r = data[i];
         const g = data[i + 1];
         const b = data[i + 2];
         const a = data[i + 3];
-
-        if (r > 0 || g > 0 || b > 0) {
-          rgbPixels++;
+        if (r > 0 || g > 0 || b > 0 || a > 0) {
           hasContent = true;
+          break;
         }
-        if (a > 0) {
-          alphaPixels++;
-          hasContent = true;
-        }
-
-        if (hasContent && pixelsChecked > 1000) break; // Early exit after finding content
       }
-
-      console.log('🔍 Canvas content detection:', {
-        totalPixels: data.length / 4,
-        pixelsChecked,
-        rgbPixels,
-        alphaPixels,
-        hasContent,
-        strokeStyle: ctx.strokeStyle,
-        fillStyle: ctx.fillStyle,
-        samplePixel: `rgba(${data[0]}, ${data[1]}, ${data[2]}, ${data[3]})`
-      });
 
       return { imageData, hasContent };
     } catch (error) {
@@ -641,22 +590,6 @@ export function useMasking(
     // Transform is applied at TransformLayer level, bounding rect already accounts for it
     const x = relativeX * imageDimensions.width;
     const y = relativeY * imageDimensions.height;
-
-    console.log('📍 Canvas coordinates:', {
-      mouseX: e.clientX,
-      mouseY: e.clientY,
-      canvasLeft: canvasRect.left,
-      canvasTop: canvasRect.top,
-      canvasWidth: canvasRect.width,
-      canvasHeight: canvasRect.height,
-      relativeX,
-      relativeY,
-      finalX: x,
-      finalY: y,
-      canvasInternalWidth: canvas.width,
-      canvasInternalHeight: canvas.height,
-      imageDimensions,
-    });
 
     return { x, y };
   }, [imageDimensions]);
@@ -804,10 +737,6 @@ export function useMasking(
 
     // Capture initial state before drawing for command creation
     initialDrawState.current = captureCanvasState();
-    console.log('🎨 Starting stroke - Initial state captured:', {
-      hasContent: initialDrawState.current.hasContent,
-      timestamp: new Date().toLocaleTimeString()
-    });
 
     const { x, y } = getCanvasCoordinates(e);
     const ctx = ctxRef.current;
@@ -862,7 +791,7 @@ export function useMasking(
       boxCurrentPosRef.current = { x, y };
       
       // Restore canvas state and draw preview box
-      if (initialDrawState.current.imageData) {
+      if (initialDrawState.current?.imageData) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.putImageData(initialDrawState.current.imageData, 0, 0);
       } else {
@@ -890,6 +819,11 @@ export function useMasking(
       // Ensure opacity and composite operation are set correctly before drawing
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
+      // Ensure brush properties are set for round, smooth brush
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       // Ensure strokeStyle with opacity is set (should already be set, but ensure it)
       if (!ctx.strokeStyle || ctx.strokeStyle === 'rgba(0, 0, 0, 0)') {
         ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
@@ -998,8 +932,6 @@ export function useMasking(
       
       // Restore original composite operation
       ctx.globalCompositeOperation = currentComposite;
-      
-      console.log('✅ Smart mask merged into canvas as red transparent');
     } catch (error) {
       console.error('Failed to merge smart mask:', error);
       throw error; // Re-throw to allow error handling upstream
@@ -1297,7 +1229,6 @@ export function useMasking(
           // Handle smart masking for box
           if (enableSmartMasking) {
             // Generate smart mask from box bbox
-            console.log('📦 Box detected, generating smart mask from bbox:', bbox);
             generateSmartMaskFromBox(bbox);
             
             // Don't fill box manually - smart mask will be merged
@@ -1357,7 +1288,6 @@ export function useMasking(
       
       if (isClickOnly) {
         // Click-only: generate mask immediately without debounce
-        console.log('🖱️ Click-only detected, generating mask immediately');
         generateSmartMaskFromStroke();
       } else {
         // Stroke mode: debounce smart mask generation (400ms)
@@ -1375,17 +1305,11 @@ export function useMasking(
     if (canvas && initialDrawState.current) {
       // Capture current state after drawing
       const currentState = captureCanvasState();
-      console.log('💾 Saving stroke as command:', {
-        previousState: { hasContent: initialDrawState.current.hasContent },
-        currentState: { hasContent: currentState.hasContent },
-        timestamp: new Date().toLocaleTimeString()
-      });
 
       const drawCommand = new CanvasDrawCommand(canvas, initialDrawState.current, currentState);
       commandHistory.current.executeCommand(drawCommand);
       updateHistoryState();
 
-      console.log('✅ Stroke saved successfully:', commandHistory.current.getHistoryInfo());
       initialDrawState.current = null;
 
       // Normalize opacity after drawing to ensure consistent visual appearance
@@ -1469,16 +1393,20 @@ export function useMasking(
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1.0; // Opacity is handled by rgba color, not globalAlpha
 
-        // Disable anti-aliasing for maximum hardness (crisp edges)
-        ctx.imageSmoothingEnabled = false;
+        // Enable anti-aliasing for smooth brush edges (like Krita/Photoshop)
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
 
         // Apply current drawing properties
         if (imageDimensions) {
           const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
-          const brushSize = (maskBrushSize / 100) * (baseImageSize / 10);
+          // Dynamic brush size: scale from 0.5% to 10% of base image size
+          const brushSize = (maskBrushSize / 100) * (baseImageSize / 5);
           const opacity = 0.5; // Fixed 50% opacity
 
           ctx.lineWidth = brushSize;
+          ctx.lineCap = 'round'; // Round brush tip
+          ctx.lineJoin = 'round'; // Round line joins
           ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
           ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
         }
@@ -1521,22 +1449,14 @@ export function useMasking(
   // }, [viewportZoom]);
 
   const undoMask = useCallback(() => {
-    console.log('🔙 Undo mask called, current state:', commandHistory.current.getHistoryInfo());
     if (commandHistory.current.undo()) {
       updateHistoryState();
-      console.log('✅ Undo completed, new state:', commandHistory.current.getHistoryInfo());
-    } else {
-      console.log('❌ Undo failed - no commands to undo');
     }
   }, [updateHistoryState]);
 
   const redoMask = useCallback(() => {
-    console.log('🔜 Redo mask called, current state:', commandHistory.current.getHistoryInfo());
     if (commandHistory.current.redo()) {
       updateHistoryState();
-      console.log('✅ Redo completed, new state:', commandHistory.current.getHistoryInfo());
-    } else {
-      console.log('❌ Redo failed - no commands to redo');
     }
   }, [updateHistoryState]);
 
@@ -1549,21 +1469,13 @@ export function useMasking(
 
     // Optimization: Don't create clear command if canvas is already empty
     if (!currentState.hasContent) {
-      console.log('🚫 Clear skipped - canvas already empty');
       return;
     }
-
-    console.log('🧹 Saving clear operation as command:', {
-      previousState: { hasContent: currentState.hasContent },
-      timestamp: new Date().toLocaleTimeString()
-    });
 
     // Create and execute clear command
     const clearCommand = new CanvasClearCommand(canvas, currentState);
     commandHistory.current.executeCommand(clearCommand);
     updateHistoryState();
-
-    console.log('✅ Clear command saved:', commandHistory.current.getHistoryInfo());
   }, [captureCanvasState, updateHistoryState]);
 
   const resetMaskHistory = useCallback(() => {
@@ -1586,17 +1498,10 @@ export function useMasking(
   const toggleMaskingMode = useCallback(() => {
     const wasInMaskingMode = isMaskingMode;
 
-    console.log('Toggling masking mode:', {
-      currentMode: isMaskingMode,
-      willEnterMode: !isMaskingMode,
-      historyLength: commandHistory.current.getHistoryLength()
-    });
-
     setIsMaskingMode(!isMaskingMode);
 
     if (wasInMaskingMode) {
       // Exiting masking mode
-      console.log('Exiting masking mode - preparing for history clear');
       setIsMaskDrawing(false);
 
       // Clear command history immediately for responsive UI
@@ -1609,13 +1514,10 @@ export function useMasking(
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          console.log('Canvas and history cleared on mode exit');
         }
       }
     } else {
-      // Entering masking mode
-      console.log('Entering masking mode - starting fresh');
-      // History is already clear, just ensure drawing state is reset
+      // Entering masking mode - ensure drawing state is reset
       setIsMaskDrawing(false);
     }
   }, [isMaskingMode, updateHistoryState]);
@@ -1710,7 +1612,6 @@ export function useMasking(
     enableSmartMasking,
     setEnableSmartMasking,
     isSmartMaskLoading,
-    generateSmartMaskFromBox,
     generateSmartMaskFromBox,
   };
 }

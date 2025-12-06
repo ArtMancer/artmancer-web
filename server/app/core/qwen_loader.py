@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import gc
 import logging
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+import os
 
 import torch
 
@@ -63,12 +63,17 @@ def get_qwen_pipeline(task_type: str | None = None) -> Optional[DiffusionPipelin
     return _pipeline
 
 
-async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
+def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     """
     Load QwenImageEditPlusPipeline following reference code style:
     - Use single pipeline instance for all tasks
     - Load multiple LoRA adapters (one per task) without fusing
     - Switch adapters when needed
+    
+    Uses sync def because:
+    - Runs on Heavy Worker (A100) where model loading is blocking
+    - Modal automatically handles threading for sync functions
+    - PyTorch operations are CPU/GPU bound, not I/O bound
     """
     global _pipeline, _loaded_adapters, _current_adapter, _is_fused
     
@@ -107,7 +112,8 @@ async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
         # Flush memory before loading
         _flush_memory()
         
-        base_model_id = "Qwen/Qwen-Image-Edit-2509"
+        # Allow overriding base model path via environment (for Modal Volume + local SSD cache)
+        base_model_id = os.getenv("MODEL_PATH") or "Qwen/Qwen-Image-Edit-2509"
         logger.info(
             "🔄 Loading QwenImageEditPlusPipeline base model '%s' on %s (dtype=%s)",
             base_model_id,
@@ -130,9 +136,8 @@ async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                     bnb_4bit_compute_dtype=torch.bfloat16,
                 )
                 
-                # Run blocking I/O in thread pool
-                text_encoder = await asyncio.to_thread(
-                    Qwen2_5_VLForConditionalGeneration.from_pretrained,
+                # Load text encoder (sync - Modal handles threading)
+                text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                     base_model_id,
                     subfolder="text_encoder",
                     quantization_config=bnb_config,
@@ -164,9 +169,8 @@ async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                 pipeline_kwargs["low_cpu_mem_usage"] = True
                 logger.info("✅ Enabled memory optimizations (safetensors + low_cpu_mem_usage)")
             
-            # Run blocking I/O in thread pool
-            _pipeline = await asyncio.to_thread(
-                QwenImageEditPlusPipeline.from_pretrained,
+            # Load pipeline (sync - Modal handles threading)
+            _pipeline = QwenImageEditPlusPipeline.from_pretrained(
                 base_model_id,
                 **pipeline_kwargs
             )
@@ -244,9 +248,8 @@ async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             logger.debug("Pipeline already has peft_config, loading additional adapter '%s'", adapter_name)
         
         try:
-            # Run blocking I/O in thread pool
-            await asyncio.to_thread(
-                _pipeline.load_lora_weights,
+            # Load LoRA weights (sync - Modal handles threading)
+            _pipeline.load_lora_weights(
                 str(lora_path),
                 adapter_name=adapter_name
             )
@@ -267,12 +270,12 @@ async def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
         if _is_fused and _current_adapter is not None:
             try:
                 logger.debug("Unfusing adapter '%s' before switch", _current_adapter)
-                await asyncio.to_thread(_pipeline.unfuse_lora)
+                _pipeline.unfuse_lora()
                 _is_fused = False
             except Exception as exc:
                 logger.warning("Failed to unfuse adapter: %s", exc)
         # Set the new adapter as active
-        await asyncio.to_thread(_pipeline.set_adapters, adapter_name)
+        _pipeline.set_adapters(adapter_name)
         _current_adapter = adapter_name
         logger.info("✅ Switched to adapter '%s'", adapter_name)
     else:

@@ -1,4 +1,5 @@
 from .schemas import (
+    DebugInfo,
     EvaluationImagePair,
     EvaluationRequest,
     EvaluationResponse,
@@ -13,6 +14,7 @@ from .schemas import (
 )
 
 __all__ = [
+    "DebugInfo",
     "EvaluationImagePair",
     "EvaluationRequest",
     "EvaluationResponse",

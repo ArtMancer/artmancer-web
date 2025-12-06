@@ -17,9 +17,14 @@ class GenerationRequest(BaseModel):
             "subsequent items are additional condition images."
         ),
     )
+    # Reference image (for object-insert task - used as object conditional)
+    reference_image: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded reference image (required for insertion task, used as object conditional)"
+    )
     width: Optional[int] = Field(None, ge=256, le=2048)
     height: Optional[int] = Field(None, ge=256, le=2048)
-    num_inference_steps: Optional[int] = Field(20, ge=1, le=100)
+    num_inference_steps: Optional[int] = Field(10, ge=1, le=100)
     guidance_scale: Optional[float] = Field(1.0, ge=0.5, le=20)
     true_cfg_scale: Optional[float] = Field(4.0, ge=0.5, le=15)
     negative_prompt: Optional[str] = Field(default=None)
@@ -53,6 +58,22 @@ class GenerationRequest(BaseModel):
     )
 
 
+class DebugInfo(BaseModel):
+    """Debug information for generation request."""
+    conditional_images: Optional[List[str]] = Field(
+        default=None, 
+        description="Base64 encoded conditional images used for generation (mask, background, object, mae)"
+    )
+    conditional_labels: Optional[List[str]] = Field(
+        default=None,
+        description="Labels for each conditional image"
+    )
+    input_image_size: Optional[str] = Field(default=None, description="Original input image size")
+    output_image_size: Optional[str] = Field(default=None, description="Final output image size")
+    lora_adapter: Optional[str] = Field(default=None, description="LoRA adapter used")
+    loaded_adapters: Optional[List[str]] = Field(default=None, description="All loaded LoRA adapters")
+
+
 class GenerationResponse(BaseModel):
     success: bool
     image: str
@@ -60,6 +81,7 @@ class GenerationResponse(BaseModel):
     model_used: str
     parameters_used: Dict[str, str | float | int | None]
     request_id: Optional[str] = Field(default=None, description="Request ID for accessing visualization images")
+    debug_info: Optional[DebugInfo] = Field(default=None, description="Debug information (conditional images, parameters)")
 
 
 class ModelSettings(BaseModel):

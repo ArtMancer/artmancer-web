@@ -1,25 +1,21 @@
 // API service for ArtMancer backend integration
-// API URL is configured via NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL environment variable
-// To change: Set NEXT_PUBLIC_API_URL or NEXT_PUBLIC_RUNPOD_GENERATE_URL in .env.local file (without trailing slash)
-// RunPod endpoint format: https://ENDPOINT_ID.api.runpod.ai
-// Default RunPod endpoint: https://pov3ewvy1mejeo.api.runpod.ai
-// @ts-ignore - process.env is available in Next.js runtime
-const RAW_RUNPOD_GENERATE_URL = process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL?.trim();
-const RUNPOD_GENERATE_URL = RAW_RUNPOD_GENERATE_URL?.replace(/\/+$/, '');
-// @ts-ignore - process.env is available in Next.js runtime
-const RAW_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.trim();
-// Priority: API_BASE_URL > RUNPOD_GENERATE_URL > Default RunPod endpoint > Local dev
-const DEFAULT_RUNPOD_ENDPOINT = 'https://pov3ewvy1mejeo.api.runpod.ai';
-const API_BASE_URL = (
-  RAW_API_BASE_URL && RAW_API_BASE_URL.length > 0
-    ? RAW_API_BASE_URL
-    : RUNPOD_GENERATE_URL && RUNPOD_GENERATE_URL.length > 0
-      ? RUNPOD_GENERATE_URL
-      : DEFAULT_RUNPOD_ENDPOINT // Default to RunPod endpoint
-).replace(/\/+$/, '');
+// Light (general API) URL is configured via NEXT_PUBLIC_API_URL
+// Heavy (generation) URL is configured via NEXT_PUBLIC_RUNPOD_GENERATE_URL
+// Defaults point to Modal web endpoints if env vars are not provided
+const sanitizeUrl = (url?: string | null) => url?.trim().replace(/\/+$/, '');
+const DEFAULT_LIGHT_ENDPOINT = 'https://nxan2911--artmancer-lightservice-serve.modal.run';
+const DEFAULT_HEAVY_ENDPOINT = 'https://nxan2911--artmancer-heavyservice-serve.modal.run';
 
-// Check if using RunPod endpoint (for health check retry logic)
-const IS_RUNPOD_ENDPOINT = API_BASE_URL.includes('api.runpod.ai') || !!RUNPOD_GENERATE_URL;
+// @ts-ignore - process.env is available in Next.js runtime
+const RAW_LIGHT_API_URL = sanitizeUrl(process.env.NEXT_PUBLIC_API_URL);
+// @ts-ignore - process.env is available in Next.js runtime
+const RAW_HEAVY_API_URL = sanitizeUrl(process.env.NEXT_PUBLIC_RUNPOD_GENERATE_URL);
+
+const API_BASE_URL = RAW_LIGHT_API_URL ?? DEFAULT_LIGHT_ENDPOINT;
+const GENERATE_BASE_URL = RAW_HEAVY_API_URL ?? DEFAULT_HEAVY_ENDPOINT;
+
+const isRemoteEndpoint = (url: string) =>
+  url.includes('modal.run') || url.includes('api.runpod.ai');
 
 export type InputQualityPreset = "resized" | "original";
 
@@ -65,6 +61,19 @@ export interface GenerationRequest {
   enable_flowmatch_scheduler?: boolean; // Use FlowMatchEulerDiscreteScheduler instead of default
 }
 
+export interface DebugInfo {
+  conditional_images?: string[]; // Base64 encoded conditional images (mask, background, object, mae)
+  conditional_labels?: string[]; // Labels for each conditional image
+  input_image_size?: string;
+  output_image_size?: string;
+  lora_adapter?: string;
+  loaded_adapters?: string[];
+  // Prompt info
+  original_prompt?: string;
+  refined_prompt?: string;
+  prompt_was_refined?: boolean;
+}
+
 export interface GenerationResponse {
   success: boolean;
   image: string; // Base64 encoded image
@@ -72,6 +81,7 @@ export interface GenerationResponse {
   model_used: string;
   parameters_used: Record<string, string | number | null>;
   request_id?: string; // Request ID for accessing visualization images
+  debug_info?: DebugInfo; // Debug information (conditional images, parameters)
 }
 
 export interface ApiError {
@@ -148,27 +158,30 @@ export interface EvaluationResponse {
 
 class ApiService {
   private baseUrl: string;
+  private generationUrl: string;
 
-  constructor(baseUrl: string = API_BASE_URL) {
+  constructor(baseUrl: string = API_BASE_URL, generationUrl: string = GENERATE_BASE_URL) {
     this.baseUrl = baseUrl;
+    this.generationUrl = generationUrl || baseUrl;
   }
 
   /**
-   * Health check with retry logic for RunPod cold start handling.
-   * RunPod workers need time to initialize, so we retry the /ping endpoint
-   * before sending actual requests.
+   * Health check with retry logic for RunPod/Modal cold start handling.
+   * Workers need time to initialize, so we retry the /ping endpoint.
+   * Returns true if healthy, false if not (but doesn't block generation).
    */
   private async healthCheckWithRetry(
-    maxRetries: number = 5,
-    delay: number = 10000
+    targetBaseUrl: string,
+    maxRetries: number = 3,
+    delay: number = 5000
   ): Promise<boolean> {
-    if (!IS_RUNPOD_ENDPOINT) {
-      // Skip health check for non-RunPod endpoints
+    if (!isRemoteEndpoint(targetBaseUrl)) {
+      // Skip health check for local endpoints
       return true;
     }
 
-    const pingUrl = `${this.baseUrl}/ping`;
-    console.log('🏥 Starting health check for RunPod endpoint...');
+    const pingUrl = `${targetBaseUrl}/ping`;
+    console.log(`🏥 Starting health check for remote endpoint ${targetBaseUrl} ...`);
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
@@ -177,7 +190,7 @@ class ApiService {
           headers: {
             'Content-Type': 'application/json',
           },
-          signal: AbortSignal.timeout(10000), // 10 second timeout per check
+          signal: AbortSignal.timeout(30000), // 30 second timeout per check (increased for cold start)
         });
 
         if (response.status === 200) {
@@ -188,6 +201,7 @@ class ApiService {
           console.log(`⏳ Worker initializing (attempt ${attempt + 1}/${maxRetries})...`);
         } else {
           console.warn(`⚠️ Health check returned status ${response.status}`);
+          // Don't fail immediately, worker might still be starting
         }
       } catch (error) {
         console.log(`⚠️ Health check attempt ${attempt + 1} failed:`, error);
@@ -199,8 +213,8 @@ class ApiService {
       }
     }
 
-    console.error('✗ Health check failed after all retries - worker may not be ready');
-    return false;
+    console.warn('⚠️ Health check failed after retries - will still attempt generation');
+    return true; // Return true to allow generation to proceed anyway
   }
 
   private async makeRequest<T>(
@@ -410,26 +424,24 @@ class ApiService {
 
   // Generate image
   async generateImage(request: GenerationRequest, signal?: AbortSignal): Promise<GenerationResponse> {
-    // Use API_BASE_URL (supports RunPod and local development)
-    const url = `${this.baseUrl}/`;
+    // Use dedicated generation endpoint (heavy Modal app)
+    const generationBaseUrl = this.generationUrl || this.baseUrl;
+    const url = `${generationBaseUrl}/api/generate`;
+    const isRemoteGenerationEndpoint = isRemoteEndpoint(generationBaseUrl);
 
-    // Health check for RunPod endpoints (handle cold start)
-    if (IS_RUNPOD_ENDPOINT) {
-      const isHealthy = await this.healthCheckWithRetry(5, 10000);
-      if (!isHealthy) {
-        throw new Error(JSON.stringify({
-          status: 0,
-          error: 'RunPod worker failed to initialize. Please try again in a few moments.',
-          error_type: 'cold_start_timeout',
-          endpoint: '/',
-        }));
-      }
+    // Health check for remote endpoints (handle cold start)
+    // This is a soft check - we'll still try to generate even if health check fails
+    if (isRemoteGenerationEndpoint) {
+      await this.healthCheckWithRetry(generationBaseUrl, 3, 5000);
+      // Continue with generation regardless of health check result
+      // The actual request will timeout or succeed on its own
     }
 
     console.log('🌐 API Request:', {
       method: 'POST',
       url,
-      endpoint: IS_RUNPOD_ENDPOINT ? 'RunPod' : 'Local',
+      endpoint: isRemoteGenerationEndpoint ? 'Remote' : 'Local',
+      generationBaseUrl,
       hasBody: true,
       hasSignal: !!signal,
     });
@@ -464,7 +476,7 @@ class ApiService {
         throw new Error(JSON.stringify({
           status: response.status,
           error: `Invalid JSON response: ${text.substring(0, 100)}`,
-          endpoint: '/'
+          endpoint: '/api/generate'
         }));
       }
 
@@ -475,8 +487,8 @@ class ApiService {
         }
         let errorType = responseData?.error_type || 'unknown_error';
 
-        // Handle RunPod-specific timeout errors
-        if (IS_RUNPOD_ENDPOINT) {
+        // Handle remote timeout errors
+        if (isRemoteGenerationEndpoint) {
           if (response.status === 400) {
             errorMessage = 'No worker available. The endpoint may be initializing. Please try again.';
             errorType = 'no_worker_available';
@@ -495,7 +507,7 @@ class ApiService {
           error: errorMessage,
           error_type: errorType,
           details: responseData?.details || null,
-          endpoint: '/'
+          endpoint: '/api/generate'
         };
 
         console.error('API Error:', errorDetails);
@@ -511,7 +523,7 @@ class ApiService {
           status: 0,
           error: 'Request cancelled',
           error_type: 'cancelled',
-          endpoint: '/'
+          endpoint: '/api/generate'
         }));
       }
 
@@ -520,7 +532,7 @@ class ApiService {
         errorType: error instanceof Error ? error.constructor.name : typeof error,
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : undefined,
-        endpoint: '/',
+        endpoint: '/api/generate',
         url,
       };
 
@@ -528,15 +540,15 @@ class ApiService {
       console.error('❌ Raw Error Object:', error);
 
       if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-        const endpointType = IS_RUNPOD_ENDPOINT ? 'RunPod' : 'Local';
+        const endpointType = isRemoteGenerationEndpoint ? 'Remote' : 'Local';
         const networkError = {
           status: 0,
-          error: `Network error: Unable to connect to ${endpointType} endpoint at ${this.baseUrl}. Please check:
+          error: `Network error: Unable to connect to ${endpointType} endpoint at ${generationBaseUrl}. Please check:
 1. Is the endpoint accessible?
 2. Are there any CORS issues?
 3. Is the endpoint URL correct?`,
-          endpoint: '/',
-          baseUrl: this.baseUrl,
+          endpoint: '/api/generate',
+          baseUrl: generationBaseUrl,
           fullUrl: url,
         };
         console.error('🌐 Network Error Details:', networkError);

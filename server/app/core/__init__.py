@@ -1,7 +1,3 @@
-"""Core configuration and pipeline utilities."""
-
-from .config import settings
-from .pipeline import clear_pipeline_cache, get_device_info, load_pipeline
-
-__all__ = ["settings", "load_pipeline", "clear_pipeline_cache", "get_device_info"]
-
+# Core modules are imported individually to avoid loading unnecessary dependencies
+# Heavy Service: from app.core.pipeline import load_pipeline
+# Light Service: from app.core.config import settings
