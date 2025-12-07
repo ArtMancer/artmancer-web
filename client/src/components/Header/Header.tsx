@@ -372,9 +372,7 @@ export default function Header({
               bgcolor: isCustomizeOpen
                 ? "var(--primary-accent)"
                 : "var(--secondary-bg)",
-              color: isCustomizeOpen
-                ? "white"
-                : "var(--text-secondary)",
+              color: isCustomizeOpen ? "white" : "var(--text-secondary)",
               width: 48,
               height: 48,
               "&:hover": {
@@ -488,14 +486,18 @@ export default function Header({
                 <ToggleButton value="light">
                   <Stack direction="row" spacing={1} alignItems="center">
                     <LightModeIcon fontSize="small" />
-                    <Typography variant="body2">{t("settings.light")}</Typography>
+                    <Typography variant="body2">
+                      {t("settings.light")}
+                    </Typography>
                     {theme === "light" && <CheckIcon fontSize="small" />}
                   </Stack>
                 </ToggleButton>
                 <ToggleButton value="dark">
                   <Stack direction="row" spacing={1} alignItems="center">
                     <DarkModeIcon fontSize="small" />
-                    <Typography variant="body2">{t("settings.dark")}</Typography>
+                    <Typography variant="body2">
+                      {t("settings.dark")}
+                    </Typography>
                     {theme === "dark" && <CheckIcon fontSize="small" />}
                   </Stack>
                 </ToggleButton>
@@ -546,14 +548,18 @@ export default function Header({
                 <ToggleButton value="en">
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Typography variant="h6">🇺🇸</Typography>
-                    <Typography variant="body2">{t("settings.english")}</Typography>
+                    <Typography variant="body2">
+                      {t("settings.english")}
+                    </Typography>
                     {language === "en" && <CheckIcon fontSize="small" />}
                   </Stack>
                 </ToggleButton>
                 <ToggleButton value="vi">
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Typography variant="h6">🇻🇳</Typography>
-                    <Typography variant="body2">{t("settings.vietnamese")}</Typography>
+                    <Typography variant="body2">
+                      {t("settings.vietnamese")}
+                    </Typography>
                     {language === "vi" && <CheckIcon fontSize="small" />}
                   </Stack>
                 </ToggleButton>
@@ -589,9 +595,10 @@ export default function Header({
                       "& .MuiSwitch-switchBase.Mui-checked": {
                         color: "var(--primary-accent)",
                       },
-                      "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
-                        bgcolor: "var(--primary-accent)",
-                      },
+                      "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track":
+                        {
+                          bgcolor: "var(--primary-accent)",
+                        },
                     }}
                   />
                 }

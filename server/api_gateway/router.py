@@ -288,51 +288,18 @@ def create_router() -> APIRouter:
         
         print(f"🔄 [API Gateway] Forwarding debug session download to {full_url}")
         
-        # Check status code BEFORE creating StreamingResponse to avoid "response already started" error
-        # Do a HEAD request first to check if session exists
-        try:
-            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                # Try HEAD request first (some servers may not support it, so we'll fall back to GET)
-                try:
-                    head_response = await client.head(full_url)
-                    if head_response.status_code != 200:
-                        # Session doesn't exist or error - get detailed error message
-                        error_detail = f"HTTP {head_response.status_code}: {head_response.reason_phrase or 'Unknown error'}"
-                        print(f"❌ [API Gateway] {error_detail}")
-                        # Do a GET request to get error details
-                        try:
-                            get_response = await client.get(full_url)
-                            if get_response.status_code != 200:
-                                try:
-                                    error_data = get_response.json()
-                                    error_detail = error_data.get("detail", error_detail)
-                                except Exception:
-                                    error_text = get_response.text[:500] if get_response.text else ""
-                                    if error_text:
-                                        error_detail = error_text
-                        except Exception:
-                            pass
-                        raise HTTPException(status_code=head_response.status_code, detail=error_detail)
-                except HTTPException:
-                    raise
-                except Exception:
-                    # HEAD not supported or failed, will check during stream
-                    pass
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"⚠️ [API Gateway] Pre-check failed: {e}, will proceed with streaming")
-        
-        # Create streaming generator - status check happens inside to keep context alive
+        # Create streaming generator that checks status BEFORE yielding any data
+        # This allows us to raise HTTPException before StreamingResponse starts sending data
         async def stream_download():
             """Stream ZIP file from Job Manager to client."""
             try:
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                     async with client.stream("GET", full_url) as response:
-                        # Check status code immediately after opening stream, before any data is yielded
+                        # Check status code immediately, before reading any data
                         if response.status_code != 200:
                             error_detail = f"HTTP {response.status_code}: {response.reason_phrase or 'Unknown error'}"
                             print(f"❌ [API Gateway] {error_detail}")
+                            
                             # Try to read error message from response
                             try:
                                 error_text = await response.aread()
@@ -346,18 +313,17 @@ def create_router() -> APIRouter:
                             except Exception as e:
                                 print(f"⚠️ [API Gateway] Failed to read error response: {e}")
                             
-                            # Can't raise HTTPException here as StreamingResponse already started
-                            # Instead, we need to handle this before creating StreamingResponse
-                            # This should not happen if HEAD check worked, but handle gracefully
-                            raise RuntimeError(f"HTTP {response.status_code}: {error_detail}")
+                            # Raise HTTPException - this will be caught and converted to proper HTTP response
+                            # BEFORE any data is yielded, so StreamingResponse hasn't started yet
+                            raise HTTPException(status_code=response.status_code, detail=error_detail)
                         
-                        # Status code is 200, stream the data
+                        # Status code is 200, proceed with streaming
                         # Get content length from response if available
                         content_length = response.headers.get("Content-Length")
                         if content_length:
                             print(f"📦 [API Gateway] ZIP size: {content_length} bytes")
                         
-                        # Forward headers for file download
+                        # Stream the data
                         chunk_count = 0
                         total_bytes = 0
                         async for chunk in response.aiter_bytes():
@@ -366,21 +332,18 @@ def create_router() -> APIRouter:
                             yield chunk
                         
                         print(f"✅ [API Gateway] Streamed {chunk_count} chunks, {total_bytes} bytes total")
-            except RuntimeError as e:
-                # Re-raise as HTTPException, but this will cause "response already started"
-                # This should not happen if pre-check worked
-                error_msg = str(e)
-                print(f"❌ [API Gateway] Stream error: {error_msg}")
-                # Can't raise HTTPException here - just log and let client see incomplete response
+            except HTTPException:
+                # Re-raise HTTPException - FastAPI will handle it properly
+                # Since no data has been yielded yet, this is safe
                 raise
             except httpx.HTTPStatusError as e:
                 error_detail = f"HTTP {e.response.status_code}: {e.response.reason_phrase or 'Unknown error'}"
                 print(f"❌ [API Gateway] {error_detail}")
-                raise RuntimeError(error_detail)
+                raise HTTPException(status_code=e.response.status_code, detail=error_detail)
             except Exception as e:
                 error_msg = f"Stream error: {str(e)}"
                 print(f"❌ [API Gateway] {error_msg}")
-                raise
+                raise HTTPException(status_code=500, detail=error_msg)
         
         # Create StreamingResponse - errors should be caught before this point
         return StreamingResponse(

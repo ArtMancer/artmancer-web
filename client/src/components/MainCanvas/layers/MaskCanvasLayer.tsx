@@ -3,8 +3,8 @@
  * Canvas overlay cho masking
  */
 
-import { getAbsoluteLayerStyle } from '../utils';
-import { Z_INDEX } from '../constants';
+import { getAbsoluteLayerStyle } from "../utils";
+import { Z_INDEX } from "../constants";
 
 interface MaskCanvasLayerProps {
   isMaskingMode: boolean;
@@ -28,7 +28,7 @@ export default function MaskCanvasLayer({
 
   const style: React.CSSProperties = {
     ...getAbsoluteLayerStyle(imageDimensions, displayScale, Z_INDEX.MASK),
-    pointerEvents: 'auto',
+    pointerEvents: "auto",
     // Ensure mask always displays with opacity (even if individual strokes have opacity)
     // This ensures consistent visual appearance
     opacity: 1.0, // Individual strokes already have rgba(255, 0, 0, 0.5) opacity
