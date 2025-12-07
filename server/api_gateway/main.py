@@ -26,23 +26,29 @@ def create_app() -> FastAPI:
         version="3.0.0",
     )
 
-    # Configure CORS with explicit settings
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],  # Allow all methods (POST, GET, PUT, DELETE, OPTIONS, etc.)
-        allow_headers=["*"],  # Allow all headers
-        expose_headers=["*"],  # Expose all headers in response
-    )
+    # Include routers first
+    app.include_router(create_router())
     
-    # Log CORS requests for debugging
+    # Log CORS requests for debugging and ensure CORS headers on all responses
     @app.middleware("http")
     async def log_cors_requests(request, call_next):
         origin = request.headers.get("origin")
         if origin:
             print(f"🌐 [API Gateway] CORS request from origin: {origin}")
         response = await call_next(request)
+        
+        # Ensure CORS headers are present on all responses (including redirects)
+        # This is important for Modal's 303 redirects
+        if origin and origin in allowed_origins:
+            if "access-control-allow-origin" not in response.headers:
+                response.headers["access-control-allow-origin"] = origin
+            if "access-control-allow-credentials" not in response.headers:
+                response.headers["access-control-allow-credentials"] = "true"
+            if "access-control-allow-methods" not in response.headers:
+                response.headers["access-control-allow-methods"] = "*"
+            if "access-control-allow-headers" not in response.headers:
+                response.headers["access-control-allow-headers"] = "*"
+        
         # Log CORS headers in response
         cors_headers = {
             k: v for k, v in response.headers.items() 
@@ -59,9 +65,18 @@ def create_app() -> FastAPI:
         if "server" in response.headers:
             del response.headers["server"]
         return response
-
-    # Include routers
-    app.include_router(create_router())
+    
+    # Configure CORS with explicit settings - MUST be added LAST (runs FIRST due to LIFO)
+    # FastAPI middleware runs in reverse order (LIFO), so this will run first
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all methods (POST, GET, PUT, DELETE, OPTIONS, etc.)
+        allow_headers=["*"],  # Allow all headers
+        expose_headers=["*"],  # Expose all headers in response
+        max_age=3600,  # Cache preflight requests for 1 hour
+    )
 
     return app
 

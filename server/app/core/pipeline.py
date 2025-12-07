@@ -4,7 +4,7 @@ import gc
 import logging
 import os
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional, Callable
 
 # torch is imported lazily where needed to avoid requiring it in services that don't need it (e.g., JobManagerService, ImageUtilsService)
 
@@ -92,9 +92,13 @@ def get_device_info() -> Dict[str, Any]:
     return info
 
 
-def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
+def load_pipeline(
+    task_type: str = "insertion",
+    enable_flowmatch_scheduler: Optional[bool] = None,
+    on_loading_progress: Optional[Callable[[str, float]]] = None,
+) -> DiffusionPipeline:
     """
-    Load Qwen pipeline for the specified task.
+    Load Qwen pipeline for the specified task with optional optimization flags.
     
     Uses sync def because:
     - Runs on Heavy Worker (A100) where model loading is blocking
@@ -102,13 +106,18 @@ def load_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
     
     Args:
         task_type: "insertion", "removal", or "white-balance"
+        enable_flowmatch_scheduler: Override config setting (None = use config)
     
     Returns:
         Loaded DiffusionPipeline
     """
     # All 3 tasks use the same Qwen loader, differing only in checkpoint and parameters.
     from .qwen_loader import load_qwen_pipeline
-    return load_qwen_pipeline(task_type)
+    return load_qwen_pipeline(
+        task_type=task_type,
+        enable_flowmatch_scheduler=enable_flowmatch_scheduler,
+        on_loading_progress=on_loading_progress,
+    )
 
 
 def clear_pipeline_cache() -> None:

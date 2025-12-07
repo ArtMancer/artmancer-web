@@ -177,32 +177,69 @@ export default function DebugPanel({
               {activeTab === "images" && (
                 <div className="space-y-2">
                   {conditionalImages.length > 0 ? (
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {conditionalImages.map((img, index) => (
-                        <div
-                          key={index}
-                          className="relative group cursor-pointer"
-                          onClick={() =>
-                            setSelectedImage({
-                              src: `data:image/png;base64,${img}`,
-                              label: labels[index] || `Condition ${index + 1}`,
-                            })
-                          }
-                        >
-                          <img
-                            src={`data:image/png;base64,${img}`}
-                            alt={labels[index] || `Condition ${index + 1}`}
-                            className="w-full aspect-square object-cover rounded border border-zinc-600 hover:border-amber-500 transition-colors"
-                          />
-                          <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded">
-                            <ZoomIn size={12} className="text-white" />
+                    <>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {conditionalImages.map((img, index) => (
+                          <div
+                            key={index}
+                            className="relative group cursor-pointer"
+                            onClick={() =>
+                              setSelectedImage({
+                                src: `data:image/png;base64,${img}`,
+                                label:
+                                  labels[index] || `Condition ${index + 1}`,
+                              })
+                            }
+                          >
+                            <img
+                              src={`data:image/png;base64,${img}`}
+                              alt={labels[index] || `Condition ${index + 1}`}
+                              className="w-full aspect-square object-cover rounded border border-zinc-600 hover:border-amber-500 transition-colors"
+                            />
+                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded">
+                              <ZoomIn size={12} className="text-white" />
+                            </div>
+                            <div className="text-[9px] text-center text-zinc-400 mt-0.5 truncate px-0.5">
+                              {labels[index] || `#${index + 1}`}
+                            </div>
                           </div>
-                          <div className="text-[9px] text-center text-zinc-400 mt-0.5 truncate px-0.5">
-                            {labels[index] || `#${index + 1}`}
+                        ))}
+                      </div>
+                      {/* Show positioned_mask_R separately if it exists (for reference-guided insertion) */}
+                      {debugInfo.positioned_mask_R && (
+                        <div className="mt-3 pt-3 border-t border-zinc-700/50">
+                          <div className="text-[10px] text-zinc-400 mb-1.5">
+                            Positioned Mask R:
+                          </div>
+                          <div
+                            className="relative group cursor-pointer"
+                            onClick={() =>
+                              setSelectedImage({
+                                src: `data:image/png;base64,${debugInfo.positioned_mask_R}`,
+                                label: "positioned_mask_R",
+                              })
+                            }
+                          >
+                            <img
+                              src={`data:image/png;base64,${debugInfo.positioned_mask_R}`}
+                              alt="Positioned Mask R"
+                              className="w-full rounded border border-amber-500/50 hover:border-amber-500 transition-colors"
+                              style={{ 
+                                objectFit: "contain",
+                                backgroundColor: "#000",
+                                maxHeight: "200px"
+                              }}
+                            />
+                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded">
+                              <ZoomIn size={12} className="text-white" />
+                            </div>
+                            <div className="text-[9px] text-center text-amber-400 mt-0.5 truncate px-0.5">
+                              positioned_mask_R
+                            </div>
                           </div>
                         </div>
-                      ))}
-                    </div>
+                      )}
+                    </>
                   ) : (
                     <div className="text-xs text-zinc-500 text-center py-4">
                       No conditional images

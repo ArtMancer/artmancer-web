@@ -29,6 +29,7 @@ interface CanvasProps {
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
   isSmartMaskLoading?: boolean;
+  hasMaskContent?: boolean;
 
   // Toolbox state
   originalImage: string | null;
@@ -89,6 +90,7 @@ export default function Canvas({
   maskBrushSize,
   maskToolType = "brush",
   isSmartMaskLoading = false,
+  hasMaskContent = false,
   originalImage,
   modifiedImage,
   comparisonSlider,
@@ -234,7 +236,7 @@ export default function Canvas({
   return (
     <div
       ref={containerRef}
-      className="flex-1 relative min-w-0 overflow-hidden flex items-center justify-center bg-[#1a1a1a]"
+      className="flex-1 relative min-w-0 overflow-hidden flex items-center justify-center bg-[var(--primary-bg)] dots-pattern"
       onWheel={onWheel}
       style={{ cursor: "default", padding: "2rem" }}
     >
@@ -384,6 +386,7 @@ export default function Canvas({
                     maskCanvasRef={maskCanvasRef}
                     imageDimensions={imageDimensions}
                     displayScale={displayScale}
+                    hasMaskContent={hasMaskContent}
                   />
                   <BrushPreviewLayer
                     isMaskingMode={isMaskingMode}

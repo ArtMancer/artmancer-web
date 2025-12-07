@@ -56,19 +56,6 @@ class Settings(BaseSettings):
         default=2048, alias="INPUT_QUALITY_WARNING_PX", ge=512, le=8192
     )
 
-    # Low-end optimization settings (for GPU 12GB or lower)
-    enable_4bit_text_encoder: bool = Field(
-        default=False, alias="ENABLE_4BIT_TEXT_ENCODER",
-        description="Enable 4-bit quantization for text encoder (saves ~4GB VRAM)"
-    )
-    enable_cpu_offload: bool = Field(
-        default=False, alias="ENABLE_CPU_OFFLOAD",
-        description="Enable CPU offload for transformer and VAE (saves VRAM, slower)"
-    )
-    enable_memory_optimizations: bool = Field(
-        default=False, alias="ENABLE_MEMORY_OPTIMIZATIONS",
-        description="Enable memory optimizations (safetensors, low_cpu_mem_usage, TF32)"
-    )
     enable_flowmatch_scheduler: bool = Field(
         default=False, alias="ENABLE_FLOWMATCH_SCHEDULER",
         description="Use FlowMatchEulerDiscreteScheduler instead of default"

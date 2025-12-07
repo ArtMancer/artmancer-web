@@ -1,3 +1,5 @@
+import { Box, Slider } from "@mui/material";
+
 interface ToolboxProps {
   // Visibility
   uploadedImage: string | null;
@@ -55,18 +57,32 @@ export default function Toolbox({
               <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">
                 Modified
               </span>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={comparisonSlider}
-                onChange={(e) =>
-                  onComparisonSliderChange(Number(e.target.value))
-                }
-                onMouseDown={(e) => e.stopPropagation()}
-                onMouseMove={(e) => e.stopPropagation()}
-                className="w-24 h-2 bg-[var(--primary-bg)] rounded-lg appearance-none cursor-pointer accent-[var(--primary-accent)]"
-              />
+              <Box sx={{ width: 96 }}>
+                <Slider
+                  value={comparisonSlider}
+                  onChange={(_, value) =>
+                    onComparisonSliderChange(value as number)
+                  }
+                  min={0}
+                  max={100}
+                  step={1}
+                  sx={{
+                    color: "var(--primary-accent)",
+                    "& .MuiSlider-thumb": {
+                      backgroundColor: "var(--primary-accent)",
+                      "&:hover": {
+                        boxShadow: "0 0 0 8px rgba(0, 0, 0, 0.16)",
+                      },
+                    },
+                    "& .MuiSlider-track": {
+                      backgroundColor: "var(--primary-accent)",
+                    },
+                    "& .MuiSlider-rail": {
+                      backgroundColor: "var(--border-color)",
+                    },
+                  }}
+                />
+              </Box>
               <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">
                 Original
               </span>

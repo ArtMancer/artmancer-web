@@ -30,7 +30,7 @@ class CanvasDrawCommand implements Command {
   }
 
   private restoreCanvasState(state: CanvasState): void {
-    const ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     try {
@@ -76,14 +76,14 @@ class CanvasClearCommand implements Command {
   }
 
   execute(): void {
-    const ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     if (ctx) {
       ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
   }
 
   undo(): void {
-    const ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
     try {
@@ -205,7 +205,9 @@ export function useMasking(
   transform: { scale: number },
   viewportZoom: number,
   imageRef?: React.RefObject<HTMLImageElement | null>,
-  onNotification?: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void
+  onNotification?: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void,
+  borderAdjustment: number = 0,
+  skipMaskResetRef?: React.MutableRefObject<boolean> // Ref to skip mask reset (e.g., when returning to original)
 ) {
   // Masking state
   const [isMaskingMode, setIsMaskingMode] = useState(false);
@@ -215,6 +217,8 @@ export function useMasking(
   const [enableEdgeDetection, setEnableEdgeDetection] = useState(false);
   const [enableFloodFill, setEnableFloodFill] = useState(false);
   const [edgeMask, setEdgeMask] = useState<ImageData | null>(null);
+  // State to track actual canvas content (for display purposes, independent of command history)
+  const [hasCanvasContent, setHasCanvasContent] = useState(false);
 
   // Box drawing state
   const boxStartPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -222,6 +226,7 @@ export function useMasking(
 
   // Smart masking state
   const [enableSmartMasking, setEnableSmartMasking] = useState(false);
+  const [smartMaskModelType, setSmartMaskModelType] = useState<'segmentation' | 'birefnet'>('segmentation');
   const [smartMaskImageId, setSmartMaskImageId] = useState<string | null>(null);
   const [isSmartMaskLoading, setIsSmartMaskLoading] = useState(false);
   const [currentSmartMaskRequestId, setCurrentSmartMaskRequestId] = useState<string | null>(null);
@@ -249,6 +254,9 @@ export function useMasking(
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const edgeOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Track previous uploadedImage to detect actual changes (not just re-setting same value)
+  const previousUploadedImageRef = useRef<string | null>(null);
+
   // Helper function to update history state
   const updateHistoryState = useCallback(() => {
     const history = commandHistory.current;
@@ -272,7 +280,7 @@ export function useMasking(
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = imageDimensions.width;
       tempCanvas.height = imageDimensions.height;
-      const tempCtx = tempCanvas.getContext('2d');
+      const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
       if (!tempCtx) return null;
 
       // Draw the image to the canvas
@@ -314,22 +322,48 @@ export function useMasking(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enableEdgeDetection, uploadedImage, imageDimensions?.width, imageDimensions?.height, imageRef?.current]);
 
-  // Reset mask history when uploaded image changes
+  // Reset mask history when uploaded image changes (but not when returning to original)
   useEffect(() => {
-    commandHistory.current.clear();
-    updateHistoryState();
-    setIsMaskingMode(false);
-    setIsMaskDrawing(false);
-    setEdgeMask(null); // Clear edge mask when image changes
-    setSmartMaskImageId(null); // Clear smart mask image ID
-    strokePointsRef.current = []; // Clear stroke points
-    if (smartMaskDebounceTimerRef.current) {
-      clearTimeout(smartMaskDebounceTimerRef.current);
+    // Skip reset if skipMaskResetRef is set to true (e.g., when returning to original)
+    // Don't reset the flag here - let the resize canvas useEffect handle it after preserving content
+    if (skipMaskResetRef?.current === true) {
+      // Update ref, but don't clear mask and don't reset flag yet
+      // Flag will be reset in resize canvas useEffect after content is preserved
+      previousUploadedImageRef.current = uploadedImage;
+      return;
     }
-  }, [uploadedImage, updateHistoryState]);
+
+    // Only reset if image actually changed (not just re-setting same value)
+    if (uploadedImage === previousUploadedImageRef.current) {
+      // Image didn't actually change, just skip reset
+      return;
+    }
+
+    // Image actually changed, update ref and reset mask
+    previousUploadedImageRef.current = uploadedImage;
+
+    // Only reset if we have a new image (not null)
+    if (uploadedImage) {
+      commandHistory.current.clear();
+      updateHistoryState();
+      setIsMaskingMode(false);
+      setIsMaskDrawing(false);
+      setEdgeMask(null); // Clear edge mask when image changes
+      setSmartMaskImageId(null); // Clear smart mask image ID
+      strokePointsRef.current = []; // Clear stroke points
+      if (smartMaskDebounceTimerRef.current) {
+        clearTimeout(smartMaskDebounceTimerRef.current);
+      }
+    }
+  }, [uploadedImage, updateHistoryState, skipMaskResetRef]);
 
   // Clear command history when exiting masking mode
   useEffect(() => {
+    // Skip clear if we're returning to original (mask should be preserved)
+    if (skipMaskResetRef?.current === true) {
+      return;
+    }
+
     // Only clear history when transitioning from masking mode to non-masking mode
     // This ensures we don't clear history when entering masking mode
     if (!isMaskingMode) {
@@ -337,15 +371,16 @@ export function useMasking(
       updateHistoryState();
 
       // Also clear the canvas when exiting masking mode
+      // But only if we're not returning to original
       const canvas = maskCanvasRef.current;
       if (canvas) {
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
       }
     }
-  }, [isMaskingMode, updateHistoryState]);
+  }, [isMaskingMode, updateHistoryState, skipMaskResetRef]);
 
   // Initialize canvas context
   useEffect(() => {
@@ -360,7 +395,7 @@ export function useMasking(
       canvas.height = imageDimensions.height;
     }
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       return;
     }
@@ -417,6 +452,39 @@ export function useMasking(
     ctx.imageSmoothingQuality = 'high';
   }, [maskBrushSize, imageDimensions]);
 
+  // Helper function to check if canvas has content (for display purposes)
+  const checkCanvasHasContent = useCallback((): boolean => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) {
+      return false;
+    }
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      return false;
+    }
+
+    try {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      // Check full buffer to avoid missing sparse masks
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const a = data[i + 3];
+        if (r > 0 || g > 0 || b > 0 || a > 0) {
+          return true;
+        }
+      }
+      return false;
+    } catch (e) {
+      console.warn('Could not check canvas content:', e);
+      return false;
+    }
+  }, []);
+
   // Helper function to capture current canvas state
   const captureCanvasState = useCallback((): CanvasState => {
     const canvas = maskCanvasRef.current;
@@ -425,7 +493,7 @@ export function useMasking(
       return { imageData: null, hasContent: false };
     }
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       console.warn('No canvas context available for state capture');
       return { imageData: null, hasContent: false };
@@ -609,7 +677,7 @@ export function useMasking(
     if (!enableEdgeDetection && !enableFloodFill) {
       // Clear edge overlay if disabled
       if (edgeCanvas) {
-        const edgeCtx = edgeCanvas.getContext('2d');
+        const edgeCtx = edgeCanvas.getContext('2d', { willReadFrequently: true });
         if (edgeCtx) {
           edgeCtx.clearRect(0, 0, edgeCanvas.width, edgeCanvas.height);
         }
@@ -639,7 +707,7 @@ export function useMasking(
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = imageDimensions.width;
       tempCanvas.height = imageDimensions.height;
-      const tempCtx = tempCanvas.getContext('2d');
+      const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
       if (!tempCtx) return;
 
       // Draw the image
@@ -653,7 +721,7 @@ export function useMasking(
       if (edgeCanvas) {
         edgeCanvas.width = imageDimensions.width;
         edgeCanvas.height = imageDimensions.height;
-        const edgeCtx = edgeCanvas.getContext('2d');
+        const edgeCtx = edgeCanvas.getContext('2d', { willReadFrequently: true });
         if (!edgeCtx) return;
 
         // Clear previous edge overlay
@@ -858,7 +926,7 @@ export function useMasking(
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = width;
     tempCanvas.height = height;
-    const tempCtx = tempCanvas.getContext('2d');
+    const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
     if (!tempCtx) throw new Error('Failed to get canvas context');
 
     // Draw the binary mask onto temp canvas
@@ -934,7 +1002,7 @@ export function useMasking(
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = canvas.width;
       tempCanvas.height = canvas.height;
-      const tempCtx = tempCanvas.getContext('2d');
+      const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
       if (!tempCtx) throw new Error('Failed to get temp canvas context');
 
       // Put the converted mask data onto temp canvas
@@ -983,8 +1051,9 @@ export function useMasking(
         null, // Don't use image_id - each mask is independent
         scaledCoords.bbox,
         undefined, // No points for box mode
-        10, // dilate_amount
-        false // use_blur
+        borderAdjustment, // border_adjustment
+        false, // use_blur
+        smartMaskModelType // model_type
       );
 
       if (result.success && result.mask_base64) {
@@ -1080,6 +1149,7 @@ export function useMasking(
     }
   }, [
     enableSmartMasking,
+    smartMaskModelType,
     uploadedImage,
     imageDimensions,
     imageRef,
@@ -1087,12 +1157,19 @@ export function useMasking(
     mergeSmartMask,
     captureCanvasState,
     updateHistoryState,
-    onNotification
+    onNotification,
+    borderAdjustment
   ]);
 
   // Function to generate smart mask from stroke
   const generateSmartMaskFromStroke = useCallback(async () => {
     if (!enableSmartMasking || !uploadedImage || !imageDimensions || !imageRef?.current) return;
+
+    // BiRefNet does not support stroke/points, only bbox
+    if (smartMaskModelType === 'birefnet') {
+      console.warn('BiRefNet does not support stroke/points. Please use box tool instead.');
+      return;
+    }
 
     const points = strokePointsRef.current;
     if (points.length === 0) return;
@@ -1146,8 +1223,9 @@ export function useMasking(
         null, // Don't use image_id - each mask is independent
         scaledCoords.bbox,
         scaledCoords.points,
-        10, // dilate_amount
-        false // use_blur
+        borderAdjustment, // border_adjustment
+        false, // use_blur
+        smartMaskModelType // model_type
       );
 
       if (result.success && result.mask_base64) {
@@ -1244,6 +1322,7 @@ export function useMasking(
     }
   }, [
     enableSmartMasking,
+    smartMaskModelType,
     uploadedImage,
     imageDimensions,
     imageRef,
@@ -1253,7 +1332,8 @@ export function useMasking(
     mergeSmartMask,
     captureCanvasState,
     updateHistoryState,
-    onNotification
+    onNotification,
+    borderAdjustment
   ]);
 
   const stopDrawing = useCallback(() => {
@@ -1370,7 +1450,7 @@ export function useMasking(
       // Normalize opacity after drawing to ensure consistent visual appearance
       // This prevents opacity accumulation when strokes overlap
       if (canvas) {
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
           // Get current image data
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1418,10 +1498,15 @@ export function useMasking(
       // Check if canvas dimensions are changing
       const dimensionsChanged = canvas.width !== newWidth || canvas.height !== newHeight;
 
-      // Store canvas content before resize if dimensions are changing
+      // Check if we're returning to original (should preserve mask)
+      const isReturningToOriginal = skipMaskResetRef?.current === true;
+
+      // Store canvas content before resize if:
+      // 1. Dimensions are changing, OR
+      // 2. We're returning to original (even if dimensions don't change, setting canvas.width/height clears it)
       let imageData = null;
-      if (dimensionsChanged && canvas.width > 0 && canvas.height > 0) {
-        const ctx = canvas.getContext('2d');
+      if ((dimensionsChanged || isReturningToOriginal) && canvas.width > 0 && canvas.height > 0) {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
           try {
             imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1432,6 +1517,8 @@ export function useMasking(
       }
 
       // Set canvas internal resolution to match the actual image dimensions
+      // NOTE: Setting canvas.width/height ALWAYS clears the canvas in HTML5, even if values are the same
+      // This is why we need to preserve content even when dimensions don't change
       canvas.width = newWidth;
       canvas.height = newHeight;
 
@@ -1439,7 +1526,7 @@ export function useMasking(
       // Canvas now fills the entire parent div automatically
 
       // Always re-initialize context settings after canvas resize
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (ctx) {
         // Re-initialize context settings for maximum brush hardness
         ctx.lineCap = 'butt';  // Sharp line ends
@@ -1465,13 +1552,25 @@ export function useMasking(
           ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
         }
 
-        // Restore canvas content if it was saved and dimensions changed
-        if (imageData && dimensionsChanged) {
+        // Restore canvas content if it was saved
+        // Restore if: dimensions changed OR we're returning to original
+        if (imageData && (dimensionsChanged || isReturningToOriginal)) {
           try {
             ctx.putImageData(imageData, 0, 0);
+            // After restoring, update hasCanvasContent state
+            // Use setTimeout to ensure state update happens after canvas operation
+            setTimeout(() => {
+              const hasContent = checkCanvasHasContent();
+              setHasCanvasContent(hasContent);
+            }, 0);
           } catch (e) {
             console.warn('Could not restore canvas content:', e);
           }
+        }
+
+        // Reset the flag after preserving canvas content (if we were returning to original)
+        if (isReturningToOriginal && skipMaskResetRef) {
+          skipMaskResetRef.current = false;
         }
 
         ctxRef.current = ctx;
@@ -1491,7 +1590,31 @@ export function useMasking(
       clearTimeout(timer2);
       window.removeEventListener('resize', resizeCanvas);
     };
-  }, [uploadedImage, transform.scale, imageDimensions, isMaskingMode, maskBrushSize]);
+  }, [uploadedImage, transform.scale, imageDimensions, isMaskingMode, maskBrushSize, skipMaskResetRef]);
+
+  // Check canvas content periodically to update hasCanvasContent state
+  useEffect(() => {
+    if (!maskCanvasRef.current || !imageDimensions) {
+      setHasCanvasContent(false);
+      return;
+    }
+
+    // Check canvas content after a short delay to allow canvas operations to complete
+    const checkContent = () => {
+      const hasContent = checkCanvasHasContent();
+      setHasCanvasContent(hasContent);
+    };
+
+    // Check immediately and after a delay
+    checkContent();
+    const timer = setTimeout(checkContent, 100);
+    const timer2 = setTimeout(checkContent, 300);
+
+    return () => {
+      clearTimeout(timer);
+      clearTimeout(timer2);
+    };
+  }, [imageDimensions, checkCanvasHasContent, isMaskingMode]);
 
   // Canvas scaling is handled by the container, no separate zoom effect needed
   // useEffect(() => {
@@ -1542,7 +1665,7 @@ export function useMasking(
     // Clear the canvas if it exists
     const canvas = maskCanvasRef.current;
     if (canvas) {
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
@@ -1565,7 +1688,7 @@ export function useMasking(
       // Clear the canvas content
       const canvas = maskCanvasRef.current;
       if (canvas) {
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
@@ -1586,7 +1709,7 @@ export function useMasking(
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = imageDimensions.width;
     tempCanvas.height = imageDimensions.height;
-    const ctx = tempCanvas.getContext('2d');
+    const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
 
     // 2. Tô nền ĐEN (Vùng giữ nguyên - không sửa)
@@ -1594,7 +1717,7 @@ export function useMasking(
     ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
 
     // 3. Lấy dữ liệu pixel từ canvas vẽ hiện tại (đang là màu đỏ trong suốt cho UI)
-    const originalCtx = canvas.getContext('2d');
+    const originalCtx = canvas.getContext('2d', { willReadFrequently: true });
     if (!originalCtx) return null;
 
     // Canvas đã có kích thước = imageDimensions, nên không cần scale
@@ -1652,7 +1775,7 @@ export function useMasking(
     maskHistoryLength: historyState.historyLength,
     undoMask,
     redoMask,
-    hasMaskContent: historyState.hasContent,
+    hasMaskContent: historyState.hasContent || hasCanvasContent, // Use command history OR actual canvas content
     canUndo: historyState.canUndo,
     canRedo: historyState.canRedo,
     // Export final mask (Black/White binary mask for AI)
@@ -1665,6 +1788,8 @@ export function useMasking(
     // Smart masking
     enableSmartMasking,
     setEnableSmartMasking,
+    smartMaskModelType,
+    setSmartMaskModelType,
     isSmartMaskLoading,
     generateSmartMaskFromBox,
     // Cancel smart mask generation

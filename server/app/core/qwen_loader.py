@@ -4,7 +4,7 @@ import gc
 import logging
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Callable, Dict, Any
 import os
 
 import torch
@@ -38,6 +38,8 @@ _loaded_adapters: set[str] = set()
 _current_adapter: Optional[str] = None
 # Track if adapters are currently fused (merged into base model)
 _is_fused: bool = False
+# Track optimization flags used for current pipeline
+_pipeline_cache_key: Optional[str] = None
 
 
 def _ensure_file(path: str | Path, env_name: str) -> Path:
@@ -52,11 +54,16 @@ def _ensure_file(path: str | Path, env_name: str) -> Path:
 
 
 def _flush_memory() -> None:
-    """Flush GPU and CPU memory."""
+    """Flush GPU and CPU memory aggressively."""
     gc.collect()
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    logger.debug("🧹 Memory flushed (gc.collect + torch.cuda.empty_cache)")
+        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
+        torch.cuda.empty_cache()  # Clear PyTorch's CUDA cache
+        torch.cuda.ipc_collect()  # Force IPC cleanup
+    # Force multiple GC passes to ensure cleanup
+    for _ in range(3):
+        gc.collect()
+    logger.debug("🧹 Memory flushed (gc.collect + torch.cuda.empty_cache + synchronize)")
 
 
 def get_qwen_pipeline(task_type: str | None = None) -> Optional[DiffusionPipeline]:
@@ -72,19 +79,46 @@ def get_qwen_pipeline(task_type: str | None = None) -> Optional[DiffusionPipelin
     return _pipeline
 
 
-def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
+def load_qwen_pipeline(
+    task_type: str = "insertion",
+    enable_flowmatch_scheduler: Optional[bool] = None,
+    on_loading_progress: Optional[Callable[[str, float]]] = None,
+) -> DiffusionPipeline:
     """
     Load QwenImageEditPlusPipeline following reference code style:
     - Use single pipeline instance for all tasks
     - Load multiple LoRA adapters (one per task) without fusing
     - Switch adapters when needed
+    - Support optimization flags from request (override config if provided)
+    
+    Args:
+        task_type: "insertion", "removal", or "white-balance"
+        enable_flowmatch_scheduler: Override config setting (None = use config)
     
     Uses sync def because:
     - Runs on Heavy Worker (A100) where model loading is blocking
     - Modal automatically handles threading for sync functions
     - PyTorch operations are CPU/GPU bound, not I/O bound
     """
-    global _pipeline, _loaded_adapters, _current_adapter, _is_fused
+    global _pipeline, _loaded_adapters, _current_adapter, _is_fused, _pipeline_cache_key
+    
+    # Resolve flags: request flags > config settings
+    use_flowmatch = enable_flowmatch_scheduler if enable_flowmatch_scheduler is not None else settings.enable_flowmatch_scheduler
+    
+    # Create cache key based on flags combination
+    cache_key = f"{task_type}_{use_flowmatch}"
+    
+    # Check if pipeline needs to be reloaded due to different flags
+    if _pipeline is not None and _pipeline_cache_key != cache_key:
+        logger.info(
+            f"🔄 Optimization flags changed (old: {_pipeline_cache_key}, new: {cache_key}). "
+            "Reloading pipeline with new flags..."
+        )
+        clear_qwen_cache()
+        _pipeline_cache_key = None
+        # Wait a bit for memory to be fully released
+        import time
+        time.sleep(1)
     
     # Map task_type to adapter name
     adapter_name = task_type
@@ -115,13 +149,6 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
         # Lazy import to avoid triton import issues at module level
         from diffusers import QwenImageEditPlusPipeline  # type: ignore
         
-        # Apply memory optimizations if enabled
-        if settings.enable_memory_optimizations:
-            # Set TF32 for faster matmul (only on Ampere+ GPUs)
-            if torch.cuda.is_available():
-                torch.backends.cuda.matmul.allow_tf32 = True
-                logger.info("✅ Enabled TF32 matmul for faster computation")
-        
         # Flush memory before loading
         _flush_memory()
         
@@ -134,62 +161,58 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             dtype,
         )
         
-        # Load 4-bit text encoder if enabled (for low-end GPUs)
-        text_encoder = None
-        if settings.enable_4bit_text_encoder and device.type == "cuda":
-            try:
-                from transformers import BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
-                
-                logger.info("📦 Loading Text Encoder with 4-bit quantization (saves ~4GB VRAM)...")
-                _flush_memory()
-                
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                )
-                
-                # Load text encoder (sync - Modal handles threading)
-                text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    base_model_id,
-                    subfolder="text_encoder",
-                    quantization_config=bnb_config,
-                    dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                )
-                logger.info("✅ Text Encoder loaded with 4-bit quantization")
-            except Exception as exc:
-                logger.warning(
-                    "⚠️ Failed to load 4-bit text encoder, falling back to default: %s", exc
-                )
-                text_encoder = None
+        # Stage 1: Check cache and prepare (0-10%)
+        if on_loading_progress:
+            on_loading_progress("Checking cache...", 0.05)
 
         try:
             # Build pipeline kwargs
-            pipeline_kwargs = {
-                "torch_dtype": dtype,
+            # Note: QwenImageEditPlusPipeline accepts torch_dtype, not dtype
+            # Using "cuda" to load directly to GPU (more efficient than loading to RAM first)
+            pipeline_kwargs: Dict[str, Any] = {
+                "torch_dtype": dtype,  # Use torch_dtype instead of dtype
                 "device_map": "cuda" if device.type == "cuda" else None,
-                "trust_remote_code": True,
+                # Note: trust_remote_code is not expected by QwenImageEditPlusPipeline
+                "low_cpu_mem_usage": True,
             }
             
-            # Add text_encoder if 4-bit loaded
-            if text_encoder is not None:
-                pipeline_kwargs["text_encoder"] = text_encoder
+            # Stage 2: Loading weights to RAM (10-40%)
+            if on_loading_progress:
+                on_loading_progress("Loading checkpoint shards to RAM...", 0.20)
             
-            # Add memory optimization flags if enabled
-            if settings.enable_memory_optimizations:
-                pipeline_kwargs["use_safetensors"] = True
-                pipeline_kwargs["low_cpu_mem_usage"] = True
-                logger.info("✅ Enabled memory optimizations (safetensors + low_cpu_mem_usage)")
+            # Clear GPU memory before loading to avoid OOM
+            _flush_memory()
             
             # Load pipeline (sync - Modal handles threading)
-            _pipeline = QwenImageEditPlusPipeline.from_pretrained(
-                base_model_id,
-                **pipeline_kwargs
-            )
+            # This is the heavy I/O operation - loading checkpoint shards
+            # Use try-except to handle OOM and retry after clearing cache
+            try:
+                _pipeline = QwenImageEditPlusPipeline.from_pretrained(
+                    base_model_id,
+                    **pipeline_kwargs
+                )
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() or "CUDA out of memory" in str(e):
+                    logger.warning("⚠️ OOM during pipeline load, clearing cache and retrying...")
+                    # Clear any existing pipeline that might be in memory
+                    clear_qwen_cache()
+                    import time
+                    time.sleep(3)  # Wait for memory to be fully released
+                    # Retry once
+                    _flush_memory()
+                    _pipeline = QwenImageEditPlusPipeline.from_pretrained(
+                        base_model_id,
+                        **pipeline_kwargs
+                    )
+                else:
+                    raise
+            
+            # Stage 3: Checkpoint loaded, moving to GPU (40-80%)
+            if on_loading_progress:
+                on_loading_progress("Moving weights to GPU...", 0.60)
             
             # Configure FlowMatch scheduler if enabled
-            if settings.enable_flowmatch_scheduler:
+            if use_flowmatch:
                 try:
                     from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
                         FlowMatchEulerDiscreteScheduler,
@@ -197,6 +220,8 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                     logger.info(
                         f"🔄 Configuring FlowMatchEulerDiscreteScheduler with shift={settings.scheduler_shift}"
                     )
+                    if on_loading_progress:
+                        on_loading_progress("Configuring scheduler...", 0.70)
                     _pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
                         _pipeline.scheduler.config,
                         shift=settings.scheduler_shift,
@@ -210,28 +235,9 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
                 except Exception as exc:
                     logger.warning("⚠️ Failed to configure FlowMatch scheduler: %s", exc)
             
-            # Apply CPU offload if enabled (for low-end GPUs)
-            if settings.enable_cpu_offload and device.type == "cuda":
-                try:
-                    try:
-                        from accelerate import cpu_offload  # type: ignore
-                        logger.info("📉 Configuring CPU offload for transformer and VAE...")
-                        
-                        # Offload transformer (heaviest component ~8GB BF16)
-                        cpu_offload(_pipeline.transformer, device)
-                        
-                        # Offload VAE (lighter)
-                        cpu_offload(_pipeline.vae, device)
-                        
-                        # Text encoder 4-bit stays on GPU (already quantized)
-                        logger.info("✅ CPU offload configured (transformer + VAE)")
-                    except ImportError:
-                        # Fallback to diffusers built-in method
-                        logger.info("📉 Using diffusers enable_model_cpu_offload (accelerate.cpu_offload not available)...")
-                        _pipeline.enable_model_cpu_offload()
-                        logger.info("✅ CPU offload configured via diffusers")
-                except Exception as exc:
-                    logger.warning("⚠️ Failed to configure CPU offload: %s", exc)
+            # Stage 4: Warming up (80-100%)
+            if on_loading_progress:
+                on_loading_progress("Warming up pipeline...", 0.85)
             
             # Flush memory after loading
             _flush_memory()
@@ -240,6 +246,10 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             model_load_time_ms = (time.time() - model_load_start) * 1000
             logger.info(f"✅ Pipeline loaded successfully in {model_load_time_ms:.2f}ms")
             
+            # Stage 5: Complete
+            if on_loading_progress:
+                on_loading_progress("Pipeline ready", 1.0)
+            
             # Mark container state as warm (model loaded)
             try:
                 from ..services.container_state import mark_model_loaded
@@ -247,6 +257,10 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
             except ImportError:
                 # Container state service not available (e.g., in tests)
                 pass
+            
+            # Store cache key for this pipeline configuration
+            _pipeline_cache_key = cache_key
+            logger.info(f"📝 Pipeline cache key: {cache_key}")
             
         except Exception as exc:
             # Clear cache on error too
@@ -330,17 +344,52 @@ def load_qwen_pipeline(task_type: str = "insertion") -> DiffusionPipeline:
 
 
 def clear_qwen_cache() -> None:
-    """Clear cached Qwen pipeline and adapters."""
-    global _pipeline, _loaded_adapters, _current_adapter, _is_fused
+    """Clear cached Qwen pipeline and adapters aggressively."""
+    global _pipeline, _loaded_adapters, _current_adapter, _is_fused, _pipeline_cache_key
+    
     if _pipeline is not None:
+        # Move pipeline to CPU first to free GPU memory
+        try:
+            # Check if pipeline has device_map and reset it first
+            if hasattr(_pipeline, 'hf_device_map') and _pipeline.hf_device_map:
+                # Pipeline was loaded with device_map, need to reset it first
+                if hasattr(_pipeline, 'reset_device_map'):
+                    _pipeline.reset_device_map()
+                elif hasattr(_pipeline, 'disable_model_cpu_offload'):
+                    # Alternative method if reset_device_map doesn't exist
+                    _pipeline.disable_model_cpu_offload()
+            
+            # Now we can safely move to CPU
+            if hasattr(_pipeline, 'to'):
+                _pipeline.to('cpu')
+            if hasattr(_pipeline, 'unet') and _pipeline.unet is not None:
+                _pipeline.unet.to('cpu')
+            if hasattr(_pipeline, 'vae') and _pipeline.vae is not None:
+                _pipeline.vae.to('cpu')
+            if hasattr(_pipeline, 'text_encoder') and _pipeline.text_encoder is not None:
+                _pipeline.text_encoder.to('cpu')
+        except Exception as e:
+            logger.warning(f"⚠️ Error moving pipeline to CPU: {e}")
+            # If moving to CPU fails, try to reset device_map and delete directly
+            try:
+                if hasattr(_pipeline, 'reset_device_map'):
+                    _pipeline.reset_device_map()
+            except Exception:
+                pass
+        
+        # Delete pipeline
         del _pipeline
         _pipeline = None
+    
     _loaded_adapters.clear()
     _current_adapter = None
     _is_fused = False
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    logger.info("🧹 Cleared Qwen pipeline cache")
+    _pipeline_cache_key = None
+    
+    # Aggressive memory cleanup
+    _flush_memory()
+    
+    logger.info("🧹 Cleared Qwen pipeline cache (aggressive cleanup)")
 
 
 def is_qwen_pipeline_loaded(task_type: str | None = None) -> bool:

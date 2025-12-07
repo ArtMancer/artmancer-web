@@ -6,6 +6,7 @@
   --foreground: #e0e0e0;
   --primary-bg: #0b0b0d;
   --secondary-bg: #1a1a1f;
+  --panel-bg: #0f0f11; /* Slightly brighter than primary-bg for header and sidebar */
   --primary-accent: #6a0dad;
   --highlight-accent: #9d4edd;
   --text-primary: #e0e0e0;
@@ -21,6 +22,7 @@
   --foreground: #1a1a1a;
   --primary-bg: #ffffff;
   --secondary-bg: #f5f5f7;
+  --panel-bg: #fafafa; /* Slightly brighter than primary-bg for header and sidebar */
   --primary-accent: #6a0dad;
   --highlight-accent: #9d4edd;
   --text-primary: #1a1a1a;
@@ -36,6 +38,7 @@
   --foreground: #e0e0e0;
   --primary-bg: #0b0b0d;
   --secondary-bg: #1a1a1f;
+  --panel-bg: #0f0f11; /* Slightly brighter than primary-bg for header and sidebar */
   --primary-accent: #6a0dad;
   --highlight-accent: #9d4edd;
   --text-primary: #e0e0e0;
@@ -79,7 +82,7 @@ body {
 .dots-pattern {
   background-image: radial-gradient(
     circle at 50px 50px,
-    rgba(157, 78, 221, 0.25) 1px,
+    rgba(157, 78, 221, 0.4) 1px,
     transparent 0.5
   );
   background-size: 20px 20px;
@@ -88,7 +91,7 @@ body {
 .dots-pattern-small {
   background-image: radial-gradient(
     circle at 20px 20px,
-    rgba(157, 78, 221, 0.18) 1px,
+    rgba(157, 78, 221, 0.35) 1px,
     transparent 0.5
   );
   background-size: 24px 24px;

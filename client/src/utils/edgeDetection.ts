@@ -74,7 +74,7 @@ export function detectEdges(
   canvas: HTMLCanvasElement,
   threshold: number = 50
 ): ImageData | null {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
 
   try {

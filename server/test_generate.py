@@ -330,11 +330,11 @@ def generate(
         print(f"❌ {e}")
         return None
     
-    # Send request
-    api_url = f"{endpoint}/api/generate"
+    # Send async request
+    api_url = f"{endpoint}/api/generate/async"
     num_conds = 3  # Both insertion and removal use 3 conditional images
     
-    print("\n🚀 Generating...")
+    print("\n🚀 Generating (async mode)...")
     print(f"   📝 Prompt: {prompt[:80]}...")
     print(f"   🎯 Task: {task_type}")
     print(f"   🔢 Steps: {num_steps}")
@@ -345,46 +345,88 @@ def generate(
     start_time = time.time()
     
     try:
+        # Submit async job
         response = requests.post(
             api_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=600,  # 10 minutes
+            timeout=30,  # Short timeout for job submission
         )
         
         elapsed = time.time() - start_time
-        print(f"📡 Response in {elapsed:.1f}s (status: {response.status_code})")
+        print(f"📡 Job submitted in {elapsed:.1f}s (status: {response.status_code})")
         
         if response.status_code == 200:
             result = response.json()
+            task_id = result.get("task_id")
+            if not task_id:
+                print("❌ No task_id in response")
+                return None
             
-            print("\n✅ Success!")
-            print(f"   ⏱️  Generation: {result.get('generation_time', 'N/A')}s")
-            print(f"   🤖 Model: {result.get('model_used', 'N/A')}")
+            print(f"✅ Task ID: {task_id}")
+            print("⏳ Waiting for generation to complete...")
             
-            # Save image
-            if result.get("image"):
-                image_b64 = result["image"]
-                print(f"   📊 Image: {len(image_b64):,} chars")
+            # Poll for result
+            status_url = f"{endpoint}/api/generate/status/{task_id}"
+            result_url = f"{endpoint}/api/generate/result/{task_id}"
+            
+            max_wait = 600  # 10 minutes max
+            poll_interval = 2  # Poll every 2 seconds
+            waited = 0
+            
+            while waited < max_wait:
+                time.sleep(poll_interval)
+                waited += poll_interval
                 
-                if save_output:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_path = OUTPUT_DIR / f"gen_{task_type}_{timestamp}.png"
+                status_response = requests.get(status_url, timeout=10)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    status = status_data.get("status", "unknown")
+                    progress = status_data.get("progress", 0.0)
                     
-                    saved = _save_base64_image(image_b64, output_path)
-                    print(f"\n💾 Saved: {saved}")
+                    print(f"   Status: {status} ({progress*100:.1f}%)", end="\r")
                     
-                    if open_output:
-                        open_image(saved)
-                    
-                    return saved
-            else:
-                print("   ⚠️  No image in response")
+                    if status == "done":
+                        print("\n✅ Generation completed!")
+                        # Get result
+                        result_response = requests.get(result_url, timeout=30)
+                        if result_response.status_code == 200:
+                            result = result_response.json()
+                            
+                            elapsed = time.time() - start_time
+                            print(f"   ⏱️  Total time: {elapsed:.1f}s")
+                            print(f"   🤖 Model: {result.get('model_used', 'N/A')}")
+                            
+                            # Save image
+                            if result.get("image"):
+                                image_b64 = result["image"]
+                                print(f"   📊 Image: {len(image_b64):,} chars")
+                                
+                                if save_output:
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    output_path = OUTPUT_DIR / f"gen_{task_type}_{timestamp}.png"
+                                    
+                                    saved = _save_base64_image(image_b64, output_path)
+                                    print(f"\n💾 Saved: {saved}")
+                                    
+                                    if open_output:
+                                        open_image(saved)
+                                    
+                                    return saved
+                            else:
+                                print("   ⚠️  No image in result")
+                                return None
+                        break
+                    elif status == "error":
+                        print(f"\n❌ Generation failed: {status_data.get('error', 'Unknown error')}")
+                        return None
+                    elif status == "cancelled":
+                        print("\n🚫 Generation cancelled")
+                        return None
                 
-        elif response.status_code == 503:
-            print("\n⏳ Service unavailable - endpoint cold starting")
-            print("   Try again in ~30 seconds")
-            
+                if waited >= max_wait:
+                    print(f"\n⏱️  Timeout after {max_wait}s")
+                    return None
         else:
             print(f"\n❌ Error {response.status_code}")
             try:
@@ -394,7 +436,7 @@ def generate(
                 print(f"   {response.text[:300]}")
                 
     except requests.exceptions.Timeout:
-        print("\n❌ Timeout (10 min)")
+        print("\n❌ Timeout")
     except requests.exceptions.RequestException as e:
         print(f"\n❌ Request error: {e}")
     except Exception as e:

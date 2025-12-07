@@ -4,10 +4,11 @@ Modal app for ArtMancer backend.
 This file defines all Modal services, images, and helper functions for deployment.
 
 Architecture:
-- Heavy service (A100-80GB): Qwen generation, optimized for large model + LoRA.
-- Light services (T4/CPU): smart-mask, image-utils, debug, system.
-- API Gateway (CPU): Routes requests to appropriate services.
-- Job Manager (CPU): Coordinates async generation jobs.
+- API Gateway (CPU): Single entry point, routes requests to backend services.
+- Job Manager (CPU): Coordinates async generation jobs, dispatches to A100 workers.
+- Segmentation Service (T4): Smart mask segmentation.
+- Image Utils Service (CPU): Image processing utilities.
+- A100 Worker Function: Async image generation (spawned by Job Manager).
 
 Features:
 - Modal Volume for checkpoints + base model snapshot.
@@ -20,23 +21,21 @@ Table of Contents:
 3. IMAGE DEFINITIONS - Docker images for different services
    - cpu_image: Job Manager & API Gateway
    - heavy_image: Qwen generation (A100)
-   - fastsam_image: FastSAM segmentation (T4)
+   - segmentation_image: Mask segmentation (T4)
    - imageutils_image: Image utilities (CPU)
 4. create_fastapi_app() - Factory function for FastAPI apps
-5. SERVICE CLASSES - Modal service definitions
-   - JobManagerService: Async job coordination
-   - APIGatewayService: Request routing
-   - QwenService: Image generation
-   - FastSAMService: Smart mask segmentation
-   - ImageUtilsService: Image processing utilities
+5. SERVICE CLASSES - Modal service definitions (4 endpoints)
+   - APIGatewayService: Single entry point (https://<username>--api-gateway.modal.run)
+   - JobManagerService: Async job coordination (https://<username>--job-manager.modal.run)
+   - SegmentationService: Smart mask segmentation (https://<username>--segmentation.modal.run)
+   - ImageUtilsService: Image processing utilities (https://<username>--image-utils.modal.run)
 6. WORKER FUNCTIONS - Background tasks
-   - run_generation(): A100 worker for async generation
+   - qwen_worker(): A100 worker for async generation (spawned by Job Manager, not a public endpoint)
 7. HELPER FUNCTIONS - Volume management utilities
    - remove_checkpoint_file(): Remove single checkpoint
    - clear_checkpoints(): Remove all checkpoints
    - upload_checkpoints(): Upload checkpoints from local
-   - setup_volume(): Download Qwen base model
-   - setup_fastsam_volume(): Download FastSAM model
+   - setup_volume(): Download Qwen base model, FastSAM model, and BiRefNet model
 """
 
 from __future__ import annotations
@@ -62,7 +61,8 @@ BASE_MODEL_ID = "Qwen/Qwen-Image-Edit-2509"
 VOL_MOUNT_PATH = "/checkpoints"          # Mounted in functions
 VOL_MODEL_PATH = f"{VOL_MOUNT_PATH}/base_model"
 VOL_TASKS_PATH = VOL_MOUNT_PATH         # Keep LoRA checkpoints at /checkpoints/*.safetensors
-VOL_FASTSAM_PATH = f"{VOL_MOUNT_PATH}/fastsam"  # FastSAM-s.pt cache (load trực tiếp từ Volume, không copy)
+VOL_SEGMENTATION_PATH = f"{VOL_MOUNT_PATH}/segmentation"  # Segmentation models cache (FastSAM-s.pt, load trực tiếp từ Volume, không copy)
+VOL_BIREFNET_PATH = f"{VOL_MOUNT_PATH}/birefnet"  # BiRefNet model cache (load trực tiếp từ Volume, không copy)
 
 # ==========================================
 # INFRASTRUCTURE
@@ -151,16 +151,16 @@ heavy_image = (
     .add_local_dir("app", "/root/app", ignore=["**/__pycache__", "**/*.pyc", "**/.env", "**/.git"])
 )
 
-# 3.3 FASTSAM IMAGE (T4) - FastSAM segmentation only
+# 3.3 SEGMENTATION IMAGE (T4) - Mask segmentation service
 # ==========================================
 # Includes: ultralytics, torch (CUDA), scikit-image for mask processing
-fastsam_image = (
+segmentation_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgl1", "libglib2.0-0")
     .run_commands("pip install --upgrade pip")
     .pip_install("uv")
     .run_commands(
-        # Use CUDA torch for T4 GPU acceleration (FastSAM)
+        # Use CUDA torch for T4 GPU acceleration (segmentation models)
         "uv pip install --system --no-cache-dir "
         "torch>=2.4.0 "
         "torchvision>=0.19.0 "
@@ -172,6 +172,10 @@ fastsam_image = (
         "pydantic-settings>=2.2.0 "
         "python-multipart "
         "ultralytics==8.3.235 "  # FastSAM (pinned version)
+        "transformers>=4.57.3 "  # BiRefNet (AutoModelForImageSegmentation)
+        "einops "  # Required by BiRefNet
+        "kornia "  # Required by BiRefNet
+        "timm "  # Required by BiRefNet
         "opencv-python-headless "
         "scikit-image "  # For mask processing (binary_dilation, gaussian, etc.)
         "psutil"
@@ -213,9 +217,8 @@ imageutils_image = (
 # depending on which service is being deployed.
 
 def create_fastapi_app(
-    include_generation: bool = False,
     job_manager_mode: bool = False,
-    include_fastsam: bool = False,
+    include_segmentation: bool = False,
     include_image_utils: bool = False,
 ) -> FastAPI:
     """
@@ -225,9 +228,8 @@ def create_fastapi_app(
     Each service includes only the routers it needs.
     
     Args:
-        include_generation: If True, includes generation_sync router (Qwen Service).
         job_manager_mode: If True, includes generation_async router (Job Manager).
-        include_fastsam: If True, includes smart_mask router (FastSAM Service).
+        include_segmentation: If True, includes smart_mask router (Segmentation Service).
         include_image_utils: If True, includes image_utils router (Image Utils Service).
     
     Returns:
@@ -332,13 +334,9 @@ def create_fastapi_app(
         from app.api.endpoints import generation_async
         fastapi_app.include_router(generation_async.router)
         # Background cleanup is handled in lifespan context manager above
-    elif include_generation:
-        # Qwen Service: only sync generation (requires diffusers, transformers, peft)
-        from app.api.endpoints import generation_sync
-        fastapi_app.include_router(generation_sync.router)
 
-    if include_fastsam:
-        # FastSAM Service: smart mask segmentation (T4 GPU)
+    if include_segmentation:
+        # Segmentation Service: smart mask segmentation (T4 GPU)
         try:
             from app.api.endpoints import smart_mask
             fastapi_app.include_router(smart_mask.router)
@@ -382,7 +380,7 @@ def create_fastapi_app(
     image=cpu_image,
     cpu=1,  # Minimal CPU (cheapest option - only coordination, no heavy processing)
     min_containers=0,  # Allow cold boot (scale to zero when idle)
-    timeout=60,  # Short timeout (just coordination, no heavy processing)
+    timeout=1800,  # 30 minutes - needs to be long enough for SSE streams during pipeline loading
     scaledown_window=1200,  # Scale down after 20 minutes of inactivity
 )
 class JobManagerService:
@@ -451,13 +449,9 @@ class APIGatewayService:
         print("🚀 [APIGatewayService] Container starting up...")
         
         # Set service URLs from environment or defaults
-        generation_url = os.environ.setdefault(
-            "GENERATION_SERVICE_URL",
-            "https://nxan2911--qwen.modal.run"
-        )
         segmentation_url = os.environ.setdefault(
             "SEGMENTATION_SERVICE_URL",
-            "https://nxan2911--fastsam.modal.run"
+            "https://nxan2911--segmentation.modal.run"
         )
         image_utils_url = os.environ.setdefault(
             "IMAGE_UTILS_SERVICE_URL",
@@ -470,7 +464,6 @@ class APIGatewayService:
         
         # Log service URLs for verification
         print("📋 [APIGatewayService] Service URLs configured:")
-        print(f"   - Generation Service: {generation_url}")
         print(f"   - Segmentation Service: {segmentation_url}")
         print(f"   - Image Utils Service: {image_utils_url}")
         print(f"   - Job Manager Service: {job_manager_url}")
@@ -498,163 +491,90 @@ class APIGatewayService:
         return create_app()
 
 
-# 5.3 QWEN SERVICE (A100) - Image generation only
+# 5.4 SEGMENTATION SERVICE (T4) - Smart mask segmentation
 # ==========================================
-# Synchronous image generation service. Loads Qwen model and LoRA checkpoints.
-# Note: For async generation, use Job Manager + A100 worker instead.
+# Segmentation models (FastSAM, BiRefNet) for intelligent mask generation from bbox/points/strokes.
 @app.cls(
-    image=heavy_image,
-    gpu="A100-80GB",
-    volumes={VOL_MOUNT_PATH: volume},
-    timeout=1800,  # 30 phút phòng model chạy lâu
-    scaledown_window=120,  # Giữ container 2 phút sau request cuối (giảm cold start)
-)
-@modal.concurrent(max_inputs=3)  # Input concurrency per container
-class QwenService:
-    # Class attributes (initialized in @modal.enter)
-    container_start_time: float | None = None
-    is_ready: bool = False
-
-    @modal.enter()
-    def prepare_env(self):
-        """
-        Container startup hook: chạy khi container khởi động.
-        - Load model trực tiếp từ Volume (không copy để giảm cold-start)
-        - Thiết lập MODEL_PATH cho qwen_loader
-        - Track container lifecycle
-        """
-        self.container_start_time = time.time()
-        self.is_ready = False
-        print("🚀 [QwenService] Container starting up...")
-        
-        # Luôn set TASK_CHECKPOINTS_PATH để code khác dùng nếu cần
-        os.environ.setdefault("TASK_CHECKPOINTS_PATH", VOL_TASKS_PATH)
-
-        # Load model trực tiếp từ Volume (không copy để giảm cold-start từ 20-60s xuống 1-3s)
-        if Path(VOL_MODEL_PATH).exists():
-            os.environ["MODEL_PATH"] = VOL_MODEL_PATH
-            print(f"🚀 MODEL_PATH set to {VOL_MODEL_PATH} (loaded directly from Volume)")
-        else:
-            # Chưa setup Volume: qwen_loader sẽ dùng HF ID
-            print(
-                f"⚠️ Base model snapshot not found at {VOL_MODEL_PATH}. "
-                f"qwen_loader will load from Hugging Face ({BASE_MODEL_ID})."
-            )
-        
-        self.is_ready = True
-        uptime = time.time() - self.container_start_time
-        print(f"✅ [QwenService] Container ready! Startup took {uptime:.2f}s")
-
-    @modal.exit()
-    def cleanup(self):
-        """
-        Container shutdown hook: chạy khi container tắt (sau idle timeout hoặc preemption).
-        - Log container lifecycle
-        - Cleanup resources nếu cần
-        """
-        if self.container_start_time:
-            uptime = time.time() - self.container_start_time
-            print(f"🛑 [QwenService] Container shutting down after {uptime:.2f}s of uptime")
-        else:
-            print("🛑 [QwenService] Container shutting down")
-        
-        self.is_ready = False
-        print("✅ [QwenService] Cleanup complete")
-
-    @modal.asgi_app(label="qwen")
-    def serve(self):
-        """
-        Qwen service endpoint for image generation.
-        Exposed at: https://<username>--artmancer-qwen.modal.run
-        Note: This is kept for backward compatibility. New async flow uses CPU job manager.
-        """
-        return create_fastapi_app(include_generation=True)
-
-
-
-# 5.4 FASTSAM SERVICE (T4) - Smart mask segmentation only
-# ==========================================
-# FastSAM model for intelligent mask generation from bbox/points/strokes.
-@app.cls(
-    image=fastsam_image,
+    image=segmentation_image,
     gpu="T4",
     volumes={VOL_MOUNT_PATH: volume},
-    timeout=300,  # 5 phút để đủ thời gian download models (FastSAM)
+    timeout=300,  # 5 phút để đủ thời gian download models
     min_containers=0,  # Cold start - only run when needed
+    max_containers=5,  # Limit max containers to avoid GPU resource exhaustion
     scaledown_window=120,  # Scale down quickly (2 minutes)
 )
 @modal.concurrent(max_inputs=20)  # Allow multiple concurrent requests
-class FastSAMService:
+class SegmentationService:
     """
-    FastSAM service for smart mask segmentation.
-    Uses T4 GPU for FastSAM model inference.
+    Segmentation service for smart mask generation.
+    Uses T4 GPU for segmentation model inference (FastSAM, BiRefNet).
     """
     # Class attributes (initialized in @modal.enter)
     container_start_time: float | None = None
     is_ready: bool = False
-    fastsam_model: object | None = None
+    segmentation_model: object | None = None
 
     @modal.enter()
     def warmup(self):
         """
-        Container startup hook: pre-load FastSAM model để giảm latency.
+        Container startup hook: pre-load segmentation model để giảm latency.
         """
         self.container_start_time = time.time()
         self.is_ready = False
-        self.fastsam_model = None
-        print("🚀 [FastSAMService] Container starting up...")
+        self.segmentation_model = None
+        print("🚀 [SegmentationService] Container starting up...")
         
         import torch
-        print(f"🔧 [FastSAMService] CUDA available: {torch.cuda.is_available()}")
+        print(f"🔧 [SegmentationService] CUDA available: {torch.cuda.is_available()}")
         
-        # Pre-load FastSAM model
+        # Pre-load FastSAM model (default segmentation model)
         # Strategy: Load trực tiếp từ Volume (giống Qwen) để giảm cold-start
         try:
             from ultralytics import FastSAM  # type: ignore[attr-defined]
             
-            fastsam_model_path = "FastSAM-s.pt"  # Default: download from GitHub (lighter version)
+            segmentation_model_path = "FastSAM-s.pt"  # Default: download from GitHub (lighter version)
             
             # Load trực tiếp từ Volume (không copy để giảm cold-start, giống Qwen)
-            vol_fastsam_file = f"{VOL_FASTSAM_PATH}/FastSAM-s.pt"
-            if os.path.exists(vol_fastsam_file):
-                fastsam_model_path = vol_fastsam_file
-                print(f"🚀 FastSAM-s.pt loaded directly from Volume: {vol_fastsam_file}")
+            vol_segmentation_file = f"{VOL_SEGMENTATION_PATH}/FastSAM-s.pt"
+            if os.path.exists(vol_segmentation_file):
+                segmentation_model_path = vol_segmentation_file
+                print(f"🚀 FastSAM-s.pt loaded directly from Volume: {vol_segmentation_file}")
             else:
-                print("⚠️ FastSAM-s.pt not in Volume, will download from GitHub (run setup_fastsam_volume to cache)")
+                print("⚠️ FastSAM-s.pt not in Volume, will download from GitHub (run setup_volume to cache)")
             
-            print(f"🔄 Loading FastSAM-s from: {fastsam_model_path}")
-            self.fastsam_model = FastSAM(fastsam_model_path)
+            print(f"🔄 Loading FastSAM-s from: {segmentation_model_path}")
+            self.segmentation_model = FastSAM(segmentation_model_path)
             print("✅ FastSAM-s model loaded")
         except Exception as e:
-            print(f"⚠️ FastSAM warmup failed: {e}")
+            print(f"⚠️ Segmentation model warmup failed: {e}")
             import traceback
             traceback.print_exc()
         
         self.is_ready = True
         uptime = time.time() - self.container_start_time
-        print(f"✅ [FastSAMService] Container ready! Startup took {uptime:.2f}s")
+        print(f"✅ [SegmentationService] Container ready! Startup took {uptime:.2f}s")
 
     @modal.exit()
     def cleanup(self):
         """Container shutdown hook."""
         if self.container_start_time:
             uptime = time.time() - self.container_start_time
-            print(f"🛑 [FastSAMService] Container shutting down after {uptime:.2f}s of uptime")
+            print(f"🛑 [SegmentationService] Container shutting down after {uptime:.2f}s of uptime")
         else:
-            print("🛑 [FastSAMService] Container shutting down")
+            print("🛑 [SegmentationService] Container shutting down")
         
-        self.fastsam_model = None
+        self.segmentation_model = None
         self.is_ready = False
-        print("✅ [FastSAMService] Cleanup complete")
+        print("✅ [SegmentationService] Cleanup complete")
 
-    @modal.asgi_app(label="fastsam")
+    @modal.asgi_app(label="segmentation")
     def serve(self):
         """
-        FastSAM service endpoint for smart mask segmentation.
-        Exposed at: https://<username>--fastsam.modal.run
+        Segmentation service endpoint for smart mask generation.
+        Exposed at: https://<username>--segmentation.modal.run
         """
-        app = create_fastapi_app(include_fastsam=True)
-        print(f"🚀 [FastSAMService] FastAPI app created with {len(app.routes)} routes")
+        app = create_fastapi_app(include_segmentation=True)
+        print(f"🚀 [SegmentationService] FastAPI app created with {len(app.routes)} routes")
         # Log all routes for debugging
         for route in app.routes:
             route_path = getattr(route, 'path', None)
@@ -716,7 +636,7 @@ class ImageUtilsService:
 # ==========================================
 # Background functions that run on-demand (scale-to-zero).
 
-# 6.1 A100 WORKER FUNCTION (Scale-to-Zero)
+# 6.1 QWEN WORKER (Scale-to-Zero)
 # ==========================================
 # Executes image generation on A100 GPU. Called by Job Manager for async jobs.
 # Updates job_state_dictio with progress and results.
@@ -726,9 +646,9 @@ class ImageUtilsService:
     gpu="A100-80GB",
     timeout=1800,  # 30 minutes
     volumes={VOL_MOUNT_PATH: volume},
-    max_containers=1,  # Don't spawn multiple A100s
+    max_containers=1,  # Single user - only need 1 container at a time
 )
-def run_generation(task_id: str, payload: dict):
+def qwen_worker(task_id: str, payload: dict):
     """
     A100 worker function for async image generation.
     
@@ -780,12 +700,56 @@ def run_generation(task_id: str, payload: dict):
         from app.models.schemas import GenerationRequest
         from app.services.generation_service import GenerationService
         
+        # Check if pipeline is already loaded and can be reused
+        # Only clear cache if we need to reload (different task_type or flags)
+        # This allows container reuse: if same task_type, keep model in memory
+        try:
+            from app.core.qwen_loader import get_qwen_pipeline, is_qwen_pipeline_loaded, _flush_memory
+            from app.models.schemas import GenerationRequest
+            
+            # Parse payload to get task_type
+            request = GenerationRequest(**payload)
+            task_type = request.task_type or "insertion"
+            
+            # Check if pipeline is already loaded for this task
+            if is_qwen_pipeline_loaded(task_type):
+                existing_pipeline = get_qwen_pipeline(task_type)
+                if existing_pipeline is not None:
+                    print(f"♻️ [A100 Worker] Task {task_id}: Reusing existing pipeline for task_type={task_type}")
+                    # Just flush GPU memory cache (not the model) to free unused memory
+                    _flush_memory()
+                else:
+                    # Pipeline state inconsistent, clear and reload
+                    print(f"🔄 [A100 Worker] Task {task_id}: Pipeline state inconsistent, clearing cache...")
+                    from app.core.qwen_loader import clear_qwen_cache
+                    clear_qwen_cache()
+                    time.sleep(1)
+                    _flush_memory()
+            else:
+                # No pipeline loaded, ensure clean state before loading
+                print(f"🧹 [A100 Worker] Task {task_id}: No existing pipeline, ensuring clean state...")
+                from app.core.qwen_loader import clear_qwen_cache
+                clear_qwen_cache()
+                time.sleep(1)
+                _flush_memory()
+                print(f"✅ [A100 Worker] Task {task_id}: Cache cleared and memory flushed")
+        except Exception as e:
+            print(f"⚠️ [A100 Worker] Task {task_id}: Failed to check/reuse pipeline: {e}")
+            # Fallback: clear cache to ensure clean state
+            try:
+                from app.core.qwen_loader import clear_qwen_cache, _flush_memory
+                clear_qwen_cache()
+                time.sleep(1)
+                _flush_memory()
+            except Exception:
+                pass
+        
         print(f"🔄 [A100 Worker] Task {task_id}: Pipeline will be loaded by GenerationService...")
         
-        # Update state: processing
+        # Update state: loading_pipeline (pipeline is being loaded)
         job_state_dictio[task_id] = {
-            "status": "processing",
-            "progress": 0.3,
+            "status": "loading_pipeline",
+            "progress": 0.2,
             "error": None,
             "result": None,
             "debug_info": None,
@@ -794,6 +758,36 @@ def run_generation(task_id: str, payload: dict):
         
         # Convert payload to GenerationRequest
         request = GenerationRequest(**payload)
+        
+        # Create callback to update loading progress
+        def on_loading_progress(message: str, progress: float):
+            """Callback to update loading progress during pipeline loading."""
+            current_state = job_state_dictio.get(task_id, {})
+            # Map progress (0.0-1.0) to overall progress (0.2-0.3)
+            # Pipeline loading is 20-30% of total progress
+            overall_progress = 0.2 + (progress * 0.1)
+            job_state_dictio[task_id] = {
+                **current_state,
+                "status": "loading_pipeline",
+                "progress": overall_progress,
+                "loading_message": message,  # Store message for frontend
+            }
+            print(f"📊 [A100 Worker] Task {task_id}: Loading progress - {message} ({progress*100:.1f}%)")
+        
+        # Create callback to update status when pipeline is loaded
+        def on_pipeline_loaded():
+            """Callback to update status when pipeline finishes loading."""
+            current_state = job_state_dictio.get(task_id, {})
+            print(f"📢 [A100 Worker] Task {task_id}: on_pipeline_loaded callback called, updating status to processing...")
+            job_state_dictio[task_id] = {
+                **current_state,
+                "status": "processing",
+                "progress": 0.3,
+                "current_step": None,  # Reset step tracking
+                "total_steps": None,   # Will be set when inference starts
+                "loading_message": None,  # Clear loading message
+            }
+            print(f"✅ [A100 Worker] Task {task_id}: Status updated to 'processing', pipeline ready for generation")
         
         # Create progress callback to update job state with cancellation check
         def progress_callback(step: int, timestep: int, total_steps: int):
@@ -830,11 +824,16 @@ def run_generation(task_id: str, payload: dict):
             except Exception as e:
                 print(f"⚠️ [A100 Worker] Failed to update progress: {e}")
         
-        # Run generation with progress callback
+        # Run generation with progress callback and pipeline loaded callback
         print(f"🎨 [A100 Worker] Task {task_id}: Running generation...")
         generation_service = GenerationService()
-        # Pass progress callback to generation service
-        result = generation_service.generate(request, progress_callback=progress_callback)
+        # Pass progress callback, pipeline loaded callback, and loading progress callback to generation service
+        result = generation_service.generate(
+            request, 
+            progress_callback=progress_callback, 
+            on_pipeline_loaded=on_pipeline_loaded,
+            on_loading_progress=on_loading_progress
+        )
         
         # Convert result image to base64
         if result.get("image"):
@@ -855,6 +854,17 @@ def run_generation(task_id: str, payload: dict):
         }
         
         print(f"✅ [A100 Worker] Task {task_id}: Generation completed")
+        
+        # Keep pipeline in memory for container reuse
+        # Only flush GPU memory cache (not the model) to free unused memory
+        # This allows subsequent inferences to reuse the loaded model without reloading
+        try:
+            from app.core.qwen_loader import _flush_memory
+            print(f"🧹 [A100 Worker] Task {task_id}: Flushing GPU memory cache (keeping model in memory)...")
+            _flush_memory()
+            print(f"✅ [A100 Worker] Task {task_id}: GPU memory flushed (model kept in memory for reuse)")
+        except Exception as e:
+            print(f"⚠️ [A100 Worker] Task {task_id}: Memory flush warning: {e}")
         
         return {
             "status": "done",
@@ -878,6 +888,14 @@ def run_generation(task_id: str, payload: dict):
             "debug_info": None,
             "created_at": existing_state.get("created_at", time.time()),  # Preserve timestamp
         }
+        
+        # Cleanup on error too
+        try:
+            from app.core.qwen_loader import clear_qwen_cache
+            print(f"🧹 [A100 Worker] Task {task_id}: Cleaning up pipeline cache after error...")
+            clear_qwen_cache()
+        except Exception:
+            pass  # Ignore cleanup errors
         
         return {
             "status": "error",
@@ -1078,28 +1096,32 @@ def upload_checkpoints(local_checkpoints_dir: str = "./checkpoints", force: bool
         print("\n✅ All 3 task checkpoints are present: Insertion, Removal, White-balance")
 
 
-# 7.4 Setup Qwen base model snapshot in Volume
+# 7.4 Setup all models in Volume
 # ==========================================
-# Downloads Qwen base model from Hugging Face to Volume for faster cold starts.
+# Downloads Qwen base model, FastSAM model, and BiRefNet model to Volume for faster cold starts.
 # Optional but recommended: reduces cold-start from 20-60s to 1-3s.
 @app.function(
     image=heavy_image,
     volumes={VOL_MOUNT_PATH: volume},
-    timeout=3600,  # 1 hour for large model download
+    timeout=3600,  # 1 hour for large model downloads
 )
 def setup_volume():
     """
-    Download Qwen base model into Modal Volume for faster cold starts.
+    Download Qwen base model, FastSAM model, and BiRefNet model into Modal Volume for faster cold starts.
 
-    This is optional but recommended. If not run, the model will be downloaded
+    This is optional but recommended. If not run, the models will be downloaded
     on first use (slower cold-start).
 
     Usage:
         modal run modal_app.py::setup_volume
     """
     from huggingface_hub import snapshot_download
+    import urllib.request
 
-    print("🚀 Starting setup_volume: downloading base model to Volume...")
+    print("🚀 Starting setup_volume: downloading models to Volume...")
+    
+    # 1. Download Qwen base model
+    print("\n📦 [1/3] Downloading Qwen base model...")
     os.makedirs(VOL_MODEL_PATH, exist_ok=True)
 
     try:
@@ -1119,49 +1141,62 @@ def setup_volume():
     except Exception:
         pass
 
-
-# 7.5 Setup FastSAM model in Volume
-# ==========================================
-# Downloads FastSAM-s.pt model to Volume for faster FastSAM service cold starts.
-@app.function(
-    image=fastsam_image,
-    volumes={VOL_MOUNT_PATH: volume},
-    timeout=600,  # 10 minutes for model download
-)
-def setup_fastsam_volume():
-    """
-    Download FastSAM-s.pt model into Modal Volume for faster FastSAM service cold starts.
-    
-    Optional but recommended for faster FastSAM service startup.
-
-    Usage:
-        modal run modal_app.py::setup_fastsam_volume
-    """
-    import urllib.request
-    
-    print("🚀 Starting setup_fastsam_volume: downloading FastSAM-s.pt to Volume...")
-    os.makedirs(VOL_FASTSAM_PATH, exist_ok=True)
+    # 2. Download FastSAM model
+    print("\n📦 [2/3] Downloading FastSAM-s.pt...")
+    os.makedirs(VOL_SEGMENTATION_PATH, exist_ok=True)
     
     fastsam_url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/FastSAM-s.pt"
-    vol_fastsam_file = f"{VOL_FASTSAM_PATH}/FastSAM-s.pt"
+    vol_segmentation_file = f"{VOL_SEGMENTATION_PATH}/FastSAM-s.pt"
     
     try:
         print(f"📥 Downloading FastSAM-s.pt from {fastsam_url}...")
-        urllib.request.urlretrieve(fastsam_url, vol_fastsam_file)
+        urllib.request.urlretrieve(fastsam_url, vol_segmentation_file)
         
         # Get file size
-        file_size = os.path.getsize(vol_fastsam_file)
-        print(f"✅ FastSAM-s.pt downloaded to {vol_fastsam_file} ({file_size / 1024 / 1024:.1f} MB)")
+        file_size = os.path.getsize(vol_segmentation_file)
+        print(f"✅ FastSAM-s.pt downloaded to {vol_segmentation_file} ({file_size / 1024 / 1024:.1f} MB)")
         
-        # Commit changes to Volume
-        volume.commit()
-        
-        print("✅ FastSAM-s.pt cached in Volume. FastSAMService will use this for faster cold starts.")
+        print("✅ FastSAM-s.pt cached in Volume. SegmentationService will use this for faster cold starts.")
     except Exception as exc:
         print(f"❌ Failed to download FastSAM-s.pt: {exc}")
         import traceback
         traceback.print_exc()
         return
+    
+    # 3. Download BiRefNet model
+    print("\n📦 [3/3] Downloading BiRefNet model...")
+    os.makedirs(VOL_BIREFNET_PATH, exist_ok=True)
+    
+    birefnet_repo_id = "zhengpeng7/BiRefNet"
+    vol_birefnet_dir = VOL_BIREFNET_PATH
+    
+    try:
+        print(f"📥 Downloading BiRefNet from {birefnet_repo_id}...")
+        snapshot_download(
+            repo_id=birefnet_repo_id,
+            local_dir=vol_birefnet_dir,
+            ignore_patterns=["*.msgpack", ".git*"],
+        )
+        
+        # Get directory size
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(vol_birefnet_dir):
+            for filename in filenames:
+                filepath = os.path.join(dirpath, filename)
+                total_size += os.path.getsize(filepath)
+        print(f"✅ BiRefNet model downloaded to {vol_birefnet_dir} ({total_size / 1024 / 1024:.1f} MB)")
+        
+        print("✅ BiRefNet cached in Volume. Will be loaded directly from Volume for faster cold starts.")
+    except Exception as exc:
+        print(f"❌ Failed to download BiRefNet model: {exc}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Commit all changes to Volume
+    print("\n💾 Committing changes to Volume...")
+    volume.commit()
+    print("✅ All models cached in Volume successfully!")
 
 
 # ==========================================
@@ -1171,17 +1206,17 @@ def setup_fastsam_volume():
 # Deploy all services:
 #   modal deploy modal_app.py
 #
-# This deploys all services defined above:
+# This deploys 4 public endpoints:
 # - API Gateway: https://<username>--api-gateway.modal.run
-#   - Routes all requests to appropriate services
+#   - Single entry point, routes all requests to backend services
 # - Job Manager: https://<username>--job-manager.modal.run
-#   - Handles async generation job coordination
-# - Qwen Service: https://<username>--qwen.modal.run
-#   - Synchronous image generation (A100 GPU)
-# - FastSAM Service: https://<username>--fastsam.modal.run
+#   - Handles async generation job coordination, dispatches to A100 workers
+# - Segmentation Service: https://<username>--segmentation.modal.run
 #   - Smart mask segmentation (T4 GPU)
 # - Image Utils Service: https://<username>--image-utils.modal.run
 #   - Image processing utilities (CPU)
+#
+# Note: A100 worker (qwen_worker) is not a public endpoint - it's spawned internally by Job Manager.
 #
 # All services support cold boot (scale to zero when idle) for cost optimization.
 #
@@ -1189,8 +1224,7 @@ def setup_fastsam_volume():
 #   modal serve modal_app.py
 #
 # Setup Volume (recommended before first deployment):
-#   modal run modal_app.py::setup_volume          # Download Qwen base model
-#   modal run modal_app.py::setup_fastsam_volume  # Download FastSAM model
+#   modal run modal_app.py::setup_volume          # Download Qwen base model, FastSAM model, and BiRefNet model
 #   modal run modal_app.py::upload_checkpoints    # Upload LoRA checkpoints
 
 

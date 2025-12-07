@@ -29,8 +29,11 @@ class ServiceClient:
             raise ImportError("httpx is required for ServiceClient. Install it with: pip install httpx")
         self.service_url = service_url.rstrip("/")
         self.timeout = timeout
+        # Create httpx.Timeout object (httpx requires Timeout object, not float)
+        # Set connect, read, write, and pool timeouts all to the same value
+        timeout_obj = httpx.Timeout(timeout, connect=timeout, read=timeout, write=timeout, pool=timeout)
         # Enable redirect following for Modal's 303 redirects (with __modal_function_call_id)
-        self._client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        self._client = httpx.AsyncClient(timeout=timeout_obj, follow_redirects=True)
     
     async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Make GET request to service."""
@@ -108,13 +111,9 @@ def get_service_url(service_name: str, default: str) -> str:
 
 
 # Default service URLs (Modal endpoints)
-GENERATION_SERVICE_URL = get_service_url(
-    "generation",
-    os.getenv("GENERATION_SERVICE_URL", "https://nxan2911--qwen.modal.run")
-)
 SEGMENTATION_SERVICE_URL = get_service_url(
     "segmentation",
-    os.getenv("SEGMENTATION_SERVICE_URL", "https://nxan2911--fastsam.modal.run")
+    os.getenv("SEGMENTATION_SERVICE_URL", "https://nxan2911--segmentation.modal.run")
 )
 IMAGE_UTILS_SERVICE_URL = get_service_url(
     "image_utils",

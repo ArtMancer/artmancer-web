@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import traceback
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -13,7 +14,6 @@ except ImportError:
 
 from shared.clients.service_client import (
     ServiceClient,
-    GENERATION_SERVICE_URL,
     SEGMENTATION_SERVICE_URL,
     IMAGE_UTILS_SERVICE_URL,
     JOB_MANAGER_SERVICE_URL,
@@ -99,10 +99,8 @@ def create_router() -> APIRouter:
     router = APIRouter(prefix="/api", tags=["gateway"])
     
     # Initialize service clients with appropriate timeouts
-    # Generation service needs longer timeout (up to 30 minutes for model processing)
-    generation_client = ServiceClient(GENERATION_SERVICE_URL, timeout=1200.0)  # 20 minutes
-    # Other services have shorter timeouts (30 seconds default)
-    segmentation_client = ServiceClient(SEGMENTATION_SERVICE_URL)
+    # Segmentation service needs longer timeout for BiRefNet model loading and inference (5 minutes)
+    segmentation_client = ServiceClient(SEGMENTATION_SERVICE_URL, timeout=300.0)  # 5 minutes for BiRefNet
     image_utils_client = ServiceClient(IMAGE_UTILS_SERVICE_URL)
     job_manager_client = ServiceClient(JOB_MANAGER_SERVICE_URL)
     
@@ -117,21 +115,13 @@ def create_router() -> APIRouter:
         """Root endpoint."""
         return {"message": "ArtMancer API Gateway", "version": "3.0.0"}
     
-    # Generation endpoints - forward to generation service
-    @router.post("/generate")
-    async def generate(request: Request):
-        """Forward generation request to generation service."""
-        endpoint = "/api/generate"
-        service_url = generation_client.service_url
-        full_url = f"{service_url}{endpoint}"
-        
-        try:
-            body = await request.json()
-            print(f"🔄 [API Gateway] Forwarding generation request to {full_url}")
-            response = await generation_client.post(endpoint, json=body)
-            return JSONResponse(content=response)
-        except Exception as e:
-            _handle_service_error(e, "Generation Service", service_url, endpoint)
+    # OPTIONS handler for CORS preflight - FastAPI CORS middleware should handle this,
+    # but adding explicit handler as fallback
+    @router.options("/{full_path:path}")
+    async def options_handler(full_path: str):
+        """Handle CORS preflight requests."""
+        from fastapi.responses import Response
+        return Response(status_code=200)
     
     # Async generation endpoints - forward to job manager
     @router.post("/generate/async")
@@ -167,6 +157,43 @@ def create_router() -> APIRouter:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     
+    @router.get("/generate/stream/{task_id}")
+    async def stream_generation_progress(task_id: str):
+        """Forward SSE stream for generation progress from job manager."""
+        from fastapi.responses import StreamingResponse
+        import asyncio
+        
+        endpoint = f"/api/generate/stream/{task_id}"
+        service_url = job_manager_client.service_url
+        full_url = f"{service_url}{endpoint}"
+        
+        async def stream_events():
+            """Stream events from Job Manager to client."""
+            try:
+                print(f"🔄 [API Gateway] Forwarding SSE stream request to {full_url}")
+                # Use httpx to stream the SSE response
+                async with httpx.AsyncClient(timeout=1800.0, follow_redirects=True) as client:
+                    async with client.stream("GET", full_url) as response:
+                        response.raise_for_status()
+                        # Forward headers for SSE
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+            except Exception as e:
+                error_msg = f"SSE connection error: {str(e)}"
+                print(f"❌ [API Gateway] {error_msg}")
+                # Send error as SSE event
+                yield f"data: {json.dumps({'error': error_msg})}\n\n".encode()
+        
+        return StreamingResponse(
+            stream_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+            }
+        )
+    
     # Helper function to forward segmentation requests
     async def _forward_segmentation_request(request: Request, endpoint: str) -> JSONResponse:
         """Forward request to segmentation service."""
@@ -194,15 +221,6 @@ def create_router() -> APIRouter:
         return await _forward_segmentation_request(request, "/api/smart-mask/detect")
     
     # Cancel endpoints - forward to appropriate services
-    @router.post("/generate/cancel/{task_id}")
-    async def cancel_generation(task_id: str):
-        """Cancel sync generation task."""
-        try:
-            response = await generation_client.post(f"/api/generate/cancel/{task_id}")
-            return JSONResponse(content=response)
-        except Exception as e:
-            raise _handle_service_error(e, "Generation Service", generation_client.service_url, f"/api/generate/cancel/{task_id}")
-    
     @router.post("/generate/async/cancel/{task_id}")
     async def cancel_async_generation(task_id: str):
         """Cancel async generation task."""
@@ -237,6 +255,192 @@ def create_router() -> APIRouter:
         except Exception as e:
             _handle_service_error(e, "Image Utils Service", service_url, endpoint)
     
+    # Debug endpoints - forward to job manager (where debug sessions are created)
+    @router.get("/debug/sessions")
+    async def list_debug_sessions():
+        """List all debug sessions from job manager."""
+        try:
+            response = await job_manager_client.get("/api/debug/sessions")
+            return JSONResponse(content=response)
+        except Exception as e:
+            raise _handle_service_error(e, "Job Manager Service", job_manager_client.service_url, "/api/debug/sessions")
+    
+    @router.get("/debug/sessions/{session_name}")
+    async def get_debug_session(session_name: str):
+        """Get debug session details from job manager."""
+        try:
+            response = await job_manager_client.get(f"/api/debug/sessions/{session_name}")
+            return JSONResponse(content=response)
+        except Exception as e:
+            raise _handle_service_error(e, "Job Manager Service", job_manager_client.service_url, f"/api/debug/sessions/{session_name}")
+    
+    @router.get("/debug/sessions/{session_name}/download")
+    async def download_debug_session(session_name: str):
+        """Download debug session ZIP from job manager."""
+        from fastapi.responses import StreamingResponse
+        
+        if httpx is None:
+            raise HTTPException(status_code=500, detail="httpx library not available")
+        
+        endpoint = f"/api/debug/sessions/{session_name}/download"
+        service_url = job_manager_client.service_url
+        full_url = f"{service_url}{endpoint}"
+        
+        print(f"🔄 [API Gateway] Forwarding debug session download to {full_url}")
+        
+        # Check status code BEFORE creating StreamingResponse to avoid "response already started" error
+        # Do a HEAD request first to check if session exists
+        try:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                # Try HEAD request first (some servers may not support it, so we'll fall back to GET)
+                try:
+                    head_response = await client.head(full_url)
+                    if head_response.status_code != 200:
+                        # Session doesn't exist or error - get detailed error message
+                        error_detail = f"HTTP {head_response.status_code}: {head_response.reason_phrase or 'Unknown error'}"
+                        print(f"❌ [API Gateway] {error_detail}")
+                        # Do a GET request to get error details
+                        try:
+                            get_response = await client.get(full_url)
+                            if get_response.status_code != 200:
+                                try:
+                                    error_data = get_response.json()
+                                    error_detail = error_data.get("detail", error_detail)
+                                except Exception:
+                                    error_text = get_response.text[:500] if get_response.text else ""
+                                    if error_text:
+                                        error_detail = error_text
+                        except Exception:
+                            pass
+                        raise HTTPException(status_code=head_response.status_code, detail=error_detail)
+                except HTTPException:
+                    raise
+                except Exception:
+                    # HEAD not supported or failed, will check during stream
+                    pass
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"⚠️ [API Gateway] Pre-check failed: {e}, will proceed with streaming")
+        
+        # Create streaming generator - status check happens inside to keep context alive
+        async def stream_download():
+            """Stream ZIP file from Job Manager to client."""
+            try:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                    async with client.stream("GET", full_url) as response:
+                        # Check status code immediately after opening stream, before any data is yielded
+                        if response.status_code != 200:
+                            error_detail = f"HTTP {response.status_code}: {response.reason_phrase or 'Unknown error'}"
+                            print(f"❌ [API Gateway] {error_detail}")
+                            # Try to read error message from response
+                            try:
+                                error_text = await response.aread()
+                                if error_text:
+                                    try:
+                                        error_data = json.loads(error_text)
+                                        error_detail = error_data.get("detail", error_detail)
+                                    except json.JSONDecodeError:
+                                        # If not JSON, use the text as detail
+                                        error_detail = error_text.decode('utf-8', errors='ignore')[:500]
+                            except Exception as e:
+                                print(f"⚠️ [API Gateway] Failed to read error response: {e}")
+                            
+                            # Can't raise HTTPException here as StreamingResponse already started
+                            # Instead, we need to handle this before creating StreamingResponse
+                            # This should not happen if HEAD check worked, but handle gracefully
+                            raise RuntimeError(f"HTTP {response.status_code}: {error_detail}")
+                        
+                        # Status code is 200, stream the data
+                        # Get content length from response if available
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            print(f"📦 [API Gateway] ZIP size: {content_length} bytes")
+                        
+                        # Forward headers for file download
+                        chunk_count = 0
+                        total_bytes = 0
+                        async for chunk in response.aiter_bytes():
+                            chunk_count += 1
+                            total_bytes += len(chunk)
+                            yield chunk
+                        
+                        print(f"✅ [API Gateway] Streamed {chunk_count} chunks, {total_bytes} bytes total")
+            except RuntimeError as e:
+                # Re-raise as HTTPException, but this will cause "response already started"
+                # This should not happen if pre-check worked
+                error_msg = str(e)
+                print(f"❌ [API Gateway] Stream error: {error_msg}")
+                # Can't raise HTTPException here - just log and let client see incomplete response
+                raise
+            except httpx.HTTPStatusError as e:
+                error_detail = f"HTTP {e.response.status_code}: {e.response.reason_phrase or 'Unknown error'}"
+                print(f"❌ [API Gateway] {error_detail}")
+                raise RuntimeError(error_detail)
+            except Exception as e:
+                error_msg = f"Stream error: {str(e)}"
+                print(f"❌ [API Gateway] {error_msg}")
+                raise
+        
+        # Create StreamingResponse - errors should be caught before this point
+        return StreamingResponse(
+            stream_download(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{session_name}.zip"',
+                "Cache-Control": "no-cache",
+            }
+        )
+    
+    @router.get("/debug/sessions/{session_name}/images/{image_name}")
+    async def get_debug_image(session_name: str, image_name: str):
+        """Get debug image from job manager."""
+        from fastapi.responses import StreamingResponse
+        
+        endpoint = f"/api/debug/sessions/{session_name}/images/{image_name}"
+        service_url = job_manager_client.service_url
+        full_url = f"{service_url}{endpoint}"
+        
+        async def stream_image():
+            """Stream image from Job Manager to client."""
+            try:
+                print(f"🔄 [API Gateway] Forwarding debug image request to {full_url}")
+                # Use httpx to stream the response
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    async with client.stream("GET", full_url) as response:
+                        response.raise_for_status()
+                        # Forward headers for image
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+            except Exception as e:
+                error_msg = f"Image download error: {str(e)}"
+                print(f"❌ [API Gateway] {error_msg}")
+                raise HTTPException(status_code=500, detail=error_msg)
+        
+        return StreamingResponse(
+            stream_image(),
+            media_type="image/png"
+        )
+    
+    @router.get("/debug/status")
+    async def get_debug_status():
+        """Get debug service status from job manager."""
+        try:
+            response = await job_manager_client.get("/api/debug/status")
+            return JSONResponse(content=response)
+        except Exception as e:
+            raise _handle_service_error(e, "Job Manager Service", job_manager_client.service_url, "/api/debug/status")
+    
+    @router.post("/debug/cleanup")
+    async def cleanup_debug_sessions(request: Request):
+        """Clean up old debug sessions in job manager."""
+        try:
+            body = await request.json()
+            response = await job_manager_client.post("/api/debug/cleanup", json=body)
+            return JSONResponse(content=response)
+        except Exception as e:
+            raise _handle_service_error(e, "Job Manager Service", job_manager_client.service_url, "/api/debug/cleanup")
+    
     # System endpoints - forward to appropriate service
     @router.get("/system/health")
     async def system_health():
@@ -245,7 +449,6 @@ def create_router() -> APIRouter:
         
         # Check all services with individual timeouts
         services = {
-            "generation": generation_client,
             "segmentation": segmentation_client,
             "image_utils": image_utils_client,
             "job_manager": job_manager_client,

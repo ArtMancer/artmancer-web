@@ -23,11 +23,25 @@ import {
   Box,
   Typography,
   Chip,
+  Slider,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Divider,
+  IconButton,
+  Tooltip,
+  Paper,
+  Stack,
 } from "@mui/material";
 import {
   CloudUpload as CloudUploadIcon,
   Image as ImageIcon,
   CheckCircle as CheckCircleIcon,
+  CameraAlt as CameraIcon,
+  Delete as DeleteIcon,
+  HelpOutline as HelpIcon,
+  Image as ImageIconMUI,
 } from "@mui/icons-material";
 import type { InputQualityPreset } from "@/services/api";
 import { apiService } from "@/services/api";
@@ -51,6 +65,7 @@ interface SidebarProps {
   onReferenceImageUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveImage: () => void;
   onRemoveReferenceImage: () => void;
+  onEditReferenceImage?: () => void;
   onAiTaskChange: (
     task: "white-balance" | "object-insert" | "object-removal" | "evaluation"
   ) => void;
@@ -62,6 +77,10 @@ interface SidebarProps {
   enableSmartMasking?: boolean;
   isSmartMaskLoading?: boolean;
   onSmartMaskingChange?: (enabled: boolean) => void;
+  smartMaskModelType?: 'segmentation' | 'birefnet';
+  onSmartMaskModelTypeChange?: (modelType: 'segmentation' | 'birefnet') => void;
+  borderAdjustment?: number;
+  onBorderAdjustmentChange?: (value: number) => void;
   onResizeStart?: (e: React.MouseEvent) => void; // Resize handle handler
   onWidthChange?: (width: number) => void; // For keyboard resize
   // Mask history props
@@ -80,15 +99,12 @@ interface SidebarProps {
   guidanceScale?: number;
   inferenceSteps?: number;
   cfgScale?: number;
+  seed?: number;
   onNegativePromptChange?: (value: string) => void;
   onGuidanceScaleChange?: (value: number) => void;
   onInferenceStepsChange?: (value: number) => void;
   onCfgScaleChange?: (value: number) => void;
-  // White balance props
-  whiteBalanceTemperature?: number;
-  whiteBalanceTint?: number;
-  onWhiteBalanceTemperatureChange?: (value: number) => void;
-  onWhiteBalanceTintChange?: (value: number) => void;
+  onSeedChange?: (value: number) => void;
   // Evaluation mode props
   evaluationMode?: "single" | "multiple";
   evaluationTask?: "white-balance" | "object-insert" | "object-removal";
@@ -137,12 +153,6 @@ interface SidebarProps {
   onInputQualityChange: (value: InputQualityPreset) => void;
   onCustomSquareSizeChange?: (size: number) => void; // Handler for custom square size
   // Low-end optimization props
-  enable4BitTextEncoder?: boolean;
-  enableCpuOffload?: boolean;
-  enableMemoryOptimizations?: boolean;
-  onEnable4BitTextEncoderChange?: (enabled: boolean) => void;
-  onEnableCpuOffloadChange?: (enabled: boolean) => void;
-  onEnableMemoryOptimizationsChange?: (enabled: boolean) => void;
   // Debug panel props
   isDebugPanelVisible?: boolean;
   onDebugPanelVisibilityChange?: (visible: boolean) => void;
@@ -194,6 +204,7 @@ export default function Sidebar({
   onReferenceImageUpload,
   onRemoveImage,
   onRemoveReferenceImage,
+  onEditReferenceImage,
   onAiTaskChange,
   onToggleMaskingMode,
   onClearMask,
@@ -203,6 +214,10 @@ export default function Sidebar({
   enableSmartMasking = true,
   isSmartMaskLoading = false,
   onSmartMaskingChange,
+  smartMaskModelType = 'segmentation',
+  onSmartMaskModelTypeChange,
+  borderAdjustment = 0,
+  onBorderAdjustmentChange,
   onResizeStart,
   onWidthChange,
   // Mask history props with defaults
@@ -221,15 +236,12 @@ export default function Sidebar({
   guidanceScale = 1.0,
   inferenceSteps = 10,
   cfgScale = 4.0,
+  seed = 42, // Default seed: 42 (famous default)
   onNegativePromptChange,
   onGuidanceScaleChange,
   onInferenceStepsChange,
   onCfgScaleChange,
-  // White balance props with defaults
-  whiteBalanceTemperature = 0,
-  whiteBalanceTint = 0,
-  onWhiteBalanceTemperatureChange,
-  onWhiteBalanceTintChange,
+  onSeedChange,
   // Evaluation mode props with defaults
   evaluationMode = "single",
   evaluationTask = "white-balance",
@@ -273,13 +285,6 @@ export default function Sidebar({
   onBenchmarkTaskChange,
   onBenchmarkPromptChange,
   onRunBenchmark,
-  // Low-end optimization props with defaults
-  enable4BitTextEncoder = false,
-  enableCpuOffload = false,
-  enableMemoryOptimizations = false,
-  onEnable4BitTextEncoderChange,
-  onEnableCpuOffloadChange,
-  onEnableMemoryOptimizationsChange,
   // Debug panel props with defaults
   isDebugPanelVisible = false,
   onDebugPanelVisibilityChange,
@@ -307,20 +312,16 @@ export default function Sidebar({
     value: InputQualityPreset;
     label: string;
     ratio: string;
-    description: string;
   }[] = [
     {
       value: "resized",
       label: "Resize 1:1",
       ratio: "1:1",
-      description:
-        "Resize về aspect ratio vuông (512x512, 1024x1024,...), tối ưu hiệu năng.",
     },
     {
       value: "original",
       label: "Ảnh gốc",
       ratio: "Gốc",
-      description: "Giữ nguyên kích thước và tỷ lệ gốc, chi tiết cao nhất.",
     },
   ];
 
@@ -334,7 +335,7 @@ export default function Sidebar({
     Math.max(imageDimensions.width, imageDimensions.height) >= 2048;
   return (
     <div
-      className={`bg-[var(--secondary-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 sidebar-scrollable ${
+      className={`bg-[var(--panel-bg)] flex-shrink-0 flex flex-col lg:flex-col fixed right-0 z-30 sidebar-scrollable ${
         isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
       }`}
       style={{
@@ -361,350 +362,668 @@ export default function Sidebar({
         >
           {/* Image Upload Section */}
           {!isEditingDone && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
+            <Box sx={{ pb: 2 }}>
+              <Typography
+                variant="subtitle2"
+                sx={{
+                  mb: 2,
+                  color: "var(--text-primary)",
+                  fontWeight: 500,
+                  fontSize: { xs: "0.875rem", sm: "1rem" },
+                }}
+              >
                 {t("sidebar.imageUpload")}
-              </h3>
-              <div className="space-y-3">
-                <label
-                  htmlFor="image-upload-panel"
-                  className="w-full px-4 py-3 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                >
-                  <FaCamera className="w-4 h-4" />
-                  {t("sidebar.chooseImage")}
-                </label>
+              </Typography>
+              <Stack spacing={1.5}>
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/jpg,image/webp"
                   onChange={onImageUpload}
-                  className="hidden"
+                  style={{ display: "none" }}
                   id="image-upload-panel"
                 />
+                <label htmlFor="image-upload-panel">
+                  <Button
+                    component="span"
+                    fullWidth
+                    variant="contained"
+                    startIcon={<CameraIcon />}
+                    sx={{
+                      bgcolor: "var(--primary-accent)",
+                      color: "white",
+                      "&:hover": {
+                        bgcolor: "var(--highlight-accent)",
+                      },
+                      py: 1.5,
+                      textTransform: "none",
+                      fontSize: "0.875rem",
+                    }}
+                  >
+                    {t("sidebar.chooseImage")}
+                  </Button>
+                </label>
                 {uploadedImage && (
-                  <button
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    color="error"
                     onClick={onRemoveImage}
-                    className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
+                    sx={{
+                      py: 1.25,
+                      textTransform: "none",
+                      fontSize: "0.875rem",
+                    }}
                   >
                     {t("sidebar.removeImage")}
-                  </button>
+                  </Button>
                 )}
-              </div>
-            </div>
+              </Stack>
+            </Box>
           )}
 
-          {/* Input Quality Section */}
+          {/* Image Resolution Section */}
           {!isEditingDone && uploadedImage && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-[var(--text-primary)] font-medium text-sm lg:text-base">
-                  Chất lượng xử lý
-                </h3>
-                <button
-                  type="button"
-                  className="text-[var(--text-secondary)] hover:text-[var(--primary-accent)] transition-colors"
-                  title="Giảm kích thước ảnh đầu vào để tiết kiệm VRAM. Mức thấp hơn giúp chạy nhanh hơn nhưng ít chi tiết hơn."
+            <>
+              <Divider sx={{ my: 2, borderColor: "var(--border-color)" }} />
+              <Box sx={{ pb: 2 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    mb: 2,
+                  }}
                 >
-                  <FaQuestionCircle className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  {inputQualityOptions.map((option) => (
-                    <button
-                      key={option.value}
-                      onClick={() => onInputQualityChange(option.value)}
-                      disabled={isApplyingQuality}
-                      className={`px-3 py-2 rounded text-sm border transition-colors text-left ${
-                        inputQuality === option.value
-                          ? "bg-[var(--primary-accent)] text-white border-[var(--primary-accent)]"
-                          : "bg-[var(--secondary-bg)] text-[var(--text-primary)] border-[var(--border-color)] hover:bg-[var(--hover-bg)]"
-                      } ${
-                        isApplyingQuality ? "opacity-60 cursor-not-allowed" : ""
-                      }`}
+                  <Typography
+                    variant="subtitle2"
+                    sx={{
+                      color: "var(--text-primary)",
+                      fontWeight: 500,
+                      fontSize: { xs: "0.875rem", sm: "1rem" },
+                    }}
+                  >
+                    Độ phân giải ảnh
+                  </Typography>
+                  <Tooltip title="Giảm kích thước ảnh đầu vào để tiết kiệm VRAM. Mức thấp hơn giúp chạy nhanh hơn nhưng ít chi tiết hơn.">
+                    <IconButton
+                      size="small"
+                      sx={{
+                        color: "var(--text-secondary)",
+                        "&:hover": {
+                          color: "var(--primary-accent)",
+                        },
+                      }}
                     >
-                      <div className="flex items-center justify-between font-medium">
-                        <span>{option.label}</span>
-                        <span className="text-xs opacity-80">
-                          {option.ratio}
-                        </span>
-                      </div>
-                      <p className="text-[10px] mt-1 opacity-80">
-                        {option.description}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-                {/* Custom size input for 1:1 mode */}
-                {inputQuality === "resized" && (
-                  <div className="mt-3 space-y-2">
-                    <label className="text-xs text-[var(--text-secondary)] block">
-                      Kích thước vuông (px):
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={256}
-                        max={2048}
-                        step={64}
-                        value={customSquareSize}
-                        onChange={(e) => {
-                          const value = parseInt(e.target.value) || 1024;
-                          const clamped = Math.max(256, Math.min(2048, value));
-                          onCustomSquareSizeChange?.(clamped);
-                        }}
-                        disabled={isApplyingQuality}
-                        className="w-24 px-2 py-1 text-sm bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:border-[var(--primary-accent)] focus:outline-none"
-                      />
-                      <span className="text-xs text-[var(--text-secondary)]">
-                        × {customSquareSize}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {[512, 768, 1024, 1536, 2048].map((size) => (
-                        <button
-                          key={size}
-                          onClick={() => onCustomSquareSizeChange?.(size)}
+                      <HelpIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                <Stack spacing={1.5}>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+                    {inputQualityOptions.map((option) => (
+                      <Box key={option.value} sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
+                        <Button
+                          fullWidth
+                          onClick={() => onInputQualityChange(option.value)}
                           disabled={isApplyingQuality}
-                          className={`px-2 py-0.5 text-xs rounded border transition-colors ${
-                            customSquareSize === size
-                              ? "bg-[var(--primary-accent)] text-white border-[var(--primary-accent)]"
-                              : "bg-[var(--secondary-bg)] text-[var(--text-secondary)] border-[var(--border-color)] hover:bg-[var(--hover-bg)]"
-                          }`}
+                          variant={
+                            inputQuality === option.value
+                              ? "contained"
+                              : "outlined"
+                          }
+                          sx={{
+                            bgcolor:
+                              inputQuality === option.value
+                                ? "var(--primary-accent)"
+                                : "transparent",
+                            color:
+                              inputQuality === option.value
+                                ? "white"
+                                : "var(--text-primary)",
+                            borderColor:
+                              inputQuality === option.value
+                                ? "var(--primary-accent)"
+                                : "var(--border-color)",
+                            "&:hover": {
+                              bgcolor:
+                                inputQuality === option.value
+                                  ? "var(--primary-accent)"
+                                  : "var(--hover-bg)",
+                              borderColor: "var(--primary-accent)",
+                            },
+                            py: 1.5,
+                            px: 1.5,
+                            textTransform: "none",
+                            textAlign: "left",
+                            justifyContent: "space-between",
+                            fontSize: "0.875rem",
+                            opacity: isApplyingQuality ? 0.6 : 1,
+                            minHeight: 48,
+                            height: 48,
+                          }}
                         >
-                          {size}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {selectedQuality && (
-                  <p className="text-xs text-[var(--text-secondary)] mt-2">
-                    {inputQuality === "resized"
-                      ? `Ảnh sẽ được resize về ${customSquareSize}×${customSquareSize}`
-                      : `Đang chọn: ${selectedQuality.label} (${selectedQuality.ratio} kích thước gốc)`}
-                  </p>
-                )}
-                {isApplyingQuality && (
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Đang áp dụng chất lượng mới, vui lòng chờ...
-                  </p>
-                )}
-                {showOriginalWarning && (
-                  <p className="text-xs text-yellow-400">
-                    Ảnh lớn ({imageDimensions?.width}×{imageDimensions?.height}
-                    ). Có thể tốn rất nhiều thời gian và VRAM.
-                  </p>
-                )}
-              </div>
-            </div>
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              width: "100%",
+                            }}
+                          >
+                            <Typography variant="body2" sx={{ fontSize: "0.875rem" }}>
+                              {option.label}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{ fontSize: "0.75rem", opacity: 0.8 }}
+                            >
+                              {option.ratio}
+                            </Typography>
+                          </Box>
+                        </Button>
+                      </Box>
+                    ))}
+                  </Stack>
+                  {/* Custom size input for 1:1 mode */}
+                  {inputQuality === "resized" && (
+                    <Box sx={{ mt: 2 }}>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "var(--text-secondary)",
+                          fontSize: "0.75rem",
+                          display: "block",
+                          mb: 1,
+                        }}
+                      >
+                        Kích thước vuông (px):
+                      </Typography>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+                        <TextField
+                          type="number"
+                          size="small"
+                          value={customSquareSize}
+                          onChange={(e) => {
+                            const value = parseInt(e.target.value) || 1024;
+                            const clamped = Math.max(256, Math.min(2048, value));
+                            onCustomSquareSizeChange?.(clamped);
+                          }}
+                          disabled={isApplyingQuality}
+                          inputProps={{ min: 256, max: 2048, step: 64 }}
+                          sx={{
+                            width: 96,
+                            "& .MuiOutlinedInput-root": {
+                              bgcolor: "var(--secondary-bg)",
+                              borderColor: "var(--border-color)",
+                              color: "var(--text-primary)",
+                              fontSize: "0.875rem",
+                              "& fieldset": {
+                                borderColor: "var(--border-color)",
+                              },
+                              "&:hover fieldset": {
+                                borderColor: "var(--primary-accent)",
+                              },
+                              "&.Mui-focused fieldset": {
+                                borderColor: "var(--primary-accent)",
+                              },
+                            },
+                          }}
+                        />
+                        <Typography
+                          variant="caption"
+                          sx={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}
+                        >
+                          × {customSquareSize}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                        {[512, 768, 1024, 1536, 2048].map((size) => (
+                          <Chip
+                            key={size}
+                            label={size}
+                            onClick={() => onCustomSquareSizeChange?.(size)}
+                            disabled={isApplyingQuality}
+                            size="small"
+                            sx={{
+                              bgcolor:
+                                customSquareSize === size
+                                  ? "var(--primary-accent)"
+                                  : "var(--secondary-bg)",
+                              color:
+                                customSquareSize === size
+                                  ? "white"
+                                  : "var(--text-secondary)",
+                              borderColor:
+                                customSquareSize === size
+                                  ? "var(--primary-accent)"
+                                  : "var(--border-color)",
+                              border: "1px solid",
+                              cursor: "pointer",
+                              "&:hover": {
+                                bgcolor:
+                                  customSquareSize === size
+                                    ? "var(--primary-accent)"
+                                    : "var(--hover-bg)",
+                              },
+                              fontSize: "0.75rem",
+                            }}
+                          />
+                        ))}
+                      </Box>
+                    </Box>
+                  )}
+                  {selectedQuality && (
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        color: "var(--text-secondary)",
+                        fontSize: "0.75rem",
+                        display: "block",
+                      }}
+                    >
+                      {inputQuality === "resized"
+                        ? `Ảnh sẽ được resize về ${customSquareSize}×${customSquareSize}`
+                        : `Đang chọn: ${selectedQuality.label} (${selectedQuality.ratio} kích thước gốc)`}
+                    </Typography>
+                  )}
+                  {isApplyingQuality && (
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}
+                    >
+                      Đang áp dụng độ phân giải mới, vui lòng chờ...
+                    </Typography>
+                  )}
+                  {showOriginalWarning && (
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "#fbbf24", fontSize: "0.75rem" }}
+                    >
+                      Ảnh lớn ({imageDimensions?.width}×{imageDimensions?.height}
+                      ). Có thể tốn rất nhiều thời gian và VRAM.
+                    </Typography>
+                  )}
+                </Stack>
+              </Box>
+            </>
           )}
 
           {/* Editing Done Message */}
           {isEditingDone && (
-            <div className="bg-[var(--secondary-bg)] border border-[var(--success)] rounded-lg p-4 text-center">
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <div className="w-2 h-2 bg-[var(--success)] rounded-full"></div>
-                <h3 className="text-[var(--success)] font-medium text-sm flex items-center gap-1">
-                  <HiSparkles className="w-3 h-3" />
+            <Paper
+              sx={{
+                bgcolor: "var(--secondary-bg)",
+                border: 1,
+                borderColor: "var(--success)",
+                borderRadius: 2,
+                p: 2,
+                textAlign: "center",
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 1,
+                  mb: 1.5,
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 8,
+                    height: 8,
+                    bgcolor: "var(--success)",
+                    borderRadius: "50%",
+                  }}
+                />
+                <Typography
+                  variant="subtitle2"
+                  sx={{
+                    color: "var(--success)",
+                    fontWeight: 500,
+                    fontSize: "0.875rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 0.5,
+                  }}
+                >
+                  <HiSparkles style={{ width: 12, height: 12 }} />
                   {t("sidebar.editingComplete")}
-                </h3>
-              </div>
-              <p className="text-[var(--text-secondary)] text-xs mb-3">
+                </Typography>
+              </Box>
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "var(--text-secondary)",
+                  fontSize: "0.75rem",
+                  display: "block",
+                  mb: 2,
+                }}
+              >
                 {t("sidebar.editingCompleteDesc")}
-              </p>
-              <div className="space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => {
-                      if (modifiedImage) {
-                        const link = document.createElement("a");
-                        link.href = modifiedImage;
-                        link.download = `artmancer-edited-${Date.now()}.png`;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      }
-                    }}
-                    className="px-3 py-2 bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-2"
-                  >
-                    <FaDownload className="w-3 h-3" />
-                    {t("sidebar.downloadImage")}
-                  </button>
-                  {lastRequestId && (
-                    <button
+              </Typography>
+              <Stack spacing={1}>
+                <Stack direction="row" spacing={1}>
+                  <Box sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
+                    <Button
+                      fullWidth
+                      variant="contained"
+                      startIcon={<FaDownload style={{ width: 12, height: 12 }} />}
                       onClick={() => {
-                        apiService.downloadVisualization(lastRequestId, "zip");
-                      }}
-                      className="px-3 py-2 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-[var(--border-color)]"
-                      title="Download visualization (original + generated images)"
-                    >
-                      <FaImages className="w-3 h-3" />
-                      {t("sidebar.downloadVisualization")}
-                    </button>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => {
-                      if (onReturnToOriginal) {
-                        onReturnToOriginal();
-                      }
-                    }}
-                    className="px-3 py-2 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded text-xs font-medium transition-colors flex items-center justify-center gap-1 border border-[var(--border-color)]"
-                  >
-                    <FaUndo className="w-3 h-3" />
-                    {t("sidebar.returnToOriginal")}
-                  </button>
-                  <button
-                    onClick={() => {
-                      // Remove current image first
-                      if (onRemoveImage) {
-                        onRemoveImage();
-                      }
-                      // Small delay to ensure state is reset before opening file dialog
-                      setTimeout(() => {
-                        const fileInput = document.getElementById(
-                          "image-upload-panel"
-                        ) as HTMLInputElement;
-                        if (fileInput) {
-                          fileInput.value = ""; // Clear previous selection
-                          fileInput.click();
+                        if (modifiedImage) {
+                          const link = document.createElement("a");
+                          link.href = modifiedImage;
+                          link.download = `artmancer-edited-${Date.now()}.png`;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
                         }
-                      }, 100);
-                    }}
-                    className="px-3 py-2 bg-[var(--success)] hover:bg-[var(--success)] text-white rounded text-xs font-medium transition-colors opacity-90 hover:opacity-100 flex items-center justify-center gap-1"
-                  >
-                    <FaCamera className="w-3 h-3" />
-                    {t("sidebar.newImage")}
-                  </button>
-                </div>
-              </div>
-            </div>
+                      }}
+                      sx={{
+                        bgcolor: "var(--primary-accent)",
+                        color: "white",
+                        "&:hover": {
+                          bgcolor: "var(--highlight-accent)",
+                        },
+                        py: 1,
+                        textTransform: "none",
+                        fontSize: "0.75rem",
+                      }}
+                    >
+                      {t("sidebar.downloadImage")}
+                    </Button>
+                  </Box>
+                  {lastRequestId && (
+                    <Box sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
+                      <Tooltip title="Download visualization (original + generated images)">
+                        <Button
+                          fullWidth
+                          variant="outlined"
+                          startIcon={<FaImages style={{ width: 12, height: 12 }} />}
+                          onClick={() => {
+                            apiService.downloadVisualization(lastRequestId, "zip");
+                          }}
+                          sx={{
+                            bgcolor: "var(--secondary-bg)",
+                            color: "var(--text-primary)",
+                            borderColor: "var(--border-color)",
+                            "&:hover": {
+                              bgcolor: "var(--primary-accent)",
+                              color: "white",
+                              borderColor: "var(--primary-accent)",
+                            },
+                            py: 1,
+                            textTransform: "none",
+                            fontSize: "0.75rem",
+                          }}
+                        >
+                          {t("sidebar.downloadVisualization")}
+                        </Button>
+                      </Tooltip>
+                    </Box>
+                  )}
+                </Stack>
+                <Stack direction="row" spacing={1}>
+                  <Box sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
+                    <Button
+                      fullWidth
+                      variant="outlined"
+                      startIcon={<FaUndo style={{ width: 12, height: 12 }} />}
+                      onClick={() => {
+                        if (onReturnToOriginal) {
+                          onReturnToOriginal();
+                        }
+                      }}
+                      sx={{
+                        bgcolor: "var(--secondary-bg)",
+                        color: "var(--text-primary)",
+                        borderColor: "var(--border-color)",
+                        "&:hover": {
+                          bgcolor: "var(--primary-accent)",
+                          color: "white",
+                          borderColor: "var(--primary-accent)",
+                        },
+                        py: 1,
+                        textTransform: "none",
+                        fontSize: "0.75rem",
+                      }}
+                    >
+                      {t("sidebar.returnToOriginal")}
+                    </Button>
+                  </Box>
+                  <Box sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
+                    <Button
+                      fullWidth
+                      variant="contained"
+                      startIcon={<CameraIcon />}
+                      onClick={() => {
+                        // Remove current image first
+                        if (onRemoveImage) {
+                          onRemoveImage();
+                        }
+                        // Small delay to ensure state is reset before opening file dialog
+                        setTimeout(() => {
+                          const fileInput = document.getElementById(
+                            "image-upload-panel"
+                          ) as HTMLInputElement;
+                          if (fileInput) {
+                            fileInput.value = ""; // Clear previous selection
+                            fileInput.click();
+                          }
+                        }, 100);
+                      }}
+                      sx={{
+                        bgcolor: "var(--success)",
+                        color: "white",
+                        "&:hover": {
+                          bgcolor: "var(--success)",
+                          opacity: 1,
+                        },
+                        opacity: 0.9,
+                        py: 1,
+                        textTransform: "none",
+                        fontSize: "0.75rem",
+                      }}
+                    >
+                      {t("sidebar.newImage")}
+                    </Button>
+                  </Box>
+                </Stack>
+              </Stack>
+            </Paper>
           )}
 
           {/* AI Task Selection */}
           {!isEditingDone && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
+            <>
+              {(uploadedImage || isEditingDone) && (
+                <Divider sx={{ my: 2, borderColor: "var(--border-color)" }} />
+              )}
+            <div className="pb-4">
               <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                 {t("sidebar.aiTask")}
               </h3>
-              <select
-                value={aiTask}
-                onChange={(e) =>
-                  onAiTaskChange(
-                    e.target.value as
-                      | "white-balance"
-                      | "object-insert"
-                      | "object-removal"
-                      | "evaluation"
-                  )
-                }
-                className="w-full px-3 py-2 bg-[var(--primary-bg)] border border-[var(--primary-accent)] rounded text-[var(--text-primary)] text-sm lg:text-base focus:outline-none focus:ring-2 focus:ring-[var(--primary-accent)] focus:border-transparent"
-              >
-                <option value="white-balance">
-                  {t("sidebar.whiteBalance")}
-                </option>
-                <option value="object-insert">
-                  {t("sidebar.objectInsert")}
-                </option>
-                <option value="object-removal">
-                  {t("sidebar.objectRemoval")}
-                </option>
-              </select>
+              <FormControl fullWidth size="small">
+                <InputLabel id="ai-task-select-label" sx={{ color: "var(--text-primary)" }}>
+                  {t("sidebar.aiTask")}
+                </InputLabel>
+                <Select
+                  labelId="ai-task-select-label"
+                  id="ai-task-select"
+                  value={aiTask}
+                  label={t("sidebar.aiTask")}
+                  onChange={(e) =>
+                    onAiTaskChange(
+                      e.target.value as
+                        | "white-balance"
+                        | "object-insert"
+                        | "object-removal"
+                        | "evaluation"
+                    )
+                  }
+                  sx={{
+                    color: "var(--text-primary)",
+                    "& .MuiOutlinedInput-notchedOutline": {
+                      borderColor: "var(--primary-accent)",
+                    },
+                    "&:hover .MuiOutlinedInput-notchedOutline": {
+                      borderColor: "var(--primary-accent)",
+                    },
+                    "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+                      borderColor: "var(--primary-accent)",
+                    },
+                    "& .MuiSelect-icon": {
+                      color: "var(--text-primary)",
+                    },
+                    backgroundColor: "var(--primary-bg)",
+                  }}
+                >
+                  <MenuItem value="white-balance">
+                    {t("sidebar.whiteBalance")}
+                  </MenuItem>
+                  <MenuItem value="object-insert">
+                    {t("sidebar.objectInsert")}
+                  </MenuItem>
+                  <MenuItem value="object-removal">
+                    {t("sidebar.objectRemoval")}
+                  </MenuItem>
+                </Select>
+              </FormControl>
             </div>
-          )}
-
-          {/* White Balance Controls */}
-          {!isEditingDone && aiTask === "white-balance" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.whiteBalanceSettings")}
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.temperature")}: {whiteBalanceTemperature}
-                  </label>
-                  <input
-                    type="range"
-                    min="-100"
-                    max="100"
-                    value={whiteBalanceTemperature}
-                    onChange={(e) =>
-                      onWhiteBalanceTemperatureChange?.(
-                        parseInt(e.target.value)
-                      )
-                    }
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onMouseMove={(e) => e.stopPropagation()}
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--text-secondary)] text-sm mb-2">
-                    {t("sidebar.tint")}: {whiteBalanceTint}
-                  </label>
-                  <input
-                    type="range"
-                    min="-100"
-                    max="100"
-                    value={whiteBalanceTint}
-                    onChange={(e) =>
-                      onWhiteBalanceTintChange?.(parseInt(e.target.value))
-                    }
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onMouseMove={(e) => e.stopPropagation()}
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
-                </div>
-              </div>
-            </div>
+            </>
           )}
 
           {/* Reference Image Upload (only for object insert) */}
           {!isEditingDone && aiTask === "object-insert" && (
-            <div className="pb-4 border-b border-[var(--border-color)]">
-              <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
-                {t("sidebar.referenceImage")}
-              </h3>
-              <div className="space-y-3">
-                <label
-                  htmlFor="reference-image-upload"
-                  className="w-full px-4 py-3 bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-secondary)] hover:text-white rounded-lg cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2 border-2 border-dashed border-[var(--primary-accent)]"
-                >
-                  <FaImage className="w-4 h-4" />
-                  {t("sidebar.chooseReference")}
-                </label>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/webp"
-                  onChange={onReferenceImageUpload}
-                  onClick={(e) => {
-                    // Reset value to allow re-selecting the same file
-                    (e.target as HTMLInputElement).value = "";
+            <>
+              <Divider sx={{ my: 2, borderColor: "var(--border-color)" }} />
+              <Box sx={{ pb: 2 }}>
+                <Typography
+                  variant="subtitle2"
+                  sx={{
+                    mb: 2,
+                    color: "var(--text-primary)",
+                    fontWeight: 500,
+                    fontSize: { xs: "0.875rem", sm: "1rem" },
                   }}
-                  className="hidden"
-                  id="reference-image-upload"
-                />
-                {referenceImage && (
-                  <div className="space-y-2">
-                    <div className="relative w-full h-24 bg-[var(--secondary-bg)] rounded-lg overflow-hidden">
-                      <img
-                        src={referenceImage}
-                        alt="Reference"
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <button
-                      onClick={onRemoveReferenceImage}
-                      className="w-full px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-medium"
+                >
+                  {t("sidebar.referenceImage")}
+                </Typography>
+                <Stack spacing={1.5}>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/webp"
+                    onChange={onReferenceImageUpload}
+                    onClick={(e) => {
+                      // Reset value to allow re-selecting the same file
+                      (e.target as HTMLInputElement).value = "";
+                    }}
+                    style={{ display: "none" }}
+                    id="reference-image-upload"
+                  />
+                  <label htmlFor="reference-image-upload">
+                    <Button
+                      component="span"
+                      fullWidth
+                      variant="outlined"
+                      startIcon={<ImageIconMUI />}
+                      sx={{
+                        bgcolor: "var(--secondary-bg)",
+                        color: "var(--text-secondary)",
+                        borderColor: "var(--primary-accent)",
+                        borderWidth: 2,
+                        borderStyle: "dashed",
+                        "&:hover": {
+                          bgcolor: "var(--primary-accent)",
+                          color: "white",
+                          borderColor: "var(--primary-accent)",
+                          borderStyle: "solid",
+                        },
+                        py: 1.5,
+                        textTransform: "none",
+                        fontSize: "0.875rem",
+                      }}
                     >
-                      {t("sidebar.removeReference")}
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
+                      {t("sidebar.chooseReference")}
+                    </Button>
+                  </label>
+                  {referenceImage && (
+                    <Stack spacing={1}>
+                      <Paper
+                        sx={{
+                          bgcolor: "var(--secondary-bg)",
+                          border: 2,
+                          borderColor: "var(--primary-accent)",
+                          borderRadius: 2,
+                          p: 1,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            position: "relative",
+                            width: "100%",
+                            aspectRatio: "1/1",
+                            bgcolor: "var(--primary-bg)",
+                            borderRadius: 1,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Box
+                            component="img"
+                            src={referenceImage}
+                            alt="Reference"
+                            sx={{
+                              maxWidth: "100%",
+                              maxHeight: "100%",
+                              objectFit: "contain",
+                              borderRadius: 1,
+                            }}
+                          />
+                        </Box>
+                      </Paper>
+                      <Stack direction="row" spacing={1}>
+                        {onEditReferenceImage && (
+                          <Button
+                            fullWidth
+                            variant="contained"
+                            onClick={onEditReferenceImage}
+                            sx={{
+                              bgcolor: "var(--primary-accent)",
+                              color: "white",
+                              "&:hover": {
+                                bgcolor: "var(--highlight-accent)",
+                              },
+                              py: 1.25,
+                              textTransform: "none",
+                              fontSize: "0.875rem",
+                            }}
+                          >
+                            {t("sidebar.editReference")}
+                          </Button>
+                        )}
+                        <Button
+                          fullWidth
+                          variant="contained"
+                          color="error"
+                          onClick={onRemoveReferenceImage}
+                          sx={{
+                            py: 1.25,
+                            textTransform: "none",
+                            fontSize: "0.875rem",
+                          }}
+                        >
+                          {t("sidebar.removeReference")}
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  )}
+                </Stack>
+              </Box>
+            </>
           )}
 
           {/* Benchmark Mode Section */}
@@ -1485,7 +1804,12 @@ export default function Sidebar({
           {/* Masking Tool Section - Only for object insert and removal */}
           {!isEditingDone &&
             (aiTask === "object-insert" || aiTask === "object-removal") && (
-              <div className="pb-4 border-b border-[var(--border-color)]">
+              <>
+                {/* Only show divider if there's content before this section */}
+                {(uploadedImage || aiTask === "object-insert") && (
+                  <Divider sx={{ my: 2, borderColor: "var(--border-color)" }} />
+                )}
+                <div className="pb-4">
                 <h3 className="text-[var(--text-primary)] font-medium mb-3 text-sm lg:text-base">
                   {aiTask === "object-insert"
                     ? t("sidebar.markInsertArea")
@@ -1579,7 +1903,127 @@ export default function Sidebar({
                             className="text-[var(--text-primary)] text-sm"
                           />
                         )}
+                        
+                        {/* Model Type Selection */}
+                        {enableSmartMasking && onSmartMaskModelTypeChange && (
+                          <div className="mt-3 space-y-2">
+                            <label className="text-[var(--text-secondary)] text-sm block">
+                              {t("sidebar.smartMaskModel")}
+                            </label>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => {
+                                  onSmartMaskModelTypeChange('segmentation');
+                                  // Auto switch to brush if was on box and BiRefNet was selected
+                                  if (maskToolType === 'box' && smartMaskModelType === 'birefnet') {
+                                    onMaskToolTypeChange?.('brush');
+                                  }
+                                }}
+                                className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                                  smartMaskModelType === 'segmentation'
+                                    ? 'bg-[var(--primary-accent)] text-white'
+                                    : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                                }`}
+                                disabled={isSmartMaskLoading}
+                              >
+                                FastSAM
+                              </button>
+                              <button
+                                onClick={() => {
+                                  onSmartMaskModelTypeChange('birefnet');
+                                  // Auto switch to box when selecting BiRefNet
+                                  if (maskToolType === 'brush') {
+                                    onMaskToolTypeChange?.('box');
+                                  }
+                                }}
+                                className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                                  smartMaskModelType === 'birefnet'
+                                    ? 'bg-[var(--primary-accent)] text-white'
+                                    : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]'
+                                }`}
+                                disabled={isSmartMaskLoading}
+                              >
+                                BiRefNet
+                              </button>
+                            </div>
+                            {smartMaskModelType === 'birefnet' && (
+                              <p className="text-xs text-[var(--text-secondary)] mt-1">
+                                {t("sidebar.birefnetNote")}
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
+
+                      {/* Border Adjustment Control */}
+                      {enableSmartMasking && onBorderAdjustmentChange && (
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-[var(--text-secondary)] text-sm">
+                              {t("sidebar.borderAdjustment")}
+                            </label>
+                            <input
+                              type="number"
+                              min="-10"
+                              max="10"
+                              value={borderAdjustment}
+                              onChange={(e) => {
+                                const value = parseInt(e.target.value);
+                                if (!isNaN(value)) {
+                                  onBorderAdjustmentChange(value);
+                                }
+                              }}
+                              onBlur={(e) => {
+                                const value = parseInt(e.target.value);
+                                if (isNaN(value) || value < -10) {
+                                  onBorderAdjustmentChange(-10);
+                                } else if (value > 10) {
+                                  onBorderAdjustmentChange(10);
+                                }
+                              }}
+                              className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
+                            />
+                          </div>
+                          <Box sx={{ px: 1 }}>
+                            <Slider
+                              value={borderAdjustment}
+                              onChange={(_, value) =>
+                                onBorderAdjustmentChange(value as number)
+                              }
+                              min={-10}
+                              max={10}
+                              step={1}
+                              valueLabelDisplay="auto"
+                              valueLabelFormat={(value) =>
+                                value === 0
+                                  ? t("sidebar.noAdjustment")
+                                  : value < 0
+                                  ? `${t("sidebar.shrink")} ${Math.abs(value)}px`
+                                  : `${t("sidebar.grow")} ${value}px`
+                              }
+                              sx={{
+                                color: "var(--primary-accent)",
+                                "& .MuiSlider-thumb": {
+                                  backgroundColor: "var(--primary-accent)",
+                                  "&:hover": {
+                                    boxShadow: "0 0 0 8px rgba(0, 0, 0, 0.16)",
+                                  },
+                                },
+                                "& .MuiSlider-track": {
+                                  backgroundColor: "var(--primary-accent)",
+                                },
+                                "& .MuiSlider-rail": {
+                                  backgroundColor: "var(--border-color)",
+                                },
+                              }}
+                            />
+                          </Box>
+                          <div className="flex justify-between items-center text-xs text-[var(--text-secondary)] mt-2 px-1">
+                            <span>{t("sidebar.shrink")}</span>
+                            <span>{t("sidebar.grow")}</span>
+                          </div>
+                        </div>
+                      )}
 
                       <div>
                         <label className="block text-[var(--text-secondary)] text-sm mb-2">
@@ -1588,11 +2032,17 @@ export default function Sidebar({
                         <div className="flex gap-2 mb-3">
                           <button
                             onClick={() => onMaskToolTypeChange?.("brush")}
+                            disabled={enableSmartMasking && smartMaskModelType === 'birefnet'}
                             className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
                               maskToolType === "brush"
                                 ? "bg-[var(--primary-accent)] text-white border-[var(--primary-accent)]"
                                 : "bg-[var(--secondary-bg)] text-[var(--text-primary)] border-[var(--border-color)] hover:bg-[var(--hover-bg)]"
+                            } ${
+                              enableSmartMasking && smartMaskModelType === 'birefnet'
+                                ? "opacity-50 cursor-not-allowed"
+                                : ""
                             }`}
+                            title={enableSmartMasking && smartMaskModelType === 'birefnet' ? t("sidebar.birefnetBrushDisabled") : undefined}
                           >
                             {t("sidebar.brush")}
                           </button>
@@ -1639,18 +2089,33 @@ export default function Sidebar({
                             <span className="text-xs text-[var(--text-secondary)] mr-1">
                               px
                             </span>
-                            <input
-                              type="range"
-                              min="1"
-                              max="100"
-                              value={maskBrushSize}
-                              onChange={(e) =>
-                                onMaskBrushSizeChange(parseInt(e.target.value))
-                              }
-                              onMouseDown={(e) => e.stopPropagation()}
-                              onMouseMove={(e) => e.stopPropagation()}
-                              className="flex-1 accent-[var(--primary-accent)]"
-                            />
+                            <Box sx={{ flex: 1, px: 1 }}>
+                              <Slider
+                                value={maskBrushSize}
+                                onChange={(_, value) =>
+                                  onMaskBrushSizeChange(value as number)
+                                }
+                                min={1}
+                                max={100}
+                                step={1}
+                                valueLabelDisplay="auto"
+                                sx={{
+                                  color: "var(--primary-accent)",
+                                  "& .MuiSlider-thumb": {
+                                    backgroundColor: "var(--primary-accent)",
+                                    "&:hover": {
+                                      boxShadow: "0 0 0 8px rgba(var(--primary-accent-rgb), 0.16)",
+                                    },
+                                  },
+                                  "& .MuiSlider-track": {
+                                    backgroundColor: "var(--primary-accent)",
+                                  },
+                                  "& .MuiSlider-rail": {
+                                    backgroundColor: "var(--border-color)",
+                                  },
+                                }}
+                              />
+                            </Box>
                           </div>
                         </div>
                       )}
@@ -1668,10 +2133,11 @@ export default function Sidebar({
                         : t("sidebar.drawForRemoval")
                       : aiTask === "object-insert"
                       ? t("sidebar.enableMaskingInsertion")
-                      : t("sidebar.enableMaskingRemoval")}
+                      : t("sidebar.enableMaskingRemoval")                    }
                   </p>
                 </div>
               </div>
+            </>
             )}
 
           {/* Advanced Settings */}
@@ -1750,19 +2216,33 @@ export default function Sidebar({
                       className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
                     />
                   </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    step="0.5"
-                    value={guidanceScale}
-                    onChange={(e) =>
-                      onGuidanceScaleChange?.(parseFloat(e.target.value))
-                    }
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onMouseMove={(e) => e.stopPropagation()}
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
+                  <Box sx={{ px: 1 }}>
+                    <Slider
+                      value={guidanceScale}
+                      onChange={(_, value) =>
+                        onGuidanceScaleChange?.(value as number)
+                      }
+                      min={1}
+                      max={10}
+                      step={0.5}
+                      valueLabelDisplay="auto"
+                      sx={{
+                        color: "var(--primary-accent)",
+                        "& .MuiSlider-thumb": {
+                          backgroundColor: "var(--primary-accent)",
+                          "&:hover": {
+                            boxShadow: "0 0 0 8px rgba(var(--primary-accent-rgb), 0.16)",
+                          },
+                        },
+                        "& .MuiSlider-track": {
+                          backgroundColor: "var(--primary-accent)",
+                        },
+                        "& .MuiSlider-rail": {
+                          backgroundColor: "var(--border-color)",
+                        },
+                      }}
+                    />
+                  </Box>
                 </div>
 
                 {/* Steps (Updated from existing) */}
@@ -1793,18 +2273,33 @@ export default function Sidebar({
                       className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
                     />
                   </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="100"
-                    value={inferenceSteps}
-                    onChange={(e) =>
-                      onInferenceStepsChange?.(parseInt(e.target.value))
-                    }
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onMouseMove={(e) => e.stopPropagation()}
-                    className="w-full accent-[var(--primary-accent)]"
-                  />
+                  <Box sx={{ px: 1 }}>
+                    <Slider
+                      value={inferenceSteps}
+                      onChange={(_, value) =>
+                        onInferenceStepsChange?.(value as number)
+                      }
+                      min={1}
+                      max={100}
+                      step={1}
+                      valueLabelDisplay="auto"
+                      sx={{
+                        color: "var(--primary-accent)",
+                        "& .MuiSlider-thumb": {
+                          backgroundColor: "var(--primary-accent)",
+                          "&:hover": {
+                            boxShadow: "0 0 0 8px rgba(var(--primary-accent-rgb), 0.16)",
+                          },
+                        },
+                        "& .MuiSlider-track": {
+                          backgroundColor: "var(--primary-accent)",
+                        },
+                        "& .MuiSlider-rail": {
+                          backgroundColor: "var(--border-color)",
+                        },
+                      }}
+                    />
+                  </Box>
                   <div className="flex justify-between items-center text-xs text-[var(--text-secondary)] mt-2 px-1">
                     <span>{t("sidebar.faster")}</span>
                     <span>{t("sidebar.higherQuality")}</span>
@@ -1841,112 +2336,74 @@ export default function Sidebar({
                         className="w-16 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
                       />
                     </div>
-                    <input
-                      type="range"
-                      min="1"
-                      max="5"
-                      step="0.1"
-                      value={cfgScale}
-                      onChange={(e) =>
-                        onCfgScaleChange?.(parseFloat(e.target.value))
-                      }
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onMouseMove={(e) => e.stopPropagation()}
-                      className="w-full accent-[var(--primary-accent)]"
-                    />
+                    <Box sx={{ px: 1 }}>
+                      <Slider
+                        value={cfgScale}
+                        onChange={(_, value) =>
+                          onCfgScaleChange?.(value as number)
+                        }
+                        min={1}
+                        max={5}
+                        step={0.1}
+                        valueLabelDisplay="auto"
+                        sx={{
+                          color: "var(--primary-accent)",
+                          "& .MuiSlider-thumb": {
+                            backgroundColor: "var(--primary-accent)",
+                            "&:hover": {
+                              boxShadow: "0 0 0 8px rgba(var(--primary-accent-rgb), 0.16)",
+                            },
+                          },
+                          "& .MuiSlider-track": {
+                            backgroundColor: "var(--primary-accent)",
+                          },
+                          "& .MuiSlider-rail": {
+                            backgroundColor: "var(--border-color)",
+                          },
+                        }}
+                      />
+                    </Box>
                     <p className="text-xs text-[var(--text-secondary)] mt-2">
                       {t("sidebar.cfgGuidanceDescription")}
                     </p>
                   </div>
                 )}
-              </div>
-            </div>
-          )}
 
-          {/* Low-End Optimizations */}
-          {!isEditingDone && (
-            <div className="pt-2 border-t border-[var(--border-color)] mt-4">
-              <h3 className="text-[var(--text-primary)] font-medium mb-4">
-                Tối ưu cho GPU thấp (Low-End)
-              </h3>
-              <div className="space-y-4">
-                <p className="text-xs text-[var(--text-secondary)] mb-3">
-                  Các tính năng này giúp giảm VRAM cho GPU 12GB hoặc thấp hơn.
-                  Lưu ý: Cần restart backend để áp dụng thay đổi.
-                </p>
-
-                {/* 4-bit Text Encoder */}
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
-                      4-bit Text Encoder
+                {/* Seed */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-[var(--text-secondary)] text-sm">
+                      {t("sidebar.seed")}
                     </label>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Giảm ~4GB VRAM, chậm hơn một chút
-                    </p>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
                     <input
-                      type="checkbox"
-                      checked={enable4BitTextEncoder}
-                      onChange={(e) =>
-                        onEnable4BitTextEncoderChange?.(e.target.checked)
-                      }
-                      className="sr-only peer"
+                      type="number"
+                      min="0"
+                      max="2147483647"
+                      step="1"
+                      value={seed ?? 42}
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value >= 0) {
+                          onSeedChange?.(value);
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (isNaN(value) || value < 0) {
+                          onSeedChange?.(42); // Reset to default 42 if invalid
+                        }
+                      }}
+                      className="w-24 px-2 py-1 text-sm bg-[var(--primary-bg)] border border-[var(--border-color)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--primary-accent)]"
                     />
-                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
-                  </label>
-                </div>
-
-                {/* CPU Offload */}
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
-                      CPU Offload
-                    </label>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Offload transformer & VAE về CPU, tiết kiệm VRAM nhưng
-                      chậm hơn
-                    </p>
                   </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={enableCpuOffload}
-                      onChange={(e) =>
-                        onEnableCpuOffloadChange?.(e.target.checked)
-                      }
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
-                  </label>
-                </div>
-
-                {/* Memory Optimizations */}
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <label className="block text-[var(--text-secondary)] text-sm mb-1">
-                      Memory Optimizations
-                    </label>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      low_cpu_mem_usage, TF32 matmul
-                    </p>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={enableMemoryOptimizations}
-                      onChange={(e) =>
-                        onEnableMemoryOptimizationsChange?.(e.target.checked)
-                      }
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-[var(--border-color)] peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[var(--primary-accent)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--primary-accent)]"></div>
-                  </label>
+                  <p className="text-xs text-[var(--text-secondary)] mt-1">
+                    {t("sidebar.seedDescription")}
+                  </p>
                 </div>
               </div>
             </div>
           )}
+
         </div>
       )}
 

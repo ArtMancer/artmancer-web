@@ -11,6 +11,7 @@ interface MaskCanvasLayerProps {
   maskCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   imageDimensions: { width: number; height: number } | null;
   displayScale: number;
+  hasMaskContent?: boolean;
 }
 
 export default function MaskCanvasLayer({
@@ -18,8 +19,10 @@ export default function MaskCanvasLayer({
   maskCanvasRef,
   imageDimensions,
   displayScale,
+  hasMaskContent = false,
 }: MaskCanvasLayerProps) {
-  if (!isMaskingMode) {
+  // Show mask canvas if in masking mode OR if there's mask content (e.g., after returning to original)
+  if (!isMaskingMode && !hasMaskContent) {
     return null;
   }
 
@@ -34,4 +37,3 @@ export default function MaskCanvasLayer({
 
   return <canvas ref={maskCanvasRef} style={style} />;
 }
-

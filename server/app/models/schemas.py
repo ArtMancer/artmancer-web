@@ -44,19 +44,6 @@ class GenerationRequest(BaseModel):
         default=None,
         description="Optional override for input quality preset ('resized' for 1:1 square, 'original' to keep original size).",
     )
-    # Low-end optimization flags (can override config defaults)
-    enable_4bit_text_encoder: Optional[bool] = Field(
-        default=None,
-        description="Enable 4-bit quantization for text encoder (saves ~4GB VRAM, slower). Overrides config if provided."
-    )
-    enable_cpu_offload: Optional[bool] = Field(
-        default=None,
-        description="Enable CPU offload for transformer and VAE (saves VRAM, slower). Overrides config if provided."
-    )
-    enable_memory_optimizations: Optional[bool] = Field(
-        default=None,
-        description="Enable memory optimizations (safetensors, low_cpu_mem_usage, TF32). Overrides config if provided."
-    )
     enable_flowmatch_scheduler: Optional[bool] = Field(
         default=None,
         description="Use FlowMatchEulerDiscreteScheduler instead of default. Overrides config if provided."
@@ -77,6 +64,10 @@ class DebugInfo(BaseModel):
     output_image_size: Optional[str] = Field(default=None, description="Final output image size")
     lora_adapter: Optional[str] = Field(default=None, description="LoRA adapter used")
     loaded_adapters: Optional[List[str]] = Field(default=None, description="All loaded LoRA adapters")
+    positioned_mask_R: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded positioned mask R (reference mask R after being pasted into main mask A, only for reference-guided insertion)"
+    )
 
 
 class GenerationResponse(BaseModel):

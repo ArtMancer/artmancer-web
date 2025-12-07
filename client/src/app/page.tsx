@@ -51,6 +51,7 @@ export default function Home() {
 
   // Advanced options state
   const [negativePrompt, setNegativePrompt] = useState<string>("");
+  const [seed, setSeed] = useState<number>(42); // Default seed: 42 (famous default)
   // Task-specific default parameters
   const getDefaultParametersForTask = useCallback((task: string) => {
     switch (task) {
@@ -87,13 +88,7 @@ export default function Home() {
   const [inputQuality, setInputQuality] =
     useState<InputQualityPreset>("resized");
   const [customSquareSize, setCustomSquareSize] = useState<number>(1024);
-
-  // Low-end optimization states
-  const [enable4BitTextEncoder, setEnable4BitTextEncoder] =
-    useState<boolean>(false);
-  const [enableCpuOffload, setEnableCpuOffload] = useState<boolean>(false);
-  const [enableMemoryOptimizations, setEnableMemoryOptimizations] =
-    useState<boolean>(false);
+  const [borderAdjustment, setBorderAdjustment] = useState<number>(0); // Border adjustment for smart masks
 
   const [baseImageData, setBaseImageData] = useState<string | null>(null);
   const [baseImageDimensions, setBaseImageDimensions] = useState<{
@@ -112,9 +107,6 @@ export default function Home() {
   const qualityChangeRequestRef = useRef(0);
 
   // White balance state
-  const [whiteBalanceTemperature, setWhiteBalanceTemperature] =
-    useState<number>(0);
-  const [whiteBalanceTint, setWhiteBalanceTint] = useState<number>(0);
 
   // Visualization request ID state
   const [lastRequestId, setLastRequestId] = useState<string | null>(null);
@@ -295,7 +287,12 @@ export default function Home() {
     current: number;
     total: number;
     status?: string;
+    loadingMessage?: string;
+    estimatedTimeRemaining?: number; // in seconds
   } | null>(null);
+
+  // Track step timing for ETR calculation
+  const stepTimingRef = useRef<{ step: number; timestamp: number }[]>([]);
 
   // API integration
   const {
@@ -358,6 +355,14 @@ export default function Home() {
     setReferenceImage(null);
     setReferenceMaskR(null);
   };
+
+  const handleEditReferenceImage = useCallback(() => {
+    if (referenceImage) {
+      // Open editor with current reference image
+      setPendingRefImage(referenceImage);
+      setIsRefEditorOpen(true);
+    }
+  }, [referenceImage]);
 
   // Evaluation mode handlers
   const handleEvaluationModeChange = (mode: "single" | "multiple") => {
@@ -1189,6 +1194,9 @@ export default function Home() {
     }
   };
 
+  // Ref to skip mask reset when returning to original
+  const skipMaskResetRef = useRef(false);
+
   const {
     isMaskingMode,
     isMaskDrawing,
@@ -1211,6 +1219,8 @@ export default function Home() {
     getFinalMask,
     enableSmartMasking,
     setEnableSmartMasking,
+    smartMaskModelType,
+    setSmartMaskModelType,
     isSmartMaskLoading,
     edgeOverlayCanvasRef,
   } = useMasking(
@@ -1220,7 +1230,9 @@ export default function Home() {
     transform,
     viewportZoom,
     imageRef,
-    setNotificationWithTimeout
+    setNotificationWithTimeout,
+    borderAdjustment,
+    skipMaskResetRef
   );
 
   const {
@@ -1250,7 +1262,7 @@ export default function Home() {
         const canvas = document.createElement("canvas");
         canvas.width = targetWidth;
         canvas.height = targetHeight;
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) {
           reject(new Error("Cannot get canvas context"));
           return;
@@ -1503,6 +1515,13 @@ export default function Home() {
         setOriginalUploadData(imageData);
         setOriginalUploadDimensions(dims);
         setBaseImage(imageData, dims);
+
+        // Immediately update uploadedImage with the new image to avoid display lag
+        // This ensures the canvas shows the new image right away
+        // applyInputQualityPreset will update it again with the processed version
+        setUploadedImage(imageData);
+        setImageDimensions(dims);
+
         void applyInputQualityPreset(inputQuality, {
           sourceData: imageData,
           sourceDimensions: dims,
@@ -1544,14 +1563,17 @@ export default function Home() {
   // Handle return to original image
   const handleReturnToOriginal = () => {
     if (originalImage) {
+      // Set flag to skip mask reset before changing uploadedImage
+      skipMaskResetRef.current = true;
       // Set uploadedImage and modifiedImage back to originalImage
       setUploadedImage(originalImage);
       setModifiedImage(originalImage);
       // Clear the comparison image so slider shows original on both sides
       setModifiedImageForComparison(null);
       setComparisonSlider(50);
-      resetMaskHistory();
-      clearMask();
+      // Keep mask when returning to original image (don't reset mask history or clear mask)
+      // resetMaskHistory();
+      // clearMask();
       setBaseImage(originalImage, imageDimensions ?? undefined);
       setNotificationWithTimeout("success", "Returned to original image");
     }
@@ -1572,6 +1594,14 @@ export default function Home() {
 
   const handleCfgScaleChange = (value: number) => {
     setCfgScale(value);
+  };
+
+  const handleSeedChange = (value: number) => {
+    setSeed(value);
+  };
+
+  const handleBorderAdjustmentChange = (value: number) => {
+    setBorderAdjustment(value);
   };
 
   const handleInputQualityChange = useCallback(
@@ -1599,19 +1629,9 @@ export default function Home() {
     [applyInputQualityPreset, baseImageData, inputQuality]
   );
 
-  const handleWhiteBalanceTemperatureChange = (value: number) => {
-    setWhiteBalanceTemperature(value);
-  };
-
-  const handleWhiteBalanceTintChange = (value: number) => {
-    setWhiteBalanceTint(value);
-  };
-
   // Handle white balance
   const handleWhiteBalance = async (
-    method: "auto" | "manual" | "ai" = "auto",
-    temperature?: number,
-    tint?: number
+    method: "auto" | "manual" | "ai" = "auto"
   ) => {
     try {
       clearAllNotifications();
@@ -1633,7 +1653,7 @@ export default function Home() {
       // Store the original image before editing
       setOriginalImage(uploadedImage);
 
-      const result = await applyWhiteBalance(file, method, temperature, tint);
+      const result = await applyWhiteBalance(file, method);
 
       if (result && result.corrected_image) {
         const imageData = `data:image/png;base64,${result.corrected_image}`;
@@ -1747,28 +1767,13 @@ export default function Home() {
       }
 
       // Initialize progress tracking
-      // Estimate: 30% for pipeline loading, 70% for generation steps
-      const pipelineProgress = Math.floor(inferenceSteps * 0.3);
+      // Will be updated from SSE events
+      stepTimingRef.current = []; // Reset timing tracking
       setGenerationProgress({
         current: 0,
-        total: inferenceSteps + pipelineProgress,
+        total: inferenceSteps, // Initial total, will be updated from SSE
         status: "loading_pipeline",
       });
-
-      // Simulate pipeline loading progress (0-30%)
-      pipelineInterval = setInterval(() => {
-        setGenerationProgress((prev) => {
-          if (!prev) return null;
-          if (prev.current < pipelineProgress) {
-            return {
-              ...prev,
-              current: Math.min(prev.current + 1, pipelineProgress),
-              status: "loading_pipeline",
-            };
-          }
-          return prev;
-        });
-      }, 200); // Update every 200ms
 
       // Get settings from state
       // Note: width and height are not set - backend will use original image size automatically
@@ -1778,12 +1783,8 @@ export default function Home() {
         // Only send true_cfg_scale if negative prompt is provided
         true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
         negative_prompt: negativePrompt || undefined,
-        generator_seed: undefined, // Add seed if needed
+        generator_seed: seed, // Use seed from state (default: 42)
         input_quality: inputQuality,
-        // Low-end optimization flags
-        enable_4bit_text_encoder: enable4BitTextEncoder,
-        enable_cpu_offload: enableCpuOffload,
-        enable_memory_optimizations: enableMemoryOptimizations,
       };
 
       // Use uploadedImage (current image) for API call
@@ -1815,55 +1816,112 @@ export default function Home() {
           ? "object-insert"
           : "object-removal";
 
-      // For white-balance task, append temperature and tint to prompt
-      let finalPrompt = prompt;
-      if (aiTask === "white-balance") {
-        const temperatureText =
-          whiteBalanceTemperature !== 0
-            ? `temperature: ${whiteBalanceTemperature}`
-            : "";
-        const tintText =
-          whiteBalanceTint !== 0 ? `tint: ${whiteBalanceTint}` : "";
+      // Use prompt directly (no temperature/tint conversion)
+      const finalPrompt = prompt;
 
-        const wbParams = [temperatureText, tintText].filter(Boolean).join(", ");
-        if (wbParams) {
-          finalPrompt = prompt.trim()
-            ? `${prompt.trim()}, white balance: ${wbParams}`
-            : `white balance: ${wbParams}`;
-        }
-      }
+      // Progress callback to update from SSE events
+      const progressCallback = (progress: {
+        current_step?: number;
+        total_steps?: number;
+        status: string;
+        progress: number;
+        loading_message?: string;
+      }) => {
+        console.log("🔄 [Progress Callback] Received update:", {
+          status: progress.status,
+          current_step: progress.current_step,
+          total_steps: progress.total_steps,
+          progress: progress.progress,
+        });
 
-      // Start generation (pipeline should be loaded by now)
-      if (pipelineInterval) {
-        clearInterval(pipelineInterval);
-        pipelineInterval = null;
-      }
-      setGenerationProgress((prev) => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          current: pipelineProgress,
-          status: "processing",
-        };
-      });
-
-      // Simulate generation steps progress (30-100%)
-      generationInterval = setInterval(() => {
         setGenerationProgress((prev) => {
           if (!prev) return null;
-          const maxProgress = prev.total;
-          if (prev.current < maxProgress) {
-            // Gradually increase progress
-            const increment = Math.max(1, Math.floor(inferenceSteps / 20)); // Update every ~5% of steps
-            return {
-              ...prev,
-              current: Math.min(prev.current + increment, maxProgress),
-              status: "processing",
-            };
+
+          // Update total_steps if provided
+          const total = progress.total_steps || prev.total;
+
+          // Map status from backend to frontend
+          let status = prev.status;
+          if (
+            progress.status === "queued" ||
+            progress.status === "initializing_a100" ||
+            progress.status === "loading_pipeline"
+          ) {
+            status = "loading_pipeline";
+          } else if (progress.status === "processing") {
+            status = "processing";
           }
-          return prev;
+
+          console.log("📊 [Progress Callback] Status mapping:", {
+            backend_status: progress.status,
+            frontend_status: status,
+            prev_status: prev.status,
+          });
+
+          // Calculate current step from progress percentage or use current_step
+          let current = prev.current;
+          let estimatedTimeRemaining: number | undefined = undefined;
+
+          // Reset current to 0 when processing starts (if no step info yet)
+          if (
+            status === "processing" &&
+            (progress.current_step === null ||
+              progress.current_step === undefined)
+          ) {
+            current = 0;
+          }
+
+          if (
+            progress.current_step !== undefined &&
+            progress.current_step !== null &&
+            progress.total_steps !== undefined
+          ) {
+            // Use actual step count from backend
+            current = progress.current_step;
+
+            // Calculate estimated time remaining for inference steps
+            const now = Date.now();
+            stepTimingRef.current.push({ step: current, timestamp: now });
+
+            // Keep only last 5 steps for average calculation
+            if (stepTimingRef.current.length > 5) {
+              stepTimingRef.current.shift();
+            }
+
+            // Calculate average time per step
+            if (stepTimingRef.current.length >= 2) {
+              const steps = stepTimingRef.current;
+              const timeDiffs = [];
+              for (let i = 1; i < steps.length; i++) {
+                timeDiffs.push(steps[i].timestamp - steps[i - 1].timestamp);
+              }
+              const avgTimePerStep =
+                timeDiffs.reduce((a, b) => a + b, 0) / timeDiffs.length;
+              const remainingSteps = total - current;
+              estimatedTimeRemaining = Math.ceil(
+                (remainingSteps * avgTimePerStep) / 1000
+              ); // Convert to seconds
+            }
+          } else if (progress.progress !== undefined) {
+            // For loading phase, use progress percentage
+            // Map progress (0.0-1.0) to current step based on total
+            current = Math.floor(progress.progress * total);
+          }
+
+          // Ensure current is always a number (default to 0 if null/undefined)
+          if (current === null || current === undefined) {
+            current = 0;
+          }
+
+          return {
+            current,
+            total,
+            status,
+            loadingMessage: progress.loading_message,
+            estimatedTimeRemaining,
+          };
         });
-      }, 500); // Update every 500ms
+      };
 
       const result = await generateImage(
         finalPrompt,
@@ -1872,7 +1930,8 @@ export default function Home() {
         settings,
         referenceImageForApi,
         referenceMaskRForApi,
-        taskType
+        taskType,
+        progressCallback
       );
 
       // Clear intervals and progress when generation completes
@@ -2164,12 +2223,12 @@ export default function Home() {
               {/* Generation Progress */}
               {isGenerating && generationProgress && (
                 <div className="mt-4">
-                  <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2">
+                  <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2 overflow-hidden">
                     <div
-                      className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-300"
+                      className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-500 ease-out"
                       style={{
                         width: `${
-                          (generationProgress.current /
+                          ((generationProgress.current ?? 0) /
                             generationProgress.total) *
                           100
                         }%`,
@@ -2178,18 +2237,30 @@ export default function Home() {
                   </div>
                   <p className="text-[var(--text-secondary)] text-sm">
                     {generationProgress.status === "loading_pipeline"
-                      ? "Loading model..."
+                      ? generationProgress.loadingMessage || "Loading model..."
                       : generationProgress.status === "processing"
-                      ? `Processing: ${generationProgress.current} / ${generationProgress.total} steps`
-                      : `Step ${generationProgress.current} / ${generationProgress.total}`}
+                      ? `Processing: ${generationProgress.current ?? 0} / ${
+                          generationProgress.total
+                        } steps`
+                      : `Step ${generationProgress.current ?? 0} / ${
+                          generationProgress.total
+                        }`}
                     {generationProgress.total > 0 && (
                       <span className="block text-xs mt-1 opacity-75">
                         {Math.round(
-                          (generationProgress.current /
+                          ((generationProgress.current ?? 0) /
                             generationProgress.total) *
                             100
                         )}
                         %
+                        {generationProgress.estimatedTimeRemaining !==
+                          undefined &&
+                          generationProgress.status === "processing" && (
+                            <span className="ml-2">
+                              • ~{generationProgress.estimatedTimeRemaining}s
+                              remaining
+                            </span>
+                          )}
                       </span>
                     )}
                   </p>
@@ -2237,6 +2308,7 @@ export default function Home() {
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
           isSmartMaskLoading={isSmartMaskLoading}
+          hasMaskContent={hasMaskContent}
           originalImage={originalImage}
           modifiedImage={modifiedImageForComparison}
           comparisonSlider={comparisonSlider}
@@ -2302,8 +2374,13 @@ export default function Home() {
           enableSmartMasking={enableSmartMasking}
           isSmartMaskLoading={isSmartMaskLoading}
           onSmartMaskingChange={setEnableSmartMasking}
+          smartMaskModelType={smartMaskModelType}
+          onSmartMaskModelTypeChange={setSmartMaskModelType}
+          borderAdjustment={borderAdjustment}
+          onBorderAdjustmentChange={handleBorderAdjustmentChange}
           onReferenceImageUpload={handleReferenceImageUpload}
           onRemoveReferenceImage={handleRemoveReferenceImage}
+          onEditReferenceImage={handleEditReferenceImage}
           onAiTaskChange={handleAiTaskChange}
           onResizeStart={handleResizeStart}
           onWidthChange={setSidebarWidth}
@@ -2319,10 +2396,8 @@ export default function Home() {
           onGuidanceScaleChange={handleGuidanceScaleChange}
           onInferenceStepsChange={handleInferenceStepsChange}
           onCfgScaleChange={handleCfgScaleChange}
-          whiteBalanceTemperature={whiteBalanceTemperature}
-          whiteBalanceTint={whiteBalanceTint}
-          onWhiteBalanceTemperatureChange={handleWhiteBalanceTemperatureChange}
-          onWhiteBalanceTintChange={handleWhiteBalanceTintChange}
+          seed={seed}
+          onSeedChange={handleSeedChange}
           // Evaluation mode props
           evaluationMode={evaluationMode}
           evaluationTask={evaluationTask}
@@ -2358,13 +2433,6 @@ export default function Home() {
           onExportEvaluationCSV={handleExportEvaluationCSV}
           onInputQualityChange={handleInputQualityChange}
           onCustomSquareSizeChange={handleCustomSquareSizeChange}
-          // Low-end optimization props
-          enable4BitTextEncoder={enable4BitTextEncoder}
-          enableCpuOffload={enableCpuOffload}
-          enableMemoryOptimizations={enableMemoryOptimizations}
-          onEnable4BitTextEncoderChange={setEnable4BitTextEncoder}
-          onEnableCpuOffloadChange={setEnableCpuOffload}
-          onEnableMemoryOptimizationsChange={setEnableMemoryOptimizations}
           // Debug panel props
           isDebugPanelVisible={isDebugPanelVisible}
           onDebugPanelVisibilityChange={setIsDebugPanelVisible}
@@ -2402,6 +2470,11 @@ export default function Home() {
           imageData={pendingRefImage}
           onClose={handleRefEditorClose}
           onSubmit={handleRefEditorSubmit}
+          initialMaskData={referenceMaskR}
+          modelType={smartMaskModelType}
+          onModelTypeChange={setSmartMaskModelType}
+          borderAdjustment={borderAdjustment}
+          onBorderAdjustmentChange={handleBorderAdjustmentChange}
         />
       )}
     </div>

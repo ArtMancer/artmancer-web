@@ -28,6 +28,8 @@ export function useImageGeneration() {
   const [error, setError] = useState<string | null>(null);
   const [lastGeneration, setLastGeneration] = useState<GenerationResponse | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const currentTaskIdRef = useRef<string | null>(null); // Track task_id for async generation
+  const eventSourceRef = useRef<EventSource | null>(null); // Track SSE connection
 
   const generateImage = useCallback(async (
     prompt: string,
@@ -36,7 +38,8 @@ export function useImageGeneration() {
     settings?: ModelSettings,
     referenceImage?: string | null,
     referenceMaskR?: string | null,
-    taskType?: "white-balance" | "object-insert" | "object-removal"
+    taskType?: "white-balance" | "object-insert" | "object-removal",
+    onProgress?: (progress: { current_step?: number; total_steps?: number; status: string; progress: number }) => void
   ): Promise<GenerationResponse | null> => {
     // Prompt is optional for white balance
     if (taskType !== "white-balance" && !prompt.trim()) {
@@ -133,9 +136,6 @@ export function useImageGeneration() {
         task_type: backendTaskType, // Use backend format: "insertion", "removal", or "white-balance"
         input_quality: settings?.input_quality,
         // Low-end optimization flags
-        enable_4bit_text_encoder: settings?.enable_4bit_text_encoder,
-        enable_cpu_offload: settings?.enable_cpu_offload,
-        enable_memory_optimizations: settings?.enable_memory_optimizations,
         enable_flowmatch_scheduler: settings?.enable_flowmatch_scheduler,
       };
 
@@ -152,8 +152,24 @@ export function useImageGeneration() {
         usingTwoSourceMasks: !!(request.reference_image && request.reference_mask_R),
       });
 
-      const response = await apiService.generateImage(request, abortController.signal);
+      // Track task_id if async mode is detected
+      // We need to intercept the response to get task_id before generateImageAsync is called
+      // For now, we'll track it in generateImageAsync callback
+      const response = await apiService.generateImage(
+        request, 
+        abortController.signal, 
+        onProgress,
+        (taskId: string, eventSource: EventSource) => {
+          // Callback when async mode is detected
+          currentTaskIdRef.current = taskId;
+          eventSourceRef.current = eventSource;
+        }
+      );
       setLastGeneration(response);
+      // Clear task_id tracking if sync mode (no task_id)
+      if (!currentTaskIdRef.current) {
+        currentTaskIdRef.current = null;
+      }
       return response;
     } catch (err) {
       // Check if request was cancelled
@@ -187,19 +203,42 @@ export function useImageGeneration() {
           // Service unavailable
           errorMessage = errorData.error || 'Service temporarily unavailable. Please try again in a moment.';
         } else if (errorData.status === 500) {
-          // Server error
-          errorMessage = errorData.error || 'Server error occurred. Please check the server logs and try again.';
+          // Server error - check for OOM errors
+          const errorText = errorData.error || '';
+          if (errorText.toLowerCase().includes('out of memory') || 
+              errorText.toLowerCase().includes('cuda out of memory') ||
+              errorText.toLowerCase().includes('oom')) {
+            errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+          } else {
+            errorMessage = errorText || 'Server error occurred. Please check the server logs and try again.';
+          }
         } else if (errorData.error) {
-          // API error with message - ensure it's a string
-          errorMessage = typeof errorData.error === 'string' ? errorData.error : String(errorData.error);
+          // API error with message - check for OOM
+          const errorText = typeof errorData.error === 'string' ? errorData.error : String(errorData.error);
+          if (errorText.toLowerCase().includes('out of memory') || 
+              errorText.toLowerCase().includes('cuda out of memory') ||
+              errorText.toLowerCase().includes('oom')) {
+            errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+          } else {
+            errorMessage = errorText;
+          }
         } else if (errorData.detail) {
           // FastAPI error format - handle both string and object
+          let detailText: string;
           if (typeof errorData.detail === 'string') {
-            errorMessage = errorData.detail;
+            detailText = errorData.detail;
           } else if (typeof errorData.detail === 'object' && errorData.detail?.error) {
-            errorMessage = errorData.detail.error;
+            detailText = errorData.detail.error;
           } else {
-            errorMessage = String(errorData.detail);
+            detailText = String(errorData.detail);
+          }
+          // Check for OOM in detail
+          if (detailText.toLowerCase().includes('out of memory') || 
+              detailText.toLowerCase().includes('cuda out of memory') ||
+              detailText.toLowerCase().includes('oom')) {
+            errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+          } else {
+            errorMessage = detailText;
           }
         }
 
@@ -220,23 +259,22 @@ export function useImageGeneration() {
     } finally {
       setIsGenerating(false);
       abortControllerRef.current = null;
+      // Clear task_id tracking when generation completes or fails
+      currentTaskIdRef.current = null;
+      eventSourceRef.current = null;
     }
   }, []);
 
   const applyWhiteBalance = useCallback(async (
     file: File,
-    method: 'auto' | 'manual' | 'ai' = 'auto',
-    temperature?: number,
-    tint?: number
+    method: 'auto' | 'manual' | 'ai' = 'auto'
   ): Promise<WhiteBalanceResponse | null> => {
     setIsGenerating(true);
     setError(null);
 
     try {
       const options: WhiteBalanceRequest = {
-        method,
-        temperature,
-        tint
+        method
       };
 
       const response = await apiService.whiteBalance(file, options);
@@ -263,22 +301,31 @@ export function useImageGeneration() {
   }, []);
 
   const cancelGeneration = useCallback(async () => {
+    console.log('🚫 Cancelling image generation...');
+    
+    // Close SSE connection if open (async mode)
+    if (eventSourceRef.current) {
+      console.log('🔌 Closing SSE connection...');
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    
     // Cancel HTTP request
     if (abortControllerRef.current) {
-      console.log('🚫 Cancelling image generation...');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
     
-    // Cancel backend task if we have request_id
-    if (lastGeneration?.request_id) {
+    // Cancel backend task
+    // Cancel async generation task
+    if (currentTaskIdRef.current) {
       try {
-        await apiService.cancelGenerationTask(lastGeneration.request_id);
-        console.log(`✅ Generation task ${lastGeneration.request_id} cancelled`);
+        await apiService.cancelAsyncGenerationTask(currentTaskIdRef.current);
+        console.log(`✅ Async generation task ${currentTaskIdRef.current} cancelled`);
       } catch (error) {
-        console.warn(`⚠️ Failed to cancel generation task: ${error}`);
-        // Continue anyway - HTTP request is already aborted
+        console.warn(`⚠️ Failed to cancel async generation task: ${error}`);
       }
+      currentTaskIdRef.current = null;
     }
     
     setIsGenerating(false);

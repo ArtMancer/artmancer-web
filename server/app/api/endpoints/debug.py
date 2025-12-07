@@ -181,26 +181,56 @@ async def download_debug_session(session_name: str):
         if not session_dir.exists():
             raise HTTPException(status_code=404, detail=f"Session {session_name} not found")
         
+        if not session_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"Session {session_name} is not a directory")
+        
+        # Collect all files in session directory
+        files_to_add = []
+        for file_path in session_dir.rglob("*"):
+            if file_path.is_file():
+                files_to_add.append(file_path)
+        
+        if not files_to_add:
+            raise HTTPException(status_code=404, detail=f"No files found in session {session_name}")
+        
+        logger.info(f"📦 Creating ZIP archive for session {session_name} with {len(files_to_add)} files")
+        
         # Create ZIP archive in memory
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            # Add all files in session directory
-            for file_path in session_dir.rglob("*"):
-                if file_path.is_file():
-                    # Use relative path within ZIP
-                    arcname = file_path.relative_to(session_dir)
-                    zip_file.write(file_path, arcname)
-        
-        zip_buffer.seek(0)
-        
-        # Return ZIP file as response
-        return Response(
-            content=zip_buffer.getvalue(),
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f'attachment; filename="{session_name}.zip"'
-            }
-        )
+        try:
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # Add all files in session directory
+                for file_path in files_to_add:
+                    try:
+                        # Use relative path within ZIP
+                        arcname = file_path.relative_to(session_dir)
+                        zip_file.write(file_path, arcname)
+                        logger.debug(f"Added to ZIP: {arcname} ({file_path.stat().st_size} bytes)")
+                    except Exception as e:
+                        logger.warning(f"Failed to add {file_path} to ZIP: {e}")
+                        # Continue with other files even if one fails
+            
+            # ZIP file is automatically closed when exiting the 'with' block
+            # Now get the ZIP data
+            zip_buffer.seek(0)
+            zip_data = zip_buffer.getvalue()
+            
+            if len(zip_data) == 0:
+                raise HTTPException(status_code=500, detail="ZIP archive is empty")
+            
+            logger.info(f"✅ Created ZIP archive: {len(zip_data)} bytes")
+            
+            # Return ZIP file as response
+            return Response(
+                content=zip_data,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{session_name}.zip"',
+                    "Content-Length": str(len(zip_data)),
+                }
+            )
+        finally:
+            zip_buffer.close()
     
     except HTTPException:
         raise

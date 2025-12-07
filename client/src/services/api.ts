@@ -27,10 +27,6 @@ export interface ModelSettings {
   width?: number;
   height?: number;
   input_quality?: InputQualityPreset;
-  // Low-end optimization flags
-  enable_4bit_text_encoder?: boolean;
-  enable_cpu_offload?: boolean;
-  enable_memory_optimizations?: boolean;
   enable_flowmatch_scheduler?: boolean;
 }
 
@@ -55,9 +51,6 @@ export interface GenerationRequest {
   task_type?: TaskType; // Must be "insertion", "removal", or "white-balance" (matches backend exactly)
   input_quality?: InputQualityPreset;
   // Low-end optimization flags (for GPU 12GB or lower)
-  enable_4bit_text_encoder?: boolean; // Enable 4-bit quantization for text encoder (saves ~4GB VRAM)
-  enable_cpu_offload?: boolean; // Enable CPU offload for transformer and VAE (saves VRAM, slower)
-  enable_memory_optimizations?: boolean; // Enable memory optimizations (safetensors, low_cpu_mem_usage, TF32)
   enable_flowmatch_scheduler?: boolean; // Use FlowMatchEulerDiscreteScheduler instead of default
 }
 
@@ -68,6 +61,7 @@ export interface DebugInfo {
   output_image_size?: string;
   lora_adapter?: string;
   loaded_adapters?: string[];
+  positioned_mask_R?: string; // Base64 encoded positioned mask R (reference mask R after being pasted into main mask A, only for reference-guided insertion)
   // Prompt info
   original_prompt?: string;
   refined_prompt?: string;
@@ -372,14 +366,19 @@ class ApiService {
   }
 
   // Generate image
-  async generateImage(request: GenerationRequest, signal?: AbortSignal): Promise<GenerationResponse> {
-    // Use API Gateway endpoint
-    const url = `${this.baseUrl}/api/generate`;
+  async generateImage(
+    request: GenerationRequest,
+    signal?: AbortSignal,
+    onProgress?: (progress: { current_step?: number; total_steps?: number; status: string; progress: number; loading_message?: string }) => void,
+    onAsyncStart?: (taskId: string, eventSource: EventSource) => void
+  ): Promise<GenerationResponse> {
+    // Always use async generation endpoint for progress updates
+    const url = `${this.baseUrl}/api/generate/async`;
 
     console.log('🌐 API Request:', {
       method: 'POST',
       url,
-      endpoint: 'API Gateway',
+      endpoint: 'API Gateway (Async)',
       hasBody: true,
       hasSignal: !!signal,
     });
@@ -414,7 +413,7 @@ class ApiService {
         throw new Error(JSON.stringify({
           status: response.status,
           error: `Invalid JSON response: ${text.substring(0, 100)}`,
-          endpoint: '/api/generate'
+          endpoint: '/api/generate/async'
         }));
       }
 
@@ -466,14 +465,26 @@ class ApiService {
           error: errorMessage,
           error_type: errorType,
           details: responseData?.details || null,
-          endpoint: '/api/generate'
+          endpoint: '/api/generate/async'
         };
 
         console.error('API Error:', errorDetails);
         throw new Error(JSON.stringify(errorDetails));
       }
 
-      return responseData;
+      // Async endpoint always returns task_id
+      if (responseData.task_id && responseData.status === "queued") {
+        // Use SSE to stream progress and poll for result
+        return await this.generateImageAsync(responseData.task_id, signal, onProgress, onAsyncStart);
+      }
+
+      // If no task_id, this is an error (async endpoint should always return task_id)
+      throw new Error(JSON.stringify({
+        status: response.status,
+        error: 'Async generation endpoint did not return task_id. This should not happen.',
+        endpoint: '/api/generate/async',
+        response: responseData
+      }));
     } catch (error) {
       // Check if request was aborted
       if (error instanceof Error && error.name === 'AbortError') {
@@ -482,7 +493,7 @@ class ApiService {
           status: 0,
           error: 'Request cancelled',
           error_type: 'cancelled',
-          endpoint: '/api/generate'
+          endpoint: '/api/generate/async'
         }));
       }
 
@@ -491,7 +502,7 @@ class ApiService {
         errorType: error instanceof Error ? error.constructor.name : typeof error,
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : undefined,
-        endpoint: '/api/generate',
+        endpoint: '/api/generate/async',
         url,
       };
 
@@ -505,7 +516,7 @@ class ApiService {
 1. Is the API Gateway accessible?
 2. Are there any CORS issues?
 3. Is the API Gateway URL correct?`,
-          endpoint: '/api/generate',
+          endpoint: '/api/generate/async',
           baseUrl: this.baseUrl,
           fullUrl: url,
         };
@@ -635,15 +646,16 @@ class ApiService {
     }
   }
 
-  // Generate smart mask using FastSAM
+  // Generate smart mask using FastSAM or BiRefNet
   async generateSmartMask(
     image: string | null,
     imageId: string | null,
     bbox?: [number, number, number, number],
     points?: Array<[number, number]>,
-    dilateAmount: number = 10,
-    useBlur: boolean = false
-  ): Promise<{ success: boolean; mask_base64: string; image_id?: string; error?: string }> {
+    borderAdjustment: number = 0,
+    useBlur: boolean = false,
+    modelType: string = "segmentation"  // "segmentation" (FastSAM) or "birefnet"
+  ): Promise<{ success: boolean; mask_base64: string; image_id?: string; request_id?: string; error?: string }> {
     // Smart-mask through API Gateway
     const url = `${this.baseUrl}/api/smart-mask`;
 
@@ -658,8 +670,9 @@ class ApiService {
           image_id: imageId,
           bbox: bbox,
           points: points,
-          dilate_amount: dilateAmount,
+          border_adjustment: borderAdjustment,
           use_blur: useBlur,
+          model_type: modelType,
         }),
       });
 
@@ -688,7 +701,7 @@ class ApiService {
               image_id: null, // Clear image_id
               bbox: bbox,
               points: points,
-              dilate_amount: dilateAmount,
+              border_adjustment: borderAdjustment,
               use_blur: useBlur,
             }),
           });
@@ -747,15 +760,6 @@ class ApiService {
 
   // Download visualization images
   // Cancel generation task
-  async cancelGenerationTask(taskId: string): Promise<{ success: boolean; message: string; task_id: string }> {
-    return this.makeRequest<{ success: boolean; message: string; task_id: string }>(
-      `/api/generate/cancel/${taskId}`,
-      {
-        method: 'POST',
-      }
-    );
-  }
-
   // Cancel async generation task
   async cancelAsyncGenerationTask(taskId: string): Promise<{ success: boolean; message: string; task_id: string }> {
     return this.makeRequest<{ success: boolean; message: string; task_id: string }>(
@@ -886,6 +890,306 @@ class ApiService {
       console.error('Error running benchmark:', error);
       throw error;
     }
+  }
+
+  async generateImageAsync(
+    taskId: string,
+    signal?: AbortSignal,
+    onProgress?: (progress: { current_step?: number; total_steps?: number; status: string; progress: number; loading_message?: string }) => void,
+    onAsyncStart?: (taskId: string, eventSource: EventSource) => void
+  ): Promise<GenerationResponse> {
+    return new Promise((resolve, reject) => {
+      let pollInterval: NodeJS.Timeout | null = null;
+      let isResolved = false;
+
+      // Cleanup function
+      const cleanup = () => {
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+        if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+          eventSource.close();
+        }
+      };
+
+      // Open SSE connection for progress updates
+      const streamUrl = `${this.baseUrl}/api/generate/stream/${taskId}`;
+      const eventSource = new EventSource(streamUrl);
+
+      // Notify caller about async start (for cancellation tracking)
+      if (onAsyncStart) {
+        onAsyncStart(taskId, eventSource);
+      }
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          console.log('📡 [SSE] Received progress update:', {
+            status: data.status,
+            progress: data.progress,
+            current_step: data.current_step,
+            total_steps: data.total_steps,
+          });
+
+          // Check for error in data (even if status is not "error" yet)
+          if (data.error) {
+            eventSource.close();
+            // Check if it's an OOM error
+            const errorText = typeof data.error === 'string' ? data.error : String(data.error);
+            let errorMessage = errorText;
+            if (errorText.toLowerCase().includes('out of memory') ||
+              errorText.toLowerCase().includes('cuda out of memory') ||
+              errorText.toLowerCase().includes('oom')) {
+              errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+            }
+            reject(new Error(JSON.stringify({
+              status: 500,
+              error: errorMessage,
+              endpoint: `/api/generate/stream/${taskId}`
+            })));
+            return;
+          }
+
+          // Call progress callback for all status updates (not just processing)
+          if (onProgress) {
+            console.log('📢 [SSE] Calling onProgress callback with:', data.status);
+            onProgress({
+              current_step: data.current_step,
+              total_steps: data.total_steps,
+              status: data.status,
+              progress: data.progress,
+              loading_message: data.loading_message,
+            });
+          }
+
+          // If done, fetch result and close connection
+          if (data.status === "done") {
+            cleanup();
+            if (!isResolved) {
+              isResolved = true;
+              this.getGenerationResult(taskId)
+                .then(result => resolve(result))
+                .catch(err => reject(err));
+            }
+            return;
+          }
+
+          // If error or cancelled, reject
+          if (data.status === "error" || data.status === "cancelled") {
+            cleanup();
+            if (!isResolved) {
+              isResolved = true;
+              // Check if it's an OOM error
+              const errorText = data.error || "Generation failed";
+              let errorMessage = typeof errorText === 'string' ? errorText : String(errorText);
+              if (errorText.toLowerCase().includes('out of memory') ||
+                errorText.toLowerCase().includes('cuda out of memory') ||
+                errorText.toLowerCase().includes('oom')) {
+                errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+              }
+              reject(new Error(JSON.stringify({
+                status: 500,
+                error: errorMessage,
+                endpoint: `/api/generate/stream/${taskId}`
+              })));
+            }
+            return;
+          }
+        } catch (parseError) {
+          console.error('Failed to parse SSE event:', parseError);
+        }
+      };
+
+      eventSource.onerror = async (error) => {
+        console.warn('⚠️ [SSE] Connection error, attempting to recover with status polling...');
+
+        // Try to recover by checking status and polling if task is still active
+        try {
+          const status = await this.getGenerationStatus(taskId);
+
+          // If task is done, fetch result
+          if (status.status === "done") {
+            cleanup();
+            if (!isResolved) {
+              isResolved = true;
+              this.getGenerationResult(taskId)
+                .then(result => resolve(result))
+                .catch(err => reject(err));
+            }
+            return;
+          }
+
+          // If task has error, reject
+          if (status.status === "error" || status.status === "cancelled") {
+            cleanup();
+            if (!isResolved) {
+              isResolved = true;
+              const errorText = status.error || "Generation failed";
+              let errorMessage = typeof errorText === 'string' ? errorText : String(errorText);
+              if (errorText.toLowerCase().includes('out of memory') ||
+                errorText.toLowerCase().includes('cuda out of memory') ||
+                errorText.toLowerCase().includes('oom')) {
+                errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+              }
+              reject(new Error(JSON.stringify({
+                status: 500,
+                error: errorMessage,
+                endpoint: `/api/generate/stream/${taskId}`
+              })));
+            }
+            return;
+          }
+
+          // Task is still active, update progress and continue polling
+          if (onProgress) {
+            onProgress({
+              current_step: status.current_step,
+              total_steps: status.total_steps,
+              status: status.status,
+              progress: status.progress,
+              loading_message: status.loading_message,
+            });
+          }
+
+          // Start polling as fallback
+          pollInterval = setInterval(async () => {
+            try {
+              const pollStatus = await this.getGenerationStatus(taskId);
+
+              // Update progress
+              if (onProgress) {
+                onProgress({
+                  current_step: pollStatus.current_step,
+                  total_steps: pollStatus.total_steps,
+                  status: pollStatus.status,
+                  progress: pollStatus.progress,
+                  loading_message: pollStatus.loading_message,
+                });
+              }
+
+              // Check if done
+              if (pollStatus.status === "done") {
+                cleanup();
+                if (!isResolved) {
+                  isResolved = true;
+                  this.getGenerationResult(taskId)
+                    .then(result => resolve(result))
+                    .catch(err => reject(err));
+                }
+              } else if (pollStatus.status === "error" || pollStatus.status === "cancelled") {
+                cleanup();
+                if (!isResolved) {
+                  isResolved = true;
+                  const errorText = pollStatus.error || "Generation failed";
+                  let errorMessage = typeof errorText === 'string' ? errorText : String(errorText);
+                  if (errorText.toLowerCase().includes('out of memory') ||
+                    errorText.toLowerCase().includes('cuda out of memory') ||
+                    errorText.toLowerCase().includes('oom')) {
+                    errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+                  }
+                  reject(new Error(JSON.stringify({
+                    status: 500,
+                    error: errorMessage,
+                    endpoint: `/api/generate/status/${taskId}`
+                  })));
+                }
+              }
+            } catch (pollError) {
+              console.error('Error polling status:', pollError);
+              cleanup();
+              if (!isResolved) {
+                isResolved = true;
+                reject(pollError);
+              }
+            }
+          }, 2000); // Poll every 2 seconds
+        } catch (statusError) {
+          // If status check also fails, reject
+          cleanup();
+          if (!isResolved) {
+            isResolved = true;
+            reject(new Error(JSON.stringify({
+              status: 500,
+              error: 'SSE connection error and status check failed',
+              endpoint: `/api/generate/stream/${taskId}`
+            })));
+          }
+        }
+      };
+
+      // Handle cancellation
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          cleanup();
+          if (!isResolved) {
+            isResolved = true;
+            reject(new Error(JSON.stringify({
+              status: 0,
+              error: 'Request cancelled',
+              error_type: 'cancelled',
+              endpoint: `/api/generate/stream/${taskId}`
+            })));
+          }
+        });
+      }
+    });
+  }
+
+  async getGenerationStatus(taskId: string): Promise<{
+    status: string;
+    progress: number;
+    current_step?: number;
+    total_steps?: number;
+    error?: string;
+    loading_message?: string;
+  }> {
+    const url = `${this.baseUrl}/api/generate/status/${taskId}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(JSON.stringify({
+        status: response.status,
+        error: errorData.detail || errorData.error || 'Failed to get generation status',
+        endpoint: `/api/generate/status/${taskId}`
+      }));
+    }
+
+    const data = await response.json();
+    return {
+      status: data.status || 'unknown',
+      progress: data.progress || 0,
+      current_step: data.current_step,
+      total_steps: data.total_steps,
+      error: data.error,
+      loading_message: data.loading_message,
+    };
+  }
+
+  async getGenerationResult(taskId: string): Promise<GenerationResponse> {
+    const url = `${this.baseUrl}/api/generate/result/${taskId}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(JSON.stringify({
+        status: response.status,
+        error: errorData.detail || errorData.error || 'Failed to get generation result',
+        endpoint: `/api/generate/result/${taskId}`
+      }));
+    }
+
+    const result = await response.json();
+    return {
+      success: true,
+      image: result.image,
+      generation_time: 0, // Not provided by async endpoint
+      model_used: "qwen-image-edit",
+      parameters_used: {},
+      debug_info: result.debug_info,
+    };
   }
 }
 

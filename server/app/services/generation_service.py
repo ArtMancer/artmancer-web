@@ -53,7 +53,8 @@ except Exception:  # pragma: no cover - fallback for environments without fastap
 
 
 class GenerationService:
-    # Class-level cancellation flags for sync generation
+    # Class-level cancellation flags for generation tasks
+    # Used by async generation worker (qwen_worker) to check cancellation
     _cancellation_flags: Dict[str, bool] = {}
     
     def __init__(self) -> None:
@@ -75,18 +76,28 @@ class GenerationService:
         """Clear cancellation flag for task."""
         cls._cancellation_flags.pop(task_id, None)
 
-    def _ensure_pipeline(self, task_type: str = "insertion"):
+    def _ensure_pipeline(
+        self,
+        task_type: str = "insertion",
+        enable_flowmatch_scheduler: Optional[bool] = None,
+        on_loading_progress: Optional[Callable[[str, float]]] = None,
+    ):
         """
-        Get or load pipeline for the specified task type.
+        Get or load pipeline for the specified task type with optional optimization flags.
         
         Args:
             task_type: "insertion", "removal", or "white-balance"
+            enable_flowmatch_scheduler: Override config setting (None = use config)
         
         Returns:
             Loaded DiffusionPipeline (single instance shared across all tasks)
         """
         # Pipeline is managed centrally, just load/switch adapter as needed
-        return load_pipeline(task_type=task_type)
+        return load_pipeline(
+            task_type=task_type,
+            enable_flowmatch_scheduler=enable_flowmatch_scheduler,
+            on_loading_progress=on_loading_progress,
+        )
 
     def _resolve_quality(
         self, override: str | None = None
@@ -597,7 +608,7 @@ class GenerationService:
         research_metrics: Dict[str, Any],
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
         task_id: Optional[str] = None
-    ) -> Tuple[Image.Image, Dict[str, Any], Optional[Image.Image], list]:
+    ) -> Tuple[Image.Image, Dict[str, Any], Optional[Image.Image], list, Image.Image]:
         """Execute reference-guided insertion workflow."""
         logger.info("🎯 [Reference-Guided Insertion] Using new pipeline: reference_mask_R positioned inside main_mask_A")
         
@@ -659,7 +670,7 @@ class GenerationService:
         
         # Execute pipeline
         inference_start = time.time()
-        generated = execute_insertion_pipeline(
+        generated, positioned_mask_R = execute_insertion_pipeline(
             base_image=original,
             main_mask_A=main_mask_A,
             reference_image=reference_image,
@@ -693,6 +704,7 @@ class GenerationService:
         
         # Build params for metadata
         params = {
+            "prompt": request.prompt or "",
             "num_inference_steps": request.num_inference_steps or 10,
             "guidance_scale": request.true_cfg_scale or request.guidance_scale or 4.0,
             "true_cfg_scale": request.true_cfg_scale or request.guidance_scale or 4.0,
@@ -711,16 +723,17 @@ class GenerationService:
         masked_R_image = extract_object_with_mask(reference_image, reference_mask_R)
         debug_session.save_image(masked_R_image, "masked_R", "07", "Masked R (extracted object from reference)")
         
-        # Return conditionals for debug info: [original, mask_A, masked_R, reference_image]
+        # Return conditionals for debug info: [original, mask_A, masked_R, reference_image, positioned_mask_R]
         # This matches what frontend expects for insertion debug display
         conditionals_for_debug = [
             original,      # 1. Original input image
             main_mask_A,  # 2. Mask A (placement mask on original)
             masked_R_image,  # 3. Masked R (extracted object from reference)
             reference_image,  # 4. Reference image (original)
+            positioned_mask_R,  # 5. Positioned mask R (reference mask R pasted into main mask A)
         ]
         
-        return generated, params, reference_image, conditionals_for_debug
+        return generated, params, reference_image, conditionals_for_debug, positioned_mask_R
 
     def _execute_standard_workflow(
         self,
@@ -888,6 +901,7 @@ class GenerationService:
                 self._verify_generated_image(original, generated, task_type, len(image_list))
                 
                 params = {
+                    "prompt": qwen_params.get("prompt", request.prompt or ""),
                     "num_inference_steps": qwen_params["num_inference_steps"],
                     "guidance_scale": qwen_params.get("true_cfg_scale", request.guidance_scale or 4.0),
                     "true_cfg_scale": qwen_params.get("true_cfg_scale"),
@@ -921,7 +935,7 @@ class GenerationService:
         
         return generated, params, reference, conditionals
 
-    def generate(self, request: GenerationRequest, progress_callback: Optional[Callable[[int, int, int], None]] = None) -> Dict[str, Any]:
+    def generate(self, request: GenerationRequest, progress_callback: Optional[Callable[[int, int, int], None]] = None, on_pipeline_loaded: Optional[Callable[[], None]] = None, on_loading_progress: Optional[Callable[[str, float]]] = None) -> Dict[str, Any]:
         """
         Generate image using Qwen pipeline.
         
@@ -956,29 +970,38 @@ class GenerationService:
             task_type = self._determine_task_type(request)
             debug_session.log_lora(f"Task type: {task_type}")
             
-            # Log low-end optimization flags from request (for future reference)
-            if any([
-                request.enable_4bit_text_encoder is not None,
-                request.enable_cpu_offload is not None,
-                request.enable_memory_optimizations is not None,
-                request.enable_flowmatch_scheduler is not None,
-            ]):
+            # Extract optimization flags from request (will override config if provided)
+            optimization_flags = {
+                "enable_flowmatch_scheduler": request.enable_flowmatch_scheduler,
+            }
+            
+            # Log optimization flags from request
+            if any(flag is not None for flag in optimization_flags.values()):
                 logger.info(
-                    "ℹ️ Low-end optimization flags provided in request: "
-                    f"4bit={request.enable_4bit_text_encoder}, "
-                    f"cpu_offload={request.enable_cpu_offload}, "
-                    f"mem_opt={request.enable_memory_optimizations}, "
-                    f"flowmatch={request.enable_flowmatch_scheduler}. "
-                    "Note: Pipeline uses config settings. To change, update config and restart."
+                    "ℹ️ Optimization flags provided in request (will override config): "
+                    f"flowmatch={request.enable_flowmatch_scheduler}"
                 )
             
             # Load pipeline and record timing
             pipeline_load_start = time.time()
-            pipeline = self._ensure_pipeline(task_type=task_type)
+            pipeline = self._ensure_pipeline(
+                task_type=task_type,
+                on_loading_progress=on_loading_progress,
+                **optimization_flags
+            )
             pipeline_callable = cast(Any, pipeline)
             pipeline_load_time = time.time() - pipeline_load_start
             research_metrics["timing"]["pipeline_load_seconds"] = round(pipeline_load_time, 3)
             debug_session.log_lora(f"Pipeline loaded in {pipeline_load_time:.3f}s")
+            logger.info(f"✅ Pipeline loaded in {pipeline_load_time:.3f}s, notifying callback...")
+            
+            # Notify that pipeline is loaded (this should update status from loading_pipeline to processing)
+            if on_pipeline_loaded:
+                logger.info("📢 Calling on_pipeline_loaded callback...")
+                on_pipeline_loaded()
+                logger.info("✅ on_pipeline_loaded callback completed")
+            else:
+                logger.debug("ℹ️ on_pipeline_loaded callback not provided (optional)")
             
             # Log LoRA info from qwen_loader
             from ..core.qwen_loader import _current_adapter, _loaded_adapters
@@ -997,10 +1020,11 @@ class GenerationService:
                 and request.reference_image is not None
             )
             
+            positioned_mask_R = None  # Only set for reference-guided insertion
             if use_reference_guided_insertion:
                 # Execute reference-guided insertion workflow
                 original = base64_to_image(request.input_image)
-                generated, params, reference, conditionals = self._execute_reference_guided_insertion(
+                generated, params, reference, conditionals, positioned_mask_R = self._execute_reference_guided_insertion(
                     request, pipeline_callable, debug_session, research_metrics, progress_callback, task_id
                 )
                 
@@ -1083,10 +1107,14 @@ class GenerationService:
             if reference and len(conditional_images_for_viz) == 3:
                 conditional_images_for_viz = conditional_images_for_viz + [reference]
             
+            # Get the actual prompt used (final_prompt from params if available, otherwise request.prompt)
+            actual_prompt = params.get("prompt", request.prompt)
+            
             # Save generation parameters to debug session
             debug_session.save_parameters({
                 "task_type": task_type,
-                "prompt": request.prompt,
+                "prompt": actual_prompt,  # Use actual prompt used in generation
+                "original_prompt": request.prompt,  # Also save original prompt from request
                 "negative_prompt": request.negative_prompt,
                 "num_inference_steps": params["num_inference_steps"],
                 "guidance_scale": params["guidance_scale"],
@@ -1123,9 +1151,9 @@ class GenerationService:
                     conditional_labels = ["original", "mask", "mae"]
                     max_conditionals = 3
                 elif use_reference_guided_insertion:
-                    # Reference-guided insertion: [original, mask_A, masked_R, reference_image]
-                    conditional_labels = ["original", "mask_A", "masked_R", "reference_image"]
-                    max_conditionals = 4
+                    # Reference-guided insertion: [original, mask_A, masked_R, reference_image, positioned_mask_R]
+                    conditional_labels = ["original", "mask_A", "masked_R", "reference_image", "positioned_mask_R"]
+                    max_conditionals = 5
                 else:
                     # Standard insertion: [ref_img, mask, masked_bg]
                     conditional_labels = ["ref_img", "mask", "masked_bg"]
@@ -1152,6 +1180,20 @@ class GenerationService:
                     "lora_adapter": _current_adapter,
                     "loaded_adapters": list(_loaded_adapters) if _loaded_adapters else [],
                 }
+                
+                # Add positioned_mask_R for reference-guided insertion
+                if use_reference_guided_insertion and positioned_mask_R is not None:
+                    try:
+                        # Ensure mask R is binary (L mode) for debug visualization
+                        # Convert to L mode if it's RGB (from prepare_condition_images)
+                        mask_R_for_debug = positioned_mask_R
+                        if mask_R_for_debug.mode != "L":
+                            # Convert RGB back to L (grayscale) for proper binary mask display
+                            mask_R_for_debug = mask_R_for_debug.convert("L")
+                        positioned_mask_R_b64 = image_to_base64(mask_R_for_debug)
+                        debug_info["positioned_mask_R"] = positioned_mask_R_b64
+                    except Exception as e:
+                        logger.warning(f"Failed to encode positioned_mask_R: {e}")
                 
                 # Add session_name and debug_path to debug_info for download functionality
                 if DEBUG_ENABLED:

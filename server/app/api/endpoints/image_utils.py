@@ -38,7 +38,8 @@ async def extract_object_endpoint(request: ExtractObjectRequest):
     - Black (0) = background to remove
     
     Returns:
-        PNG image with transparent background where mask is black
+        PNG image with object resized to 1:1 ratio (512x512 or 1024x1024)
+        on white background (not transparent, not black)
     """
     try:
         # Decode base64 image
@@ -55,28 +56,72 @@ async def extract_object_endpoint(request: ExtractObjectRequest):
         
         logger.info(f"Extracting object: image={image.size}, mask={mask.size}")
         
-        # Convert to numpy arrays for faster processing
-        image_array = np.array(image.convert("RGBA"), dtype=np.uint8)
-        mask_array = np.array(mask.convert("L"), dtype=np.uint8)
+        # Convert mask to numpy array to find bounding box
+        mask_array = np.array(mask, dtype=np.uint8)
         
-        # Apply mask as alpha channel using numpy (much faster than PIL split/merge)
-        # White in mask = opaque, Black in mask = transparent
-        result_array = image_array.copy()
-        result_array[:, :, 3] = mask_array  # Set alpha channel to mask
+        # Find bounding box of white pixels (object region)
+        white_pixels = np.where(mask_array > 128)
+        if len(white_pixels[0]) == 0:
+            raise ValueError("No object found in mask (no white pixels)")
         
-        # Convert back to PIL Image
-        result = Image.fromarray(result_array, mode="RGBA")
+        y_min, y_max = int(np.min(white_pixels[0])), int(np.max(white_pixels[0])) + 1
+        x_min, x_max = int(np.min(white_pixels[1])), int(np.max(white_pixels[1])) + 1
         
-        # Save to buffer with optimization
+        # Crop object from image and mask
+        cropped_image = image.crop((x_min, y_min, x_max, y_max))
+        cropped_mask = mask.crop((x_min, y_min, x_max, y_max))
+        
+        # Determine target size (1:1 ratio, 512x512 or 1024x1024, not too high)
+        # Use the larger dimension of cropped object to determine scale
+        cropped_width, cropped_height = cropped_image.size
+        max_dimension = max(cropped_width, cropped_height)
+        
+        # Choose target size: 512x512 if max_dimension <= 512, else 1024x1024
+        if max_dimension <= 512:
+            target_size = 512
+        else:
+            target_size = 1024
+        
+        # Resize cropped object to target size (1:1 ratio) while maintaining aspect ratio
+        # Calculate scale to fit within target_size while preserving aspect ratio
+        scale = min(target_size / cropped_width, target_size / cropped_height)
+        new_width = int(cropped_width * scale)
+        new_height = int(cropped_height * scale)
+        
+        # Resize object image
+        resized_object = cropped_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Create white background (RGB, not RGBA, not transparent, not black)
+        result = Image.new("RGB", (target_size, target_size), color=(255, 255, 255))
+        
+        # Calculate position to center the object on white background
+        paste_x = (target_size - new_width) // 2
+        paste_y = (target_size - new_height) // 2
+        
+        # Paste object onto white background using mask for transparency
+        # Convert resized object back to RGBA for alpha compositing
+        if resized_object.mode != "RGBA":
+            resized_object = resized_object.convert("RGBA")
+        
+        # Resize mask to match resized object size
+        resized_mask = cropped_mask.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Create alpha channel from mask
+        alpha = resized_mask.convert("L")
+        resized_object.putalpha(alpha)
+        
+        # Paste object onto white background
+        result.paste(resized_object, (paste_x, paste_y), resized_object)
+        
+        # Save to buffer
         buffer = io.BytesIO()
-        # Use optimize=False for faster encoding (slight size trade-off)
         result.save(buffer, format="PNG", optimize=False)
         buffer.seek(0)
         
         # Encode as base64
         result_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         
-        logger.info(f"Object extracted successfully")
+        logger.info(f"Object extracted successfully: {cropped_image.size} -> {target_size}x{target_size} on white background")
         
         return ExtractObjectResponse(
             success=True,

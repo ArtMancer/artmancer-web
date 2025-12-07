@@ -16,6 +16,7 @@ export function useViewportControls(
   // Refs for performance
   const imageContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const viewportZoomRef = useRef(1); // Keep ref in sync with state
 
   // Calculate optimal initial zoom based on image dimensions
   const calculateOptimalZoom = useCallback((dimensions: ImageDimensions, scale: number) => {
@@ -65,7 +66,15 @@ export function useViewportControls(
     }
   }, [imageDimensions, displayScale, calculateOptimalZoom]);
 
-  // Zoom functionality - zooms the viewport
+  // RAF ref for throttling zoom updates (batch updates to 60fps)
+  const rafIdRef = useRef<number | null>(null);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    viewportZoomRef.current = viewportZoom;
+  }, [viewportZoom]);
+
+  // Zoom functionality - zooms the viewport with RAF throttling
   // Use native event listener to allow preventDefault
   const handleWheelNative = useCallback((e: WheelEvent) => {
     e.preventDefault();
@@ -73,21 +82,31 @@ export function useViewportControls(
     
     // Use 5% increments instead of multiplicative factors
     const zoomIncrement = 0.05; // 5% increment
-    setViewportZoom(prevZoom => {
-      let newZoom;
-      if (e.deltaY > 0) {
-        // Zoom out
-        newZoom = prevZoom - zoomIncrement;
-      } else {
-        // Zoom in
-        newZoom = prevZoom + zoomIncrement;
-      }
-      
-      // Clamp to bounds and round to nearest 5%
-      newZoom = Math.max(0.05, Math.min(3, newZoom));
-      newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
-      return newZoom;
-    });
+    
+    // Calculate new zoom value from ref (always up-to-date)
+    let newZoom;
+    if (e.deltaY > 0) {
+      // Zoom out
+      newZoom = viewportZoomRef.current - zoomIncrement;
+    } else {
+      // Zoom in
+      newZoom = viewportZoomRef.current + zoomIncrement;
+    }
+    
+    // Clamp to bounds and round to nearest 5%
+    newZoom = Math.max(0.05, Math.min(3, newZoom));
+    newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
+    
+    // Update ref immediately for next calculation
+    viewportZoomRef.current = newZoom;
+    
+    // Schedule RAF update if not already scheduled (throttle to 60fps)
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        setViewportZoom(viewportZoomRef.current);
+        rafIdRef.current = null;
+      });
+    }
   }, []);
 
   // React event handler for compatibility (won't preventDefault but will still work)
@@ -121,6 +140,11 @@ export function useViewportControls(
 
     return () => {
       container.removeEventListener('wheel', handleWheelNative);
+      // Cleanup RAF if component unmounts
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
     };
   }, [handleWheelNative]);
 
