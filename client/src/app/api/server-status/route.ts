@@ -12,11 +12,11 @@ export async function GET() {
       'https://nxan2911--api-gateway.modal.run';
 
     // Gọi API Gateway để lấy aggregated health status
-    // Tăng timeout lên 10s vì API Gateway cần check nhiều services
+    // Tăng timeout lên 15s để đảm bảo đủ thời gian cho health checks (mỗi service timeout 2s, chạy song song)
     const response = await fetch(`${GATEWAY_URL}/api/system/health`, {
       method: 'GET',
       cache: 'no-store',
-      signal: AbortSignal.timeout(10000), // 10s timeout (API Gateway checks 4 services concurrently)
+      signal: AbortSignal.timeout(15000), // 15s timeout (API Gateway checks services concurrently with 2s timeout each)
     });
 
     if (response.ok) {

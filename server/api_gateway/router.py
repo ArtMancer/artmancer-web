@@ -417,7 +417,7 @@ def create_router() -> APIRouter:
             "job_manager": job_manager_client,
         }
         
-        async def check_service_health(name: str, client: ServiceClient, timeout: float = 3.0):
+        async def check_service_health(name: str, client: ServiceClient, timeout: float = 2.0):
             """Check health of a single service with timeout."""
             try:
                 # Use asyncio.wait_for to add timeout
@@ -432,9 +432,10 @@ def create_router() -> APIRouter:
                 return name, {"status": "unhealthy", "error": str(e)}
         
         # Check all services concurrently with individual timeouts
+        # Reduced timeout to 2s per service for faster response
         service_names = list(services.keys())
         tasks = [
-            check_service_health(name, client, timeout=3.0)
+            check_service_health(name, client, timeout=2.0)
             for name, client in services.items()
         ]
         
