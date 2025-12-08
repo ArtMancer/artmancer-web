@@ -1,3 +1,14 @@
+"""
+Synchronous and async generation endpoints.
+
+This module provides endpoints for image generation:
+- Synchronous generation (blocking, for local development)
+- Async generation with job tracking (for Modal deployment)
+- Progress streaming via Server-Sent Events (SSE)
+
+Note: In Modal environment, all requests automatically use async mode.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -7,7 +18,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any
 
-from ...models import GenerationRequest, GenerationResponse
+from ...models import (
+    GenerationRequest,
+)
 from ...services.generation_service import GenerationService
 
 router = APIRouter(prefix="/api", tags=["generation"])
@@ -25,7 +38,6 @@ def _get_qwen_worker():
     if qwen_worker is None:
         try:
             import sys
-            import importlib
             # Import modal_app module
             if 'modal_app' not in sys.modules:
                 import modal_app

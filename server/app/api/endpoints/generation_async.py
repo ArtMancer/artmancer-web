@@ -10,7 +10,9 @@ import uuid
 import time
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any
+from typing import Dict, Any, List
+from pathlib import Path
+import base64
 
 from ...models import GenerationRequest
 
@@ -22,10 +24,12 @@ router = APIRouter(prefix="/api/generate", tags=["generation-async"])
 MODAL_ENV = False
 qwen_worker = None
 job_state_dictio = None
+volume = None
+VOL_MOUNT_PATH = "/checkpoints"  # fallback default
 
 def _get_modal_imports():
     """Lazy import of Modal components."""
-    global MODAL_ENV, qwen_worker, job_state_dictio
+    global MODAL_ENV, qwen_worker, job_state_dictio, volume, VOL_MOUNT_PATH
     if qwen_worker is None:
         try:
             import sys
@@ -35,11 +39,14 @@ def _get_modal_imports():
                 modal_app = sys.modules['modal_app']
             qwen_worker = getattr(modal_app, 'qwen_worker', None)
             job_state_dictio = getattr(modal_app, 'job_state_dictio', None)
+            volume = getattr(modal_app, 'volume', None)
+            VOL_MOUNT_PATH = getattr(modal_app, 'VOL_MOUNT_PATH', VOL_MOUNT_PATH)
             MODAL_ENV = qwen_worker is not None and job_state_dictio is not None
         except (ImportError, AttributeError):
             MODAL_ENV = False
             qwen_worker = None
             job_state_dictio = None
+            volume = None
     return qwen_worker, job_state_dictio
 
 
@@ -233,6 +240,74 @@ def cancel_async_generation(task_id: str) -> Dict[str, Any]:
         "task_id": task_id
     }
 
+
+# New: Multi-step sequential generation (sync) for reporting
+@router.post("/multi-steps")
+def generate_multi_steps(request: GenerationRequest) -> Dict[str, Any]:
+    """
+    Run generation sequentially for multiple inference steps (default: 5, 10, 25).
+    Executes on GPU via qwen_worker.call (synchronous). Saves each image to Volume and returns base64 + path.
+    """
+    worker, job_dictio = _get_modal_imports()
+    if not MODAL_ENV or worker is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Async generation not available (not running in Modal environment)"
+        )
+
+    steps: List[int] = [5, 10, 25]
+    base_request_id = str(uuid.uuid4())
+    results: List[Dict[str, Any]] = []
+
+    # Ensure volume mount path exists
+    save_root = Path(VOL_MOUNT_PATH) / "reports" / base_request_id
+    save_root.mkdir(parents=True, exist_ok=True)
+
+    for step in steps:
+        # Override num_inference_steps per call
+        payload = request.model_copy(update={"num_inference_steps": step}).model_dump()
+        task_id = f"{base_request_id}_s{step}"
+
+        try:
+            # Call GPU worker synchronously
+            result = worker.call(task_id, payload)
+            image_b64 = result.get("image")
+            if not image_b64:
+                raise ValueError("Worker returned no image")
+
+            # Save to volume
+            save_path = save_root / f"step_{step}.png"
+            try:
+                raw = base64.b64decode(image_b64)
+                with open(save_path, "wb") as f:
+                    f.write(raw)
+            except Exception as e:
+                # Continue even if save fails; report error in path field
+                save_path = None
+                result["save_error"] = str(e)
+
+            results.append(
+                {
+                    "step": step,
+                    "image": image_b64,
+                    "path": str(save_path) if save_path else None,
+                    "request_id": result.get("request_id"),
+                    "debug_info": result.get("debug_info"),
+                }
+            )
+        except Exception as e:
+            results.append(
+                {
+                    "step": step,
+                    "error": str(e),
+                }
+            )
+
+    return {
+        "base_request_id": base_request_id,
+        "steps": steps,
+        "results": results,
+    }
 
 @router.get("/stream/{task_id}")
 async def stream_generation_progress(task_id: str):

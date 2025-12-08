@@ -161,7 +161,6 @@ def create_router() -> APIRouter:
     async def stream_generation_progress(task_id: str):
         """Forward SSE stream for generation progress from job manager."""
         from fastapi.responses import StreamingResponse
-        import asyncio
         
         endpoint = f"/api/generate/stream/{task_id}"
         service_url = job_manager_client.service_url

@@ -18,6 +18,10 @@ interface ImageContainerLayerProps {
   onClick?: (e: React.MouseEvent) => void;
   onKeyDown?: (e: React.KeyboardEvent) => void;
   tabIndex?: number;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+  isDragOver?: boolean;
 }
 
 const ImageContainerLayer = forwardRef<
@@ -37,6 +41,10 @@ const ImageContainerLayer = forwardRef<
       onClick,
       onKeyDown,
       tabIndex,
+      onDragOver,
+      onDragLeave,
+      onDrop,
+      isDragOver = false,
     },
     ref
   ) => {
@@ -59,7 +67,11 @@ const ImageContainerLayer = forwardRef<
         ref={ref}
         className={`${
           imageDimensions ? '' : 'w-72 h-72 lg:w-96 lg:h-96'
-        } bg-[var(--primary-accent)] rounded-lg shadow-2xl transition-colors select-none ring-1 ring-white/10`}
+        } bg-[var(--primary-accent)] rounded-lg shadow-2xl transition-all duration-200 select-none ring-1 ${
+          isDragOver 
+            ? 'ring-4 ring-[var(--highlight-accent)] ring-offset-2 bg-[var(--highlight-accent)]/20' 
+            : 'ring-white/10'
+        }`}
         style={containerStyle}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
@@ -67,6 +79,9 @@ const ImageContainerLayer = forwardRef<
         onMouseLeave={onMouseLeave}
         onClick={onClick}
         onKeyDown={onKeyDown}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
         tabIndex={tabIndex}
       >
         {children}

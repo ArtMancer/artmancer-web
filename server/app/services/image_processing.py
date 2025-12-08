@@ -1,3 +1,16 @@
+"""
+Image Processing Service
+
+This module provides utilities for image manipulation and conversion:
+- Base64 encoding/decoding
+- Image resizing with aspect ratio preservation
+- MAE (Masked Autoencoder) image generation using OpenCV inpainting
+- Canny edge detection
+- Mask conditional preparation
+
+All functions work with PIL Image objects and support RGB mode conversion.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -105,6 +118,17 @@ def base64_to_image(data: str) -> Image.Image:
 
 
 def image_to_base64(image: Image.Image, format: str = "PNG") -> str:
+    """
+    Convert PIL Image to base64 encoded string.
+    
+    Args:
+        image: PIL Image to encode
+        format: Image format for encoding (default: "PNG")
+            Supported formats: PNG, JPEG, WEBP, etc.
+    
+    Returns:
+        Base64 encoded image string (without data URL prefix)
+    """
     buffer = io.BytesIO()
     image.save(buffer, format=format)
     buffer.seek(0)

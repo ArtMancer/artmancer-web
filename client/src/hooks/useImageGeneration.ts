@@ -161,15 +161,17 @@ export function useImageGeneration() {
         onProgress,
         (taskId: string, eventSource: EventSource) => {
           // Callback when async mode is detected
+          console.log(`📝 [useImageGeneration] Tracking task_id: ${taskId}`);
           currentTaskIdRef.current = taskId;
           eventSourceRef.current = eventSource;
         }
       );
       setLastGeneration(response);
-      // Clear task_id tracking if sync mode (no task_id)
-      if (!currentTaskIdRef.current) {
-        currentTaskIdRef.current = null;
-      }
+      // Clear task_id tracking only after successful completion
+      console.log(`✅ [useImageGeneration] Generation completed successfully, clearing task_id`);
+      const completedTaskId = currentTaskIdRef.current;
+      currentTaskIdRef.current = null;
+      eventSourceRef.current = null;
       return response;
     } catch (err) {
       // Check if request was cancelled
@@ -255,13 +257,26 @@ export function useImageGeneration() {
         const finalErrorMessage = typeof errorMessage === 'string' ? errorMessage : String(errorMessage || 'Failed to generate image');
         setError(finalErrorMessage);
       }
+      
+      // Clear task_id on error (but not on cancellation - that's handled in cancelGeneration)
+      if (!isCancelled) {
+        console.log('❌ [useImageGeneration] Generation failed, clearing task_id');
+        currentTaskIdRef.current = null;
+        eventSourceRef.current = null;
+      } else {
+        console.log('🚫 [useImageGeneration] Generation cancelled, task_id will be cleared in cancelGeneration');
+      }
+      
       return null;
     } finally {
+      // Only clear isGenerating state and abortController
+      // DON'T clear task_id here - it should only be cleared when:
+      // 1. Generation completes successfully (in try block after response)
+      // 2. Generation fails with error (in catch block, but NOT on cancellation)
+      // 3. User cancels (in cancelGeneration function)
+      // This ensures task_id is available for cancellation even if generation is in progress
       setIsGenerating(false);
       abortControllerRef.current = null;
-      // Clear task_id tracking when generation completes or fails
-      currentTaskIdRef.current = null;
-      eventSourceRef.current = null;
     }
   }, []);
 
@@ -301,36 +316,43 @@ export function useImageGeneration() {
   }, []);
 
   const cancelGeneration = useCallback(async () => {
-    console.log('🚫 Cancelling image generation...');
+    console.log('🚫 [useImageGeneration] Cancelling image generation...');
+    
+    // Cancel backend task FIRST (before closing connections)
+    // This ensures the backend job is marked for cancellation
+    if (currentTaskIdRef.current) {
+      try {
+        console.log(`📞 [useImageGeneration] Calling cancel API for task_id: ${currentTaskIdRef.current}`);
+        await apiService.cancelAsyncGenerationTask(currentTaskIdRef.current);
+        console.log(`✅ [useImageGeneration] Async generation task ${currentTaskIdRef.current} cancelled on backend`);
+      } catch (error) {
+        console.warn(`⚠️ [useImageGeneration] Failed to cancel async generation task: ${error}`);
+        // Continue with cleanup even if cancel API call fails
+      }
+    } else {
+      console.warn('⚠️ [useImageGeneration] No task_id found to cancel');
+    }
     
     // Close SSE connection if open (async mode)
     if (eventSourceRef.current) {
-      console.log('🔌 Closing SSE connection...');
+      console.log('🔌 [useImageGeneration] Closing SSE connection...');
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
     
     // Cancel HTTP request
     if (abortControllerRef.current) {
+      console.log('🚫 [useImageGeneration] Aborting HTTP request...');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
     
-    // Cancel backend task
-    // Cancel async generation task
-    if (currentTaskIdRef.current) {
-      try {
-        await apiService.cancelAsyncGenerationTask(currentTaskIdRef.current);
-        console.log(`✅ Async generation task ${currentTaskIdRef.current} cancelled`);
-      } catch (error) {
-        console.warn(`⚠️ Failed to cancel async generation task: ${error}`);
-      }
-      currentTaskIdRef.current = null;
-    }
+    // Clear task_id tracking AFTER attempting to cancel
+    currentTaskIdRef.current = null;
     
     setIsGenerating(false);
     setError(null);
-  }, [lastGeneration]);
+  }, []);
 
   return {
     generateImage,

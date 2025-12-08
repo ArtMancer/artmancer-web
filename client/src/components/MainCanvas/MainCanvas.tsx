@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { FaTimes } from "react-icons/fa";
+import { Button } from "@mui/material";
+import { CameraAlt as CameraIcon } from "@mui/icons-material";
+import { useLanguage } from "@/contexts/LanguageContext";
 import Toolbox from "../Toolbox";
 import StatusBar from "../StatusBar";
 import ViewportLayer from "./layers/ViewportLayer";
@@ -28,6 +31,7 @@ interface CanvasProps {
   isMaskDrawing: boolean;
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
+  maskVisible?: boolean;
   isSmartMaskLoading?: boolean;
   hasMaskContent?: boolean;
 
@@ -89,6 +93,7 @@ export default function Canvas({
   isMaskDrawing,
   maskBrushSize,
   maskToolType = "brush",
+  maskVisible = true,
   isSmartMaskLoading = false,
   hasMaskContent = false,
   originalImage,
@@ -123,7 +128,9 @@ export default function Canvas({
   onEvaluationDisplayLimitChange,
   onRemoveEvaluationPair,
 }: CanvasProps) {
+  const { t } = useLanguage();
   const [isDraggingSeparator, setIsDraggingSeparator] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   // --- LOGIC KÉO THẢ THANH DIVIDER ---
 
@@ -220,6 +227,57 @@ export default function Canvas({
   // Biến kiểm tra có đang ở chế độ so sánh không
   const isComparisonMode =
     originalImage && modifiedImage && originalImage !== modifiedImage;
+
+  // --- DRAG AND DROP HANDLERS ---
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Chỉ cho phép drag over khi không có ảnh hoặc không ở comparison mode
+    if (!uploadedImage || !isComparisonMode) {
+      setIsDragOver(true);
+    }
+  }, [uploadedImage, isComparisonMode]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Chỉ set false nếu không còn element nào trong drag area
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    // Chỉ xử lý khi không có ảnh hoặc không ở comparison mode
+    if (uploadedImage && isComparisonMode) {
+      return;
+    }
+
+    const files = e.dataTransfer.files;
+    if (files.length === 0) return;
+
+    const file = files[0];
+    
+    // Kiểm tra file type
+    const validTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      console.warn('Invalid file type:', file.type);
+      return;
+    }
+
+    // Tạo synthetic event để tái sử dụng logic upload hiện có
+    const syntheticEvent = {
+      target: {
+        files: [file],
+      },
+    } as unknown as React.ChangeEvent<HTMLInputElement>;
+
+    onImageUpload(syntheticEvent);
+  }, [uploadedImage, isComparisonMode, onImageUpload]);
 
   // Evaluation mode: show grid of images when dataset pairs exist
   const isEvaluationMode = evaluationImagePairs.length > 0;
@@ -354,6 +412,10 @@ export default function Canvas({
               !isComparisonMode && !isMaskingMode ? onImageClick : undefined
             }
             onKeyDown={isComparisonMode ? handleKeyDown : undefined}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            isDragOver={isDragOver}
             tabIndex={isComparisonMode ? 0 : undefined}
           >
             {uploadedImage ? (
@@ -386,6 +448,7 @@ export default function Canvas({
                     maskCanvasRef={maskCanvasRef}
                     imageDimensions={imageDimensions}
                     displayScale={displayScale}
+                    maskVisible={maskVisible}
                     hasMaskContent={hasMaskContent}
                   />
                   <BrushPreviewLayer
@@ -428,27 +491,49 @@ export default function Canvas({
                 />
               </ContentLayer>
             ) : (
-              // Upload Placeholder
-              <label
-                htmlFor="image-upload"
-                className="w-full h-full flex flex-col items-center justify-center text-center text-white/80 cursor-pointer hover:text-white transition-colors"
-              >
-                <div className="text-5xl mb-4 opacity-50">🖼️</div>
-                <p className="text-lg font-medium mb-2">Upload Image</p>
-                <p className="text-sm text-white/50">
-                  Click or drag & drop here
+              // Upload Placeholder - Đồng bộ với Sidebar
+              <div className={`w-full h-full flex flex-col items-center justify-center transition-all duration-200 ${
+                isDragOver ? 'scale-105' : ''
+              }`}>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg,image/webp"
+                  onChange={onImageUpload}
+                  style={{ display: "none" }}
+                  id="image-upload"
+                />
+                <label htmlFor="image-upload">
+                  <Button
+                    component="span"
+                    variant="contained"
+                    size="large"
+                    startIcon={<CameraIcon />}
+                    sx={{
+                      bgcolor: isDragOver ? "var(--highlight-accent)" : "var(--primary-accent)",
+                      color: "white",
+                      "&:hover": {
+                        bgcolor: "var(--highlight-accent)",
+                      },
+                      py: 1.5,
+                      px: 4,
+                      textTransform: "none",
+                      fontSize: "1rem",
+                      fontWeight: 500,
+                      transition: "all 0.2s ease",
+                      transform: isDragOver ? "scale(1.05)" : "scale(1)",
+                    }}
+                  >
+                    {isDragOver ? t("sidebar.chooseImage") + " (Drop here)" : t("sidebar.chooseImage")}
+                  </Button>
+                </label>
+                <p className={`text-sm mt-4 transition-colors duration-200 ${
+                  isDragOver ? 'text-[var(--highlight-accent)] font-medium' : 'text-white/50'
+                }`}>
+                  {isDragOver ? "Drop image to upload" : "Click or drag & drop here"}
                 </p>
-              </label>
+              </div>
             )}
 
-            {/* Hidden Input */}
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/jpg,image/webp"
-              onChange={onImageUpload}
-              className="hidden"
-              id="image-upload"
-            />
           </ImageContainerLayer>
         </ViewportLayer>
       )}

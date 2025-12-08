@@ -16,6 +16,7 @@ import {
   useImageGeneration,
 } from "@/hooks";
 import type { InputQualityPreset, DebugInfo } from "@/services/api";
+import { apiService } from "@/services/api";
 import DebugPanel from "@/components/DebugPanel";
 import ReferenceImageEditor from "@/components/ReferenceImageEditor";
 
@@ -44,6 +45,14 @@ export default function Home() {
   >("white-balance");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [referenceMaskR, setReferenceMaskR] = useState<string | null>(null);
+  
+  // Saved mask states - lưu mask khi generation bắt đầu để không bị mất
+  // savedMaskData: mask binary (đen trắng) để gửi API - được lưu nhưng không cần restore
+  // savedMaskCanvasState: mask canvas UI (đỏ trong suốt) để restore mask brush sau generation
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [savedMaskData, setSavedMaskData] = useState<string | null>(null);
+  const [savedMaskCanvasState, setSavedMaskCanvasState] = useState<string | null>(null);
+  const [maskVisible, setMaskVisible] = useState(true);
 
   // Reference Image Editor state
   const [isRefEditorOpen, setIsRefEditorOpen] = useState(false);
@@ -113,7 +122,7 @@ export default function Home() {
 
   // Debug panel state
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
-  const [isDebugPanelVisible, setIsDebugPanelVisible] = useState(false);
+  const [isDebugPanelVisible, setIsDebugPanelVisible] = useState(true); // Always on by default
 
   // Auto-refine prompt state
 
@@ -1217,6 +1226,8 @@ export default function Home() {
     redoMask,
     hasMaskContent,
     getFinalMask,
+    saveMaskCanvasState,
+    restoreMaskCanvasState,
     enableSmartMasking,
     setEnableSmartMasking,
     smartMaskModelType,
@@ -1235,6 +1246,11 @@ export default function Home() {
     skipMaskResetRef
   );
 
+  // Reset trạng thái hiển thị mask và batch results khi thay ảnh gốc/ảnh generate mới
+  useEffect(() => {
+    setMaskVisible(true);
+  }, [uploadedImage]);
+
   const {
     historyIndex,
     historyStack,
@@ -1249,6 +1265,10 @@ export default function Home() {
   const [modifiedImageForComparison, setModifiedImageForComparison] = useState<
     string | null
   >(null);
+
+  const handleToggleMaskVisible = () => {
+    setMaskVisible((prev) => !prev);
+  };
 
   const scaleImageDataUrl = (
     dataUrl: string,
@@ -1390,6 +1410,8 @@ export default function Home() {
         setModifiedImageForComparison(null);
         setComparisonSlider(50);
         initializeHistory(resultDataUrl);
+        setSavedMaskData(null); // Clear saved mask when applying quality preset
+        setSavedMaskCanvasState(null); // Clear saved mask canvas state
         resetMaskHistory();
         clearMask();
         setLastRequestId(null);
@@ -1497,6 +1519,8 @@ export default function Home() {
     setOriginalImage(null);
     setModifiedImageForComparison(null);
     setComparisonSlider(50);
+    setSavedMaskData(null); // Clear saved mask when uploading new image
+    setSavedMaskCanvasState(null); // Clear saved mask canvas state
     resetMaskHistory();
 
     // Set flag to indicate this is a new upload
@@ -1536,6 +1560,9 @@ export default function Home() {
 
   // Handle image removal
   const handleRemoveImage = () => {
+    // Clear saved masks when removing image
+    setSavedMaskData(null);
+    setSavedMaskCanvasState(null);
     removeImage();
     setOriginalImage(null);
     setModifiedImageForComparison(null);
@@ -1693,7 +1720,7 @@ export default function Home() {
   };
 
   // Handle image generation
-  const handleEdit = async (prompt: string) => {
+  const handleEdit = async (prompt: string): Promise<void> => {
     // Declare intervals outside try block so they can be cleared in catch
     let pipelineInterval: NodeJS.Timeout | null = null;
     let generationInterval: NodeJS.Timeout | null = null;
@@ -1735,6 +1762,13 @@ export default function Home() {
       // Get final mask (Black/White binary mask for AI) - only for non-white-balance tasks
       let maskImageData: string | null = null;
       if (aiTask !== "white-balance") {
+        // Lưu mask canvas state (UI mask brush) TRƯỚC khi export
+        const canvasState = saveMaskCanvasState();
+        if (canvasState) {
+          console.log("💾 [handleEdit] Saving mask canvas state (UI mask brush)");
+          setSavedMaskCanvasState(canvasState);
+        }
+        
         maskImageData = await getFinalMask();
         if (!maskImageData) {
           setNotificationWithTimeout(
@@ -1743,6 +1777,14 @@ export default function Home() {
           );
           return;
         }
+        
+        // Lưu mask binary data (đen trắng) để gửi API
+        console.log("💾 [handleEdit] Saving mask binary data to state");
+        setSavedMaskData(maskImageData);
+      } else {
+        // Clear saved masks for white-balance task
+        setSavedMaskData(null);
+        setSavedMaskCanvasState(null);
       }
 
       // Log mask export for debugging
@@ -1967,12 +2009,48 @@ export default function Home() {
         };
         img.src = imageData;
 
+        // Preserve mask when updating to generated image
+        // Set flag để preserve mask trong resizeCanvas (tránh bị clear khi canvas resize)
+        // Sau đó sẽ restore từ savedMaskCanvasState để đảm bảo mask đúng
+        skipMaskResetRef.current = true;
+        
         // Update displayed image
         setUploadedImage(imageData);
         setModifiedImage(imageData);
 
         // Set the AI-generated image for comparison (this is the new AI result)
         setModifiedImageForComparison(imageData);
+
+        // Ẩn mask mặc định sau khi có kết quả mới (giữ dữ liệu mask để toggle lại)
+        setMaskVisible(false);
+
+        // Restore mask canvas state (UI mask brush) sau khi generation hoàn thành
+        // Đợi tất cả resizeCanvas hoàn thành (resizeCanvas chạy ở 0ms, 50ms, 200ms)
+        if (savedMaskCanvasState) {
+          console.log("🔄 [handleEdit] Restoring mask canvas state after generation", {
+            savedStateLength: savedMaskCanvasState.length,
+            imageDimensions: imageDimensions ? `${imageDimensions.width}x${imageDimensions.height}` : 'null'
+          });
+          // Đợi sau khi tất cả resizeCanvas hoàn thành (sau 250ms)
+          // Sau đó restore một lần, nếu không được thì xóa savedMaskCanvasState
+          setTimeout(() => {
+            const restored = restoreMaskCanvasState(savedMaskCanvasState);
+            if (restored) {
+              console.log("✅ [handleEdit] Mask canvas restored successfully");
+              // Reset flag sau khi restore xong
+              skipMaskResetRef.current = false;
+            } else {
+              console.warn("⚠️ [handleEdit] Failed to restore mask canvas, clearing saved state");
+              setSavedMaskCanvasState(null);
+              // Reset flag nếu restore failed
+              skipMaskResetRef.current = false;
+            }
+          }, 250); // Đợi sau khi tất cả resizeCanvas hoàn thành (200ms + buffer)
+        } else {
+          console.warn("⚠️ [handleEdit] No saved mask canvas state to restore");
+          // Reset flag nếu không có saved state
+          skipMaskResetRef.current = false;
+        }
 
         // Add to history
         addToHistory(imageData);
@@ -2307,6 +2385,7 @@ export default function Home() {
           isMaskDrawing={isMaskDrawing}
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
+          maskVisible={maskVisible}
           isSmartMaskLoading={isSmartMaskLoading}
           hasMaskContent={hasMaskContent}
           originalImage={originalImage}
@@ -2354,6 +2433,7 @@ export default function Home() {
           isMaskingMode={isMaskingMode}
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
+          maskVisible={maskVisible}
           referenceImage={referenceImage}
           aiTask={aiTask}
           appMode={appMode}
@@ -2366,6 +2446,7 @@ export default function Home() {
           onClearMask={clearMask}
           onMaskBrushSizeChange={setMaskBrushSize}
           onMaskToolTypeChange={setMaskToolType}
+          onToggleMaskVisible={handleToggleMaskVisible}
           maskHistoryIndex={maskHistoryIndex}
           maskHistoryLength={maskHistoryLength}
           onMaskUndo={undoMask}

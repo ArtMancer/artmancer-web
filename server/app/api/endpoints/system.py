@@ -1,3 +1,14 @@
+"""
+System endpoints for health checks and configuration.
+
+This module provides endpoints for:
+- Health checks with container state information
+- System information and device status
+- Cache management
+
+All endpoints are designed to work on both heavy (A100) and light (CPU/T4) services.
+"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter

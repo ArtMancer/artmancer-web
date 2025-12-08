@@ -1498,14 +1498,14 @@ export function useMasking(
       // Check if canvas dimensions are changing
       const dimensionsChanged = canvas.width !== newWidth || canvas.height !== newHeight;
 
-      // Check if we're returning to original (should preserve mask)
-      const isReturningToOriginal = skipMaskResetRef?.current === true;
+      // Check if we should preserve mask (when returning to original or after generation)
+      const shouldPreserveMask = skipMaskResetRef?.current === true;
 
       // Store canvas content before resize if:
       // 1. Dimensions are changing, OR
-      // 2. We're returning to original (even if dimensions don't change, setting canvas.width/height clears it)
+      // 2. We should preserve mask (even if dimensions don't change, setting canvas.width/height clears it)
       let imageData = null;
-      if ((dimensionsChanged || isReturningToOriginal) && canvas.width > 0 && canvas.height > 0) {
+      if ((dimensionsChanged || shouldPreserveMask) && canvas.width > 0 && canvas.height > 0) {
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
           try {
@@ -1553,10 +1553,15 @@ export function useMasking(
         }
 
         // Restore canvas content if it was saved
-        // Restore if: dimensions changed OR we're returning to original
-        if (imageData && (dimensionsChanged || isReturningToOriginal)) {
+        // Restore if: dimensions changed OR we should preserve mask
+        if (imageData && (dimensionsChanged || shouldPreserveMask)) {
           try {
             ctx.putImageData(imageData, 0, 0);
+            console.log('💾 [resizeCanvas] Preserved mask content', {
+              dimensionsChanged,
+              shouldPreserveMask,
+              canvasSize: `${canvas.width}x${canvas.height}`
+            });
             // After restoring, update hasCanvasContent state
             // Use setTimeout to ensure state update happens after canvas operation
             setTimeout(() => {
@@ -1566,11 +1571,23 @@ export function useMasking(
           } catch (e) {
             console.warn('Could not restore canvas content:', e);
           }
+        } else if (shouldPreserveMask) {
+          // Nếu shouldPreserveMask nhưng không có imageData, log warning
+          console.warn('⚠️ [resizeCanvas] Should preserve mask but no imageData available', {
+            canvasSize: `${canvas.width}x${canvas.height}`,
+            dimensionsChanged,
+            shouldPreserveMask
+          });
         }
 
-        // Reset the flag after preserving canvas content (if we were returning to original)
-        if (isReturningToOriginal && skipMaskResetRef) {
-          skipMaskResetRef.current = false;
+        // Reset the flag after preserving canvas content
+        // NHƯNG chỉ reset nếu KHÔNG có savedMaskCanvasState đang chờ restore
+        // (savedMaskCanvasState sẽ được restore sau, nên không reset flag ngay)
+        // Flag sẽ được reset sau khi restoreMaskCanvasState hoàn thành
+        if (shouldPreserveMask && skipMaskResetRef) {
+          // Không reset ngay, để đảm bảo mask không bị clear bởi resizeCanvas lần sau
+          // skipMaskResetRef.current = false;
+          console.log('🔒 [resizeCanvas] Keeping skipMaskResetRef=true for mask restore');
         }
 
         ctxRef.current = ctx;
@@ -1755,6 +1772,118 @@ export function useMasking(
     return tempCanvas.toDataURL('image/png');
   }, [imageDimensions]);
 
+  // Lưu mask canvas state (UI mask brush - đỏ trong suốt) để restore sau
+  const saveMaskCanvasState = useCallback((): string | null => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return null;
+    
+    try {
+      // Lưu toàn bộ canvas state (bao gồm cả mask brush mà user vẽ)
+      const canvasData = canvas.toDataURL('image/png');
+      console.log('💾 [useMasking] Saved mask canvas state');
+      return canvasData;
+    } catch (error) {
+      console.error('❌ [useMasking] Failed to save mask canvas state:', error);
+      return null;
+    }
+  }, []);
+
+  // Restore mask canvas từ saved state - đơn giản, chỉ load một lần
+  const restoreMaskCanvasState = useCallback((savedState: string | null): boolean => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || !savedState || !imageDimensions) {
+      console.warn('⚠️ [useMasking] Cannot restore: missing canvas, savedState, or imageDimensions');
+      return false;
+    }
+    
+    // Kiểm tra canvas dimensions đã đúng chưa
+    if (canvas.width !== imageDimensions.width || canvas.height !== imageDimensions.height) {
+      console.warn(`⚠️ [useMasking] Canvas dimensions mismatch: current=${canvas.width}x${canvas.height}, expected=${imageDimensions.width}x${imageDimensions.height}`);
+      return false;
+    }
+    
+    try {
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        console.warn('⚠️ [useMasking] Cannot get canvas context');
+        return false;
+      }
+      
+      // Re-initialize context settings (giống như trong resizeCanvas)
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1.0;
+      
+      // Apply current drawing properties
+      if (imageDimensions) {
+        const baseImageSize = Math.min(imageDimensions.width, imageDimensions.height);
+        const brushSize = (maskBrushSize / 100) * (baseImageSize / 5);
+        const opacity = 0.5;
+        ctx.lineWidth = brushSize;
+        ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
+        ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
+      }
+      
+      // Clear canvas trước
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Load saved state
+      const img = new Image();
+      img.onload = () => {
+        try {
+          // Draw saved mask với dimensions hiện tại
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          
+          // Đợi một chút để canvas render xong trước khi check content
+          setTimeout(() => {
+            const hasContent = checkCanvasHasContent();
+            console.log('✅ [useMasking] Restored mask canvas state', {
+              canvasSize: `${canvas.width}x${canvas.height}`,
+              imageSize: `${img.width}x${img.height}`,
+              hasContent,
+              // Verify bằng cách check pixel data
+              pixelCheck: (() => {
+                try {
+                  const testCtx = canvas.getContext('2d', { willReadFrequently: true });
+                  if (testCtx) {
+                    const testData = testCtx.getImageData(0, 0, Math.min(100, canvas.width), Math.min(100, canvas.height));
+                    const hasPixels = testData.data.some((val, idx) => idx % 4 === 3 && val > 0); // Check alpha channel
+                    return hasPixels;
+                  }
+                } catch (e) {
+                  return false;
+                }
+                return false;
+              })()
+            });
+            // Update history state after restore
+            updateHistoryState();
+            // Update hasCanvasContent state
+            setHasCanvasContent(hasContent);
+          }, 10); // Đợi 10ms để canvas render xong
+        } catch (error) {
+          console.error('❌ [useMasking] Failed to draw restored mask canvas:', error);
+        }
+      };
+      img.onerror = () => {
+        console.error('❌ [useMasking] Failed to load saved mask canvas state');
+      };
+      img.src = savedState;
+      
+      // Return true ngay khi bắt đầu load (không đợi img.onload)
+      // Vì img.onload sẽ được gọi async
+      return true;
+      
+      return true;
+    } catch (error) {
+      console.error('❌ [useMasking] Failed to restore mask canvas state:', error);
+      return false;
+    }
+  }, [imageDimensions, maskBrushSize, updateHistoryState, checkCanvasHasContent]);
+
   return {
     isMaskingMode,
     isMaskDrawing,
@@ -1780,6 +1909,9 @@ export function useMasking(
     canRedo: historyState.canRedo,
     // Export final mask (Black/White binary mask for AI)
     getFinalMask,
+    // Save and restore mask canvas state
+    saveMaskCanvasState,
+    restoreMaskCanvasState,
     // Edge detection and flood fill
     enableEdgeDetection,
     enableFloodFill,

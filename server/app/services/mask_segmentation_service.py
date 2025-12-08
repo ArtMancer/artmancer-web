@@ -21,7 +21,7 @@ from PIL import Image
 # psutil and skimage are imported lazily where needed to avoid requiring them in services that don't need them
 
 if TYPE_CHECKING:
-    from ultralytics import FastSAM  # type: ignore
+    pass
 
 logger = logging.getLogger(__name__)
 

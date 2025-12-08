@@ -62,6 +62,11 @@ export interface DebugInfo {
   lora_adapter?: string;
   loaded_adapters?: string[];
   positioned_mask_R?: string; // Base64 encoded positioned mask R (reference mask R after being pasted into main mask A, only for reference-guided insertion)
+  // Additional debug images
+  original_image?: string;
+  mask_A?: string;
+  reference_image?: string;
+  reference_mask_R?: string;
   // Prompt info
   original_prompt?: string;
   refined_prompt?: string;
@@ -737,7 +742,66 @@ class ApiService {
     }
   }
 
-  // Download debug session as ZIP
+  // Get debug session details (metadata, lora_log, image_files)
+  async getDebugSession(sessionName: string): Promise<{
+    session_name: string;
+    metadata: any;
+    lora_log: string;
+    image_files: string[];
+  }> {
+    const url = `${this.baseUrl}/api/debug/sessions/${sessionName}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to get debug session: HTTP ${response.status}`;
+        
+        if (response.status === 404) {
+          throw new Error(`Debug session "${sessionName}" not found. It may have been deleted or never existed.`);
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error getting debug session:', error);
+      throw error;
+    }
+  }
+
+  // Get a specific debug image
+  async getDebugImage(sessionName: string, imageName: string): Promise<Blob> {
+    const url = `${this.baseUrl}/api/debug/sessions/${sessionName}/images/${imageName}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to get debug image: HTTP ${response.status}`;
+        
+        if (response.status === 404) {
+          throw new Error(`Debug image "${imageName}" not found in session "${sessionName}".`);
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      return await response.blob();
+    } catch (error) {
+      console.error('Error getting debug image:', error);
+      throw error;
+    }
+  }
+
+  // Download debug session as ZIP (kept for backward compatibility)
   async downloadDebugSession(sessionName: string): Promise<Blob> {
     const url = `${this.baseUrl}/api/debug/sessions/${sessionName}/download`;
 
@@ -748,7 +812,14 @@ class ApiService {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `Failed to download debug session: HTTP ${response.status}`);
+        const errorMessage = errorData.detail || `Failed to download debug session: HTTP ${response.status}`;
+        
+        // Xử lý 404 với message rõ ràng hơn
+        if (response.status === 404) {
+          throw new Error(`Debug session "${sessionName}" not found. It may have been deleted or never existed.`);
+        }
+        
+        throw new Error(errorMessage);
       }
 
       return await response.blob();

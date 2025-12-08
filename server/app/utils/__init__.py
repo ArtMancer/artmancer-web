@@ -1,4 +1,12 @@
-"""Utility modules for image processing and metrics."""
+"""
+Utility modules for ArtMancer backend.
+
+This package contains utility functions for:
+- metrics_utils: Image quality metrics (PSNR, SSIM, LPIPS, ΔE00, CLIP-S)
+- dataset_preprocessor: Dataset preprocessing for benchmark evaluation
+
+All utilities are designed to be reusable across different services.
+"""
 
 from .metrics_utils import (
     compute_all_metrics,

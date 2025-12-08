@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
-  FaCamera,
   FaDownload,
-  FaUpload,
   FaImage,
   FaImages,
   FaTrash,
@@ -38,7 +36,6 @@ import {
   CloudUpload as CloudUploadIcon,
   Image as ImageIcon,
   CheckCircle as CheckCircleIcon,
-  CameraAlt as CameraIcon,
   Delete as DeleteIcon,
   HelpOutline as HelpIcon,
   Image as ImageIconMUI,
@@ -56,6 +53,7 @@ interface SidebarProps {
   isMaskingMode: boolean;
   maskBrushSize: number;
   maskToolType?: "brush" | "box";
+  maskVisible?: boolean;
   isResizing?: boolean; // For resize handle styling
   imageDimensions?: { width: number; height: number } | null;
   inputQuality: InputQualityPreset;
@@ -73,6 +71,7 @@ interface SidebarProps {
   onClearMask: () => void;
   onMaskBrushSizeChange: (size: number) => void;
   onMaskToolTypeChange?: (type: "brush" | "box") => void;
+  onToggleMaskVisible?: () => void;
   // Smart masking props
   enableSmartMasking?: boolean;
   isSmartMaskLoading?: boolean;
@@ -195,6 +194,7 @@ export default function Sidebar({
   isMaskingMode,
   maskBrushSize,
   maskToolType = "brush",
+  maskVisible = true,
   isResizing = false,
   imageDimensions = null,
   inputQuality,
@@ -210,6 +210,7 @@ export default function Sidebar({
   onClearMask,
   onMaskBrushSizeChange,
   onMaskToolTypeChange,
+  onToggleMaskVisible,
   // Smart masking props
   enableSmartMasking = true,
   isSmartMaskLoading = false,
@@ -360,8 +361,8 @@ export default function Sidebar({
             paddingBottom: "8rem", // Extra padding at bottom for better scroll experience
           }}
         >
-          {/* Image Upload Section */}
-          {!isEditingDone && (
+          {/* Image Upload Section (only remove image) */}
+          {!isEditingDone && uploadedImage && (
             <Box sx={{ pb: 2 }}>
               <Typography
                 variant="subtitle2"
@@ -375,48 +376,19 @@ export default function Sidebar({
                 {t("sidebar.imageUpload")}
               </Typography>
               <Stack spacing={1.5}>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/webp"
-                  onChange={onImageUpload}
-                  style={{ display: "none" }}
-                  id="image-upload-panel"
-                />
-                <label htmlFor="image-upload-panel">
-                  <Button
-                    component="span"
-                    fullWidth
-                    variant="contained"
-                    startIcon={<CameraIcon />}
-                    sx={{
-                      bgcolor: "var(--primary-accent)",
-                      color: "white",
-                      "&:hover": {
-                        bgcolor: "var(--highlight-accent)",
-                      },
-                      py: 1.5,
-                      textTransform: "none",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    {t("sidebar.chooseImage")}
-                  </Button>
-                </label>
-                {uploadedImage && (
-                  <Button
-                    fullWidth
-                    variant="contained"
-                    color="error"
-                    onClick={onRemoveImage}
-                    sx={{
-                      py: 1.25,
-                      textTransform: "none",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    {t("sidebar.removeImage")}
-                  </Button>
-                )}
+                <Button
+                  fullWidth
+                  variant="contained"
+                  color="error"
+                  onClick={onRemoveImage}
+                  sx={{
+                    py: 1.25,
+                    textTransform: "none",
+                    fontSize: "0.875rem",
+                  }}
+                >
+                  {t("sidebar.removeImage")}
+                </Button>
               </Stack>
             </Box>
           )}
@@ -790,43 +762,6 @@ export default function Sidebar({
                       }}
                     >
                       {t("sidebar.returnToOriginal")}
-                    </Button>
-                  </Box>
-                  <Box sx={{ width: "calc(50% - 4px)", minWidth: 0 }}>
-                    <Button
-                      fullWidth
-                      variant="contained"
-                      startIcon={<CameraIcon />}
-                      onClick={() => {
-                        // Remove current image first
-                        if (onRemoveImage) {
-                          onRemoveImage();
-                        }
-                        // Small delay to ensure state is reset before opening file dialog
-                        setTimeout(() => {
-                          const fileInput = document.getElementById(
-                            "image-upload-panel"
-                          ) as HTMLInputElement;
-                          if (fileInput) {
-                            fileInput.value = ""; // Clear previous selection
-                            fileInput.click();
-                          }
-                        }, 100);
-                      }}
-                      sx={{
-                        bgcolor: "var(--success)",
-                        color: "white",
-                        "&:hover": {
-                          bgcolor: "var(--success)",
-                          opacity: 1,
-                        },
-                        opacity: 0.9,
-                        py: 1,
-                        textTransform: "none",
-                        fontSize: "0.75rem",
-                      }}
-                    >
-                      {t("sidebar.newImage")}
                     </Button>
                   </Box>
                 </Stack>
@@ -1836,6 +1771,20 @@ export default function Sidebar({
                         className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded text-sm font-medium transition-colors"
                       >
                         {t("sidebar.clearMask")}
+                      </button>
+                    )}
+                    {(hasMaskContent || isMaskingMode) && (
+                      <button
+                        onClick={onToggleMaskVisible}
+                        disabled={!onToggleMaskVisible}
+                        className={`px-3 py-2 rounded text-sm font-medium transition-colors ${
+                          maskVisible
+                            ? "bg-[var(--secondary-bg)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white"
+                            : "bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white"
+                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                        title={maskVisible ? "Ẩn mask" : "Hiển thị mask"}
+                      >
+                        {maskVisible ? "Ẩn mask" : "Hiện mask"}
                       </button>
                     )}
                   </div>

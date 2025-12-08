@@ -1179,6 +1179,11 @@ class GenerationService:
                     "output_image_size": f"{generated.width}x{generated.height}",
                     "lora_adapter": _current_adapter,
                     "loaded_adapters": list(_loaded_adapters) if _loaded_adapters else [],
+                    # Additional debug images for download/display
+                    "original_image": request.input_image,
+                    "mask_A": request.conditional_images[0] if request.conditional_images else None,
+                    "reference_image": request.reference_image,
+                    "reference_mask_R": request.reference_mask_R,
                 }
                 
                 # Add positioned_mask_R for reference-guided insertion
@@ -1220,6 +1225,10 @@ class GenerationService:
                         "output_image_size": f"{generated.width}x{generated.height}",
                         "lora_adapter": _current_adapter,
                         "loaded_adapters": list(_loaded_adapters) if _loaded_adapters else [],
+                        "original_image": request.input_image,
+                        "mask_A": request.conditional_images[0] if request.conditional_images else None,
+                        "reference_image": request.reference_image,
+                        "reference_mask_R": request.reference_mask_R,
                     }
                     # Add session_name and debug_path if available
                     if DEBUG_ENABLED:
@@ -1239,6 +1248,10 @@ class GenerationService:
                         "conditional_labels": [],
                         "input_image_size": f"{original.width}x{original.height}",
                         "output_image_size": f"{generated.width}x{generated.height}",
+                        "original_image": request.input_image,
+                        "mask_A": request.conditional_images[0] if request.conditional_images else None,
+                        "reference_image": request.reference_image,
+                        "reference_mask_R": request.reference_mask_R,
                     }
                     # Try to add session info even in fallback
                     try:

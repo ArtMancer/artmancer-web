@@ -28,7 +28,6 @@ from uuid import uuid4
 # numpy and PIL are imported lazily where needed to avoid requiring them in services that don't need them
 if TYPE_CHECKING:
     import numpy as np
-    from PIL import Image
 
 logger = logging.getLogger(__name__)
 

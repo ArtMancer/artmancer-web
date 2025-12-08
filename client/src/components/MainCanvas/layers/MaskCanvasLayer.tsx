@@ -11,6 +11,7 @@ interface MaskCanvasLayerProps {
   maskCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   imageDimensions: { width: number; height: number } | null;
   displayScale: number;
+  maskVisible?: boolean;
   hasMaskContent?: boolean;
 }
 
@@ -19,6 +20,7 @@ export default function MaskCanvasLayer({
   maskCanvasRef,
   imageDimensions,
   displayScale,
+  maskVisible = true,
   hasMaskContent = false,
 }: MaskCanvasLayerProps) {
   // Show mask canvas if in masking mode OR if there's mask content (e.g., after returning to original)
@@ -28,10 +30,8 @@ export default function MaskCanvasLayer({
 
   const style: React.CSSProperties = {
     ...getAbsoluteLayerStyle(imageDimensions, displayScale, Z_INDEX.MASK),
-    pointerEvents: "auto",
-    // Ensure mask always displays with opacity (even if individual strokes have opacity)
-    // This ensures consistent visual appearance
-    opacity: 1.0, // Individual strokes already have rgba(255, 0, 0, 0.5) opacity
+    pointerEvents: maskVisible ? "auto" : "none",
+    opacity: maskVisible ? 1.0 : 0,
     // Transform is already applied by TransformLayer parent, so we don't need it here
   };
 

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Callable
 # torch is imported lazily where needed to avoid requiring it in services that don't need it (e.g., JobManagerService, ImageUtilsService)
 
 if TYPE_CHECKING:
-    import torch
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
@@ -30,11 +29,26 @@ def is_pipeline_loaded(task_type: str | None = None) -> bool:
 
 
 def _xpu_available() -> bool:
+    """
+    Check if Intel XPU (GPU) is available.
+    
+    Returns:
+        True if XPU is available, False otherwise
+    """
     import torch  # Lazy import
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 def _resolve_device(name: str) -> Any:  # torch.device | None, but using Any to avoid torch import
+    """
+    Resolve device name string to torch.device.
+    
+    Args:
+        name: Device name string (e.g., "cuda", "xpu", "mps", "cpu")
+    
+    Returns:
+        torch.device if available, None otherwise
+    """
     import torch  # Lazy import
     normalized = name.strip().lower()
     if normalized in {"cuda", "gpu", "nvidia"} and torch.cuda.is_available():
@@ -49,6 +63,22 @@ def _resolve_device(name: str) -> Any:  # torch.device | None, but using Any to 
 
 
 def get_device() -> Any:  # torch.device, but using Any to avoid torch import
+    """
+    Get the best available device for model execution.
+    
+    Priority order:
+    1. ARTMANCER_DEVICE environment variable (if set)
+    2. CUDA (NVIDIA GPU)
+    3. XPU (Intel GPU)
+    4. MPS (Apple Silicon)
+    5. CPU (fallback)
+    
+    Returns:
+        torch.device instance for the selected device
+    
+    Raises:
+        RuntimeError: If ARTMANCER_DEVICE is set but device is not available
+    """
     import torch  # Lazy import
     forced = os.getenv("ARTMANCER_DEVICE", "").strip().lower()
     if forced:
@@ -67,6 +97,20 @@ def get_device() -> Any:  # torch.device, but using Any to avoid torch import
 
 @lru_cache(maxsize=1)
 def get_device_info() -> Dict[str, Any]:
+    """
+    Get detailed information about available devices.
+    
+    Returns:
+        Dictionary containing:
+        - device: Current device name
+        - cuda_available: Whether CUDA is available
+        - mps_available: Whether MPS (Apple Silicon) is available
+        - xpu_available: Whether XPU (Intel GPU) is available
+        - device_name: Name of the current device (if available)
+        - memory_total: Total GPU memory in bytes (if CUDA/XPU)
+        - memory_allocated: Allocated GPU memory in bytes (if CUDA/XPU)
+        - memory_reserved: Reserved GPU memory in bytes (if CUDA/XPU)
+    """
     import torch  # Lazy import
     device = get_device()
     info: Dict[str, Any] = {

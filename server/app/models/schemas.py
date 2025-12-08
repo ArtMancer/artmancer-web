@@ -68,6 +68,11 @@ class DebugInfo(BaseModel):
         default=None,
         description="Base64 encoded positioned mask R (reference mask R after being pasted into main mask A, only for reference-guided insertion)"
     )
+    # Additional debug images for downloads
+    original_image: Optional[str] = Field(default=None, description="Base64 encoded original input image")
+    mask_A: Optional[str] = Field(default=None, description="Base64 encoded mask A (conditional_images[0])")
+    reference_image: Optional[str] = Field(default=None, description="Base64 encoded reference image")
+    reference_mask_R: Optional[str] = Field(default=None, description="Base64 encoded reference mask R")
 
 
 class GenerationResponse(BaseModel):

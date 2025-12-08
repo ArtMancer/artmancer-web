@@ -5,10 +5,10 @@ This file defines all Modal services, images, and helper functions for deploymen
 
 Architecture:
 - API Gateway (CPU): Single entry point, routes requests to backend services.
-- Job Manager (CPU): Coordinates async generation jobs, dispatches to A100 workers.
+- Job Manager (CPU): Coordinates async generation jobs, dispatches to H200 workers.
 - Segmentation Service (T4): Smart mask segmentation.
 - Image Utils Service (CPU): Image processing utilities.
-- A100 Worker Function: Async image generation (spawned by Job Manager).
+- H200 Worker Function: Async image generation (spawned by Job Manager).
 
 Features:
 - Modal Volume for checkpoints + base model snapshot.
@@ -20,7 +20,7 @@ Table of Contents:
 2. INFRASTRUCTURE - Modal app, volume, dictio setup
 3. IMAGE DEFINITIONS - Docker images for different services
    - cpu_image: Job Manager & API Gateway
-   - heavy_image: Qwen generation (A100)
+   - heavy_image: Qwen generation (H200)
    - segmentation_image: Mask segmentation (T4)
    - imageutils_image: Image utilities (CPU)
 4. create_fastapi_app() - Factory function for FastAPI apps
@@ -30,7 +30,7 @@ Table of Contents:
    - SegmentationService: Smart mask segmentation (https://<username>--segmentation.modal.run)
    - ImageUtilsService: Image processing utilities (https://<username>--image-utils.modal.run)
 6. WORKER FUNCTIONS - Background tasks
-   - qwen_worker(): A100 worker for async generation (spawned by Job Manager, not a public endpoint)
+   - qwen_worker(): H200 worker for async generation (spawned by Job Manager, not a public endpoint)
 7. HELPER FUNCTIONS - Volume management utilities
    - remove_checkpoint_file(): Remove single checkpoint
    - clear_checkpoints(): Remove all checkpoints
@@ -103,7 +103,7 @@ cpu_image = (
     .add_local_dir("shared", "/root/shared", ignore=["**/__pycache__", "**/*.pyc", "**/.env", "**/.git"])
 )
 
-# 3.2 HEAVY IMAGE (A100) - Optimized for GPU inference
+# 3.2 HEAVY IMAGE (H200) - Optimized for GPU inference
 # ==========================================
 # Includes: diffusers, transformers, torch, peft for Qwen image generation
 heavy_image = (
@@ -113,7 +113,7 @@ heavy_image = (
     .pip_install("uv")
     .run_commands(
         # Install diffusers from GitHub (pinned version) for QwenImageEditPlusPipeline support
-        "uv pip install --system --no-cache-dir git+https://github.com/huggingface/diffusers.git@6290fdfda40610ce7b99920146853614ba529c6e",
+        "uv pip install --system --no-cache-dir git+https://github.com/huggingface/diffusers.git",
         # Install other dependencies with pinned versions
         "uv pip install --system --no-cache-dir "
         "fastapi[standard]>=0.123.4 "
@@ -375,19 +375,21 @@ def create_fastapi_app(
 # 5.1 JOB MANAGER SERVICE (CPU-only, Cold boot enabled, 20min idle timeout)
 # ==========================================
 # Coordinates async generation jobs. Receives job requests and dispatches them
-# to A100 workers. Manages job state in job_state_dictio.
+# to H200 workers. Manages job state in job_state_dictio.
 @app.cls(
     image=cpu_image,
     cpu=1,  # Minimal CPU (cheapest option - only coordination, no heavy processing)
     min_containers=0,  # Allow cold boot (scale to zero when idle)
-    timeout=1800,  # 30 minutes - needs to be long enough for SSE streams during pipeline loading
+    timeout=1800,  # 30 minutes - đủ thời gian cho cold boot và SSE streams khi bảo vệ đồ án
     scaledown_window=1200,  # Scale down after 20 minutes of inactivity
+    volumes={VOL_MOUNT_PATH: volume},  # Mount volume for saving multi-step outputs
 )
 class JobManagerService:
     """
-    CPU-based job manager for coordinating A100 inference jobs.
+    CPU-based job manager for coordinating H200 inference jobs.
     Cold boot enabled - container starts on demand and scales down after 20 minutes of inactivity.
     Keeps container warm while frontend is active, saves costs when idle.
+    Timeout 30 phút để đảm bảo không bị treo khi cold boot trong lúc bảo vệ đồ án.
     """
     container_start_time: float | None = None
     is_ready: bool = False
@@ -428,7 +430,7 @@ class JobManagerService:
     image=cpu_image,
     cpu=1,  # Minimal CPU
     min_containers=0,  # Allow cold boot (scale to zero when idle)
-    timeout=1800,  # 30 minutes - needs to be longer than generation service timeout (20 min)
+    timeout=1800,  # 30 minutes - đủ thời gian cho cold boot khi bảo vệ đồ án
     scaledown_window=1200,  # Scale down after 20 minutes of inactivity
 )
 class APIGatewayService:
@@ -437,6 +439,7 @@ class APIGatewayService:
     Routes requests to appropriate services (Generation, Segmentation, Image Utils, Job Manager).
     Cold boot enabled - container starts on demand and scales down after 20 minutes of inactivity.
     Keeps container warm while frontend is active, saves costs when idle.
+    Timeout 30 phút để đảm bảo không bị treo khi cold boot trong lúc bảo vệ đồ án.
     """
     container_start_time: float | None = None
     is_ready: bool = False
@@ -498,7 +501,7 @@ class APIGatewayService:
     image=segmentation_image,
     gpu="T4",
     volumes={VOL_MOUNT_PATH: volume},
-    timeout=300,  # 5 phút để đủ thời gian download models
+    timeout=1800,  # 30 minutes - đủ thời gian cho cold boot và model loading khi bảo vệ đồ án
     min_containers=0,  # Cold start - only run when needed
     max_containers=5,  # Limit max containers to avoid GPU resource exhaustion
     scaledown_window=120,  # Scale down quickly (2 minutes)
@@ -508,6 +511,7 @@ class SegmentationService:
     """
     Segmentation service for smart mask generation.
     Uses T4 GPU for segmentation model inference (FastSAM, BiRefNet).
+    Timeout 30 phút để đảm bảo không bị treo khi cold boot và model loading trong lúc bảo vệ đồ án.
     """
     # Class attributes (initialized in @modal.enter)
     container_start_time: float | None = None
@@ -590,7 +594,7 @@ class SegmentationService:
 @app.cls(
     image=imageutils_image,
     cpu=1,  # Minimal CPU (cheapest)
-    timeout=60,  # Short timeout (lightweight operations)
+    timeout=1800,  # 30 minutes - đủ thời gian cho cold boot khi bảo vệ đồ án
     min_containers=0,  # Cold start - instant startup
     scaledown_window=60,  # Scale down quickly (1 minute)
 )
@@ -599,6 +603,7 @@ class ImageUtilsService:
     """
     Image utilities service for resize, crop, encode, etc.
     CPU-only operations - no GPU needed.
+    Timeout 30 phút để đảm bảo không bị treo khi cold boot trong lúc bảo vệ đồ án.
     """
     container_start_time: float | None = None
     is_ready: bool = False
@@ -638,29 +643,30 @@ class ImageUtilsService:
 
 # 6.1 QWEN WORKER (Scale-to-Zero)
 # ==========================================
-# Executes image generation on A100 GPU. Called by Job Manager for async jobs.
+# Executes image generation on H200 GPU. Called by Job Manager for async jobs.
 # Updates job_state_dictio with progress and results.
 
 @app.function(
     image=heavy_image,
-    gpu="A100-80GB",
-    timeout=1800,  # 30 minutes
+    gpu="H200",
+    timeout=1800,  # 30 minutes - đủ thời gian cho cold boot và model loading khi bảo vệ đồ án
     volumes={VOL_MOUNT_PATH: volume},
     max_containers=1,  # Single user - only need 1 container at a time
 )
 def qwen_worker(task_id: str, payload: dict):
     """
-    A100 worker function for async image generation.
+    H200 worker function for async image generation.
     
-    This function is called by Job Manager to execute generation on A100 GPU.
+    This function is called by Job Manager to execute generation on H200 GPU.
     It updates job_state_dictio with progress and final results.
     
     Workflow:
-    1. Updates job state to "initializing_a100"
-    2. Loads Qwen pipeline from Volume
-    3. Updates job state to "processing" with progress callbacks
-    4. Runs generation with progress tracking
-    5. Updates job state to "done" with result (base64 image)
+    1. Updates job state to "initializing_h200"
+    2. Checks if pipeline is already loaded (container reuse optimization)
+    3. Loads Qwen pipeline from Volume only if needed (avoids reload on warm containers)
+    4. Updates job state to "processing" with progress callbacks
+    5. Runs generation with progress tracking
+    6. Updates job state to "done" with result (base64 image)
     
     Args:
         task_id: Unique task identifier (used as key in job_state_dictio)
@@ -670,11 +676,11 @@ def qwen_worker(task_id: str, payload: dict):
         dict with status and result (for logging/debugging)
     """
     try:
-        # Update state: initializing_a100
+        # Update state: initializing_h200
         # Preserve created_at if exists, otherwise set to current time
         existing_state = job_state_dictio.get(task_id, {})
         job_state_dictio[task_id] = {
-            "status": "initializing_a100",
+            "status": "initializing_h200",
             "progress": 0.1,
             "error": None,
             "result": None,
@@ -682,7 +688,7 @@ def qwen_worker(task_id: str, payload: dict):
             "created_at": existing_state.get("created_at", time.time()),  # Preserve or set timestamp
         }
         
-        print(f"🚀 [A100 Worker] Task {task_id}: Initializing A100 container...")
+        print(f"🚀 [H200 Worker] Task {task_id}: Initializing H200 container...")
         
         # Setup environment: load model trực tiếp từ Volume (không copy)
         os.environ.setdefault("TASK_CHECKPOINTS_PATH", VOL_TASKS_PATH)
@@ -700,42 +706,65 @@ def qwen_worker(task_id: str, payload: dict):
         from app.models.schemas import GenerationRequest
         from app.services.generation_service import GenerationService
         
-        # Check if pipeline is already loaded and can be reused
+        # DOUBLE CHECK: Check if pipeline is already loaded and can be reused
+        # This prevents reloading model on warm/hot containers (container reuse optimization)
         # Only clear cache if we need to reload (different task_type or flags)
         # This allows container reuse: if same task_type, keep model in memory
+        pipeline_already_loaded = False
         try:
-            from app.core.qwen_loader import get_qwen_pipeline, is_qwen_pipeline_loaded, _flush_memory
+            from app.core.qwen_loader import (
+                get_qwen_pipeline, 
+                is_qwen_pipeline_loaded, 
+                _flush_memory,
+                _pipeline as global_pipeline  # Access global pipeline state
+            )
             from app.models.schemas import GenerationRequest
             
             # Parse payload to get task_type
             request = GenerationRequest(**payload)
             task_type = request.task_type or "insertion"
             
-            # Check if pipeline is already loaded for this task
-            if is_qwen_pipeline_loaded(task_type):
-                existing_pipeline = get_qwen_pipeline(task_type)
-                if existing_pipeline is not None:
-                    print(f"♻️ [A100 Worker] Task {task_id}: Reusing existing pipeline for task_type={task_type}")
-                    # Just flush GPU memory cache (not the model) to free unused memory
-                    _flush_memory()
+            # DOUBLE CHECK 1: Check if base pipeline is loaded
+            if global_pipeline is not None:
+                # DOUBLE CHECK 2: Check if adapter for this task is loaded
+                if is_qwen_pipeline_loaded(task_type):
+                    existing_pipeline = get_qwen_pipeline(task_type)
+                    if existing_pipeline is not None:
+                        # Verify pipeline is actually usable (not corrupted)
+                        try:
+                            # Quick sanity check: verify pipeline has required attributes
+                            if hasattr(existing_pipeline, 'unet') and existing_pipeline.unet is not None:
+                                print(f"♻️ [H200 Worker] Task {task_id}: Pipeline already loaded for task_type={task_type}, REUSING (container warm/hot)")
+                                pipeline_already_loaded = True
+                                # Just flush GPU memory cache (not the model) to free unused memory
+                                _flush_memory()
+                            else:
+                                print(f"⚠️ [H200 Worker] Task {task_id}: Pipeline exists but appears corrupted, will reload...")
+                                pipeline_already_loaded = False
+                        except Exception as e:
+                            print(f"⚠️ [H200 Worker] Task {task_id}: Pipeline check failed: {e}, will reload...")
+                            pipeline_already_loaded = False
+                    else:
+                        print(f"🔄 [H200 Worker] Task {task_id}: Pipeline state inconsistent, will reload...")
+                        pipeline_already_loaded = False
                 else:
-                    # Pipeline state inconsistent, clear and reload
-                    print(f"🔄 [A100 Worker] Task {task_id}: Pipeline state inconsistent, clearing cache...")
-                    from app.core.qwen_loader import clear_qwen_cache
-                    clear_qwen_cache()
-                    time.sleep(1)
+                    print(f"🔄 [H200 Worker] Task {task_id}: Base pipeline loaded but adapter for {task_type} not loaded, will switch adapter...")
+                    # Base model is loaded, just need to switch adapter (no reload needed)
+                    pipeline_already_loaded = True  # Base model exists, adapter switch is fast
                     _flush_memory()
             else:
-                # No pipeline loaded, ensure clean state before loading
-                print(f"🧹 [A100 Worker] Task {task_id}: No existing pipeline, ensuring clean state...")
+                print(f"🧹 [H200 Worker] Task {task_id}: No pipeline loaded (container cold), will load from scratch...")
+                pipeline_already_loaded = False
+                # Ensure clean state before loading
                 from app.core.qwen_loader import clear_qwen_cache
                 clear_qwen_cache()
                 time.sleep(1)
                 _flush_memory()
-                print(f"✅ [A100 Worker] Task {task_id}: Cache cleared and memory flushed")
+                print(f"✅ [H200 Worker] Task {task_id}: Cache cleared and memory flushed, ready for fresh load")
         except Exception as e:
-            print(f"⚠️ [A100 Worker] Task {task_id}: Failed to check/reuse pipeline: {e}")
+            print(f"⚠️ [H200 Worker] Task {task_id}: Failed to check/reuse pipeline: {e}")
             # Fallback: clear cache to ensure clean state
+            pipeline_already_loaded = False
             try:
                 from app.core.qwen_loader import clear_qwen_cache, _flush_memory
                 clear_qwen_cache()
@@ -744,7 +773,10 @@ def qwen_worker(task_id: str, payload: dict):
             except Exception:
                 pass
         
-        print(f"🔄 [A100 Worker] Task {task_id}: Pipeline will be loaded by GenerationService...")
+        if pipeline_already_loaded:
+            print(f"✅ [H200 Worker] Task {task_id}: Pipeline ready, skipping load (container reuse)")
+        else:
+            print(f"🔄 [H200 Worker] Task {task_id}: Pipeline will be loaded by GenerationService...")
         
         # Update state: loading_pipeline (pipeline is being loaded)
         job_state_dictio[task_id] = {
@@ -772,13 +804,13 @@ def qwen_worker(task_id: str, payload: dict):
                 "progress": overall_progress,
                 "loading_message": message,  # Store message for frontend
             }
-            print(f"📊 [A100 Worker] Task {task_id}: Loading progress - {message} ({progress*100:.1f}%)")
+            print(f"📊 [H200 Worker] Task {task_id}: Loading progress - {message} ({progress*100:.1f}%)")
         
         # Create callback to update status when pipeline is loaded
         def on_pipeline_loaded():
             """Callback to update status when pipeline finishes loading."""
             current_state = job_state_dictio.get(task_id, {})
-            print(f"📢 [A100 Worker] Task {task_id}: on_pipeline_loaded callback called, updating status to processing...")
+            print(f"📢 [H200 Worker] Task {task_id}: on_pipeline_loaded callback called, updating status to processing...")
             job_state_dictio[task_id] = {
                 **current_state,
                 "status": "processing",
@@ -787,7 +819,7 @@ def qwen_worker(task_id: str, payload: dict):
                 "total_steps": None,   # Will be set when inference starts
                 "loading_message": None,  # Clear loading message
             }
-            print(f"✅ [A100 Worker] Task {task_id}: Status updated to 'processing', pipeline ready for generation")
+            print(f"✅ [H200 Worker] Task {task_id}: Status updated to 'processing', pipeline ready for generation")
         
         # Create progress callback to update job state with cancellation check
         def progress_callback(step: int, timestep: int, total_steps: int):
@@ -796,7 +828,7 @@ def qwen_worker(task_id: str, payload: dict):
                 # Check cancellation flag in job_state_dictio
                 current_state = job_state_dictio.get(task_id, {})
                 if current_state.get("cancelled", False):
-                    print(f"⚠️ [A100 Worker] Task {task_id} cancelled at step {step}/{total_steps}")
+                    print(f"⚠️ [H200 Worker] Task {task_id} cancelled at step {step}/{total_steps}")
                     # Update state to cancelled
                     job_state_dictio[task_id] = {
                         **current_state,
@@ -820,12 +852,12 @@ def qwen_worker(task_id: str, payload: dict):
                 # Re-raise cancellation error
                 if "cancelled" in str(e).lower():
                     raise
-                print(f"⚠️ [A100 Worker] Failed to update progress: {e}")
+                print(f"⚠️ [H200 Worker] Failed to update progress: {e}")
             except Exception as e:
-                print(f"⚠️ [A100 Worker] Failed to update progress: {e}")
+                print(f"⚠️ [H200 Worker] Failed to update progress: {e}")
         
         # Run generation with progress callback and pipeline loaded callback
-        print(f"🎨 [A100 Worker] Task {task_id}: Running generation...")
+        print(f"🎨 [H200 Worker] Task {task_id}: Running generation...")
         generation_service = GenerationService()
         # Pass progress callback, pipeline loaded callback, and loading progress callback to generation service
         result = generation_service.generate(
@@ -853,18 +885,21 @@ def qwen_worker(task_id: str, payload: dict):
             "created_at": existing_state.get("created_at", time.time()),  # Preserve timestamp
         }
         
-        print(f"✅ [A100 Worker] Task {task_id}: Generation completed")
+        print(f"✅ [H200 Worker] Task {task_id}: Generation completed")
         
         # Keep pipeline in memory for container reuse
         # Only flush GPU memory cache (not the model) to free unused memory
         # This allows subsequent inferences to reuse the loaded model without reloading
         try:
-            from app.core.qwen_loader import _flush_memory
-            print(f"🧹 [A100 Worker] Task {task_id}: Flushing GPU memory cache (keeping model in memory)...")
-            _flush_memory()
-            print(f"✅ [A100 Worker] Task {task_id}: GPU memory flushed (model kept in memory for reuse)")
+            from app.core.qwen_loader import _flush_memory, _pipeline as global_pipeline
+            if global_pipeline is not None:
+                print(f"🧹 [H200 Worker] Task {task_id}: Flushing GPU memory cache (keeping model in memory for container reuse)...")
+                _flush_memory()
+                print(f"✅ [H200 Worker] Task {task_id}: GPU memory flushed (model kept in memory for reuse)")
+            else:
+                print(f"⚠️ [H200 Worker] Task {task_id}: Pipeline not in memory, nothing to flush")
         except Exception as e:
-            print(f"⚠️ [A100 Worker] Task {task_id}: Memory flush warning: {e}")
+            print(f"⚠️ [H200 Worker] Task {task_id}: Memory flush warning: {e}")
         
         return {
             "status": "done",
@@ -874,7 +909,7 @@ def qwen_worker(task_id: str, payload: dict):
         
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ [A100 Worker] Task {task_id}: Error - {error_msg}")
+        print(f"❌ [H200 Worker] Task {task_id}: Error - {error_msg}")
         import traceback
         traceback.print_exc()
         
@@ -889,11 +924,16 @@ def qwen_worker(task_id: str, payload: dict):
             "created_at": existing_state.get("created_at", time.time()),  # Preserve timestamp
         }
         
-        # Cleanup on error too
+        # Cleanup on error too (but don't clear if container might be reused)
         try:
-            from app.core.qwen_loader import clear_qwen_cache
-            print(f"🧹 [A100 Worker] Task {task_id}: Cleaning up pipeline cache after error...")
-            clear_qwen_cache()
+            from app.core.qwen_loader import clear_qwen_cache, _pipeline as global_pipeline
+            # Only clear cache if error is critical (OOM, corruption, etc.)
+            # Don't clear on user cancellation or validation errors
+            if "out of memory" in error_msg.lower() or "corrupt" in error_msg.lower():
+                print(f"🧹 [H200 Worker] Task {task_id}: Cleaning up pipeline cache after critical error...")
+                clear_qwen_cache()
+            else:
+                print(f"⚠️ [H200 Worker] Task {task_id}: Non-critical error, keeping pipeline in memory for reuse")
         except Exception:
             pass  # Ignore cleanup errors
         
@@ -1210,13 +1250,13 @@ def setup_volume():
 # - API Gateway: https://<username>--api-gateway.modal.run
 #   - Single entry point, routes all requests to backend services
 # - Job Manager: https://<username>--job-manager.modal.run
-#   - Handles async generation job coordination, dispatches to A100 workers
+#   - Handles async generation job coordination, dispatches to H200 workers
 # - Segmentation Service: https://<username>--segmentation.modal.run
 #   - Smart mask segmentation (T4 GPU)
 # - Image Utils Service: https://<username>--image-utils.modal.run
 #   - Image processing utilities (CPU)
 #
-# Note: A100 worker (qwen_worker) is not a public endpoint - it's spawned internally by Job Manager.
+# Note: H200 worker (qwen_worker) is not a public endpoint - it's spawned internally by Job Manager.
 #
 # All services support cold boot (scale to zero when idle) for cost optimization.
 #

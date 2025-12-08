@@ -5,7 +5,7 @@ import base64
 import io
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from PIL import Image
 import numpy as np

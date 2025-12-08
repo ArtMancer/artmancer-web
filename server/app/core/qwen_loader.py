@@ -1,3 +1,33 @@
+"""
+Qwen Model Loader
+
+This module manages the loading and caching of QwenImageEditPlusPipeline models.
+It implements a single-pipeline architecture with multiple LoRA adapters:
+
+Key Features:
+- Single pipeline instance shared across all tasks
+- Multiple LoRA adapters (insertion, removal, white-balance) loaded without fusing
+- Dynamic adapter switching based on task type
+- Aggressive memory cleanup and cache management
+- Support for FlowMatch scheduler optimization
+- Progress callbacks for model loading
+
+Architecture:
+- Base model: Qwen/Qwen-Image-Edit-2509
+- Adapters: Task-specific LoRA checkpoints (insertion_cp.safetensors, etc.)
+- Device: Automatically detects CUDA/XPU/MPS/CPU
+- Memory: Aggressive cleanup to prevent OOM errors
+
+Usage:
+    from app.core.qwen_loader import load_qwen_pipeline
+    
+    pipeline = load_qwen_pipeline(
+        task_type="insertion",
+        enable_flowmatch_scheduler=False,
+        on_loading_progress=lambda msg, pct: print(f"{msg}: {pct}%")
+    )
+"""
+
 from __future__ import annotations
 
 import gc
@@ -19,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Check if fastsafetensors is available (optional dependency)
 _FASTSAFETENSORS_AVAILABLE = False
 try:
-    from fastsafetensors import fastsafe_open, SingleGroup  # type: ignore
+    import fastsafetensors  # type: ignore # noqa: F401
     _FASTSAFETENSORS_AVAILABLE = True
     logger.info("✅ fastsafetensors is available - will use for faster LoRA loading")
 except ImportError:
