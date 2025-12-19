@@ -1,3 +1,14 @@
+"""
+Pipeline management for Qwen image generation models.
+
+This module provides:
+- Device management (CUDA, XPU, MPS, CPU)
+- Pipeline loading and caching
+- Device information queries
+
+All pipeline loading is delegated to qwen_loader for centralized management.
+"""
+
 from __future__ import annotations
 
 import gc
@@ -6,10 +17,9 @@ import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, Optional, Callable
 
-# torch is imported lazily where needed to avoid requiring it in services that don't need it (e.g., JobManagerService, ImageUtilsService)
+# torch is imported lazily where needed to avoid requiring it in services that don't need it
 
 if TYPE_CHECKING:
-    import torch
     from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
@@ -30,45 +40,107 @@ def is_pipeline_loaded(task_type: str | None = None) -> bool:
 
 
 def _xpu_available() -> bool:
-    import torch  # Lazy import
-    return hasattr(torch, "xpu") and torch.xpu.is_available()
+    """
+    Check if Intel XPU (GPU) is available.
+    
+    Returns:
+        True if XPU is available, False otherwise
+    """
+    try:
+        import torch  # Lazy import
+        return hasattr(torch, "xpu") and torch.xpu.is_available()
+    except Exception:
+        return False
 
 
 def _resolve_device(name: str) -> Any:  # torch.device | None, but using Any to avoid torch import
+    """
+    Resolve device name string to torch.device.
+    
+    Args:
+        name: Device name string (e.g., "cuda", "xpu", "mps", "cpu")
+    
+    Returns:
+        torch.device if available, None otherwise
+    """
     import torch  # Lazy import
     normalized = name.strip().lower()
-    if normalized in {"cuda", "gpu", "nvidia"} and torch.cuda.is_available():
-        return torch.device("cuda")
-    if normalized in {"xpu", "intel", "arc"} and _xpu_available():
-        return torch.device("xpu")
-    if normalized == "mps" and torch.backends.mps.is_available():  # pragma: no cover - platform specific
-        return torch.device("mps")
-    if normalized == "cpu":
-        return torch.device("cpu")
-    return None
+    
+    # Map device names to torch devices
+    device_map: Dict[str, Any] = {
+        "cuda": torch.device("cuda") if torch.cuda.is_available() else None,
+        "gpu": torch.device("cuda") if torch.cuda.is_available() else None,
+        "nvidia": torch.device("cuda") if torch.cuda.is_available() else None,
+        "xpu": torch.device("xpu") if _xpu_available() else None,
+        "intel": torch.device("xpu") if _xpu_available() else None,
+        "arc": torch.device("xpu") if _xpu_available() else None,
+        "mps": torch.device("mps") if torch.backends.mps.is_available() else None,  # pragma: no cover
+        "cpu": torch.device("cpu"),
+    }
+    
+    return device_map.get(normalized)
 
 
 def get_device() -> Any:  # torch.device, but using Any to avoid torch import
+    """
+    Get the best available device for model execution.
+    
+    Priority order:
+    1. ARTMANCER_DEVICE environment variable (if set)
+    2. CUDA (NVIDIA GPU)
+    3. XPU (Intel GPU)
+    4. MPS (Apple Silicon)
+    5. CPU (fallback)
+    
+    Returns:
+        torch.device instance for the selected device
+    
+    Raises:
+        RuntimeError: If ARTMANCER_DEVICE is set but device is not available
+    """
     import torch  # Lazy import
+    
     forced = os.getenv("ARTMANCER_DEVICE", "").strip().lower()
     if forced:
         device = _resolve_device(forced)
         if device is None:
-            raise RuntimeError(f"Requested device '{forced}' is not available on this machine.")
+            raise RuntimeError(
+                f"Requested device '{forced}' is not available on this machine."
+            )
         logger.info("⚙️  Forcing execution device to %s via ARTMANCER_DEVICE", device)
         return device
 
+    # Try devices in priority order
     for candidate in ("cuda", "xpu", "mps"):
         device = _resolve_device(candidate)
         if device is not None:
             return device
+    
     return torch.device("cpu")
 
 
 @lru_cache(maxsize=1)
 def get_device_info() -> Dict[str, Any]:
+    """
+    Get detailed information about available devices.
+    
+    Returns:
+        Dictionary containing:
+        - device: Current device name
+        - cuda_available: Whether CUDA is available
+        - mps_available: Whether MPS (Apple Silicon) is available
+        - xpu_available: Whether XPU (Intel GPU) is available
+        - device_name: Name of the current device (if available)
+        - memory_total: Total GPU memory in bytes (if CUDA/XPU)
+        - memory_allocated: Allocated GPU memory in bytes (if CUDA/XPU)
+        - memory_reserved: Reserved GPU memory in bytes (if CUDA/XPU)
+    
+    Note:
+        Results are cached (lru_cache) since device info doesn't change during runtime.
+    """
     import torch  # Lazy import
     device = get_device()
+    
     info: Dict[str, Any] = {
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
@@ -76,6 +148,7 @@ def get_device_info() -> Dict[str, Any]:
         "xpu_available": _xpu_available(),
     }
 
+    # Add device-specific information
     if torch.cuda.is_available():
         info["device_name"] = torch.cuda.get_device_name()
         info["memory_total"] = torch.cuda.get_device_properties(0).total_memory
@@ -96,7 +169,7 @@ def load_pipeline(
     task_type: str = "insertion",
     enable_flowmatch_scheduler: Optional[bool] = None,
     on_loading_progress: Optional[Callable[[str, float]]] = None,
-) -> DiffusionPipeline:
+) -> Any:  # DiffusionPipeline, but using Any to avoid import
     """
     Load Qwen pipeline for the specified task with optional optimization flags.
     
@@ -107,11 +180,15 @@ def load_pipeline(
     Args:
         task_type: "insertion", "removal", or "white-balance"
         enable_flowmatch_scheduler: Override config setting (None = use config)
+        on_loading_progress: Optional callback for loading progress
     
     Returns:
         Loaded DiffusionPipeline
+    
+    Note:
+        All 3 tasks use the same Qwen loader, differing only in checkpoint and parameters.
+        Pipeline loading is delegated to qwen_loader for centralized management.
     """
-    # All 3 tasks use the same Qwen loader, differing only in checkpoint and parameters.
     from .qwen_loader import load_qwen_pipeline
     return load_qwen_pipeline(
         task_type=task_type,
@@ -121,10 +198,15 @@ def load_pipeline(
 
 
 def clear_pipeline_cache() -> None:
-    """Clear cache for Qwen pipeline and all adapters."""
+    """
+    Clear cache for Qwen pipeline and all adapters.
+    
+    Note:
+        This forces garbage collection to free GPU memory.
+        Useful for debugging or when switching between different model configurations.
+    """
     from .qwen_loader import clear_qwen_cache
     
     clear_qwen_cache()
     gc.collect()
     logger.info("🧹 Cleared Qwen pipeline cache")
-

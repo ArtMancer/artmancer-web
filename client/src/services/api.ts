@@ -4,17 +4,17 @@
 const sanitizeUrl = (url?: string | null) => url?.trim().replace(/\/+$/, '');
 const DEFAULT_API_GATEWAY_ENDPOINT = 'https://nxan2911--api-gateway.modal.run';
 
-// @ts-ignore - process.env is available in Next.js runtime
 const RAW_API_GATEWAY_URL = sanitizeUrl(
   process.env.NEXT_PUBLIC_API_GATEWAY_URL ||
-  process.env.NEXT_PUBLIC_API_URL
+    process.env.NEXT_PUBLIC_API_URL
 );
 
 // API Gateway is the main entry point
 const API_BASE_URL = RAW_API_GATEWAY_URL ?? DEFAULT_API_GATEWAY_ENDPOINT;
 
-const isRemoteEndpoint = (url: string) =>
-  url.includes('modal.run') || url.includes('api.runpod.ai');
+// Legacy helper kept for potential future routing logic
+// const isRemoteEndpoint = (url: string) =>
+//   url.includes("modal.run") || url.includes("api.runpod.ai");
 
 export type InputQualityPreset = "resized" | "original";
 
@@ -52,6 +52,9 @@ export interface GenerationRequest {
   input_quality?: InputQualityPreset;
   // Low-end optimization flags (for GPU 12GB or lower)
   enable_flowmatch_scheduler?: boolean; // Use FlowMatchEulerDiscreteScheduler instead of default
+  mask_tool_type?: "brush" | "box"; // Mask creation tool type: "brush" or "box". Used for MAE preprocessing in removal task.
+  enable_mae_refinement?: boolean; // Enable Stable Diffusion Inpainting refinement for LaMa output (default: true). Improves texture quality in removal task.
+  enable_debug?: boolean; // Enable debug mode to save debug images and logs (default: false). Only enable when needed for debugging.
 }
 
 export interface DebugInfo {
@@ -62,6 +65,12 @@ export interface DebugInfo {
   lora_adapter?: string;
   loaded_adapters?: string[];
   positioned_mask_R?: string; // Base64 encoded positioned mask R (reference mask R after being pasted into main mask A, only for reference-guided insertion)
+  // Additional debug images
+  original_image?: string;
+  mask_A?: string;
+  reference_image?: string;
+  reference_mask_R?: string;
+  mask_mae_dilated?: string; // Base64 encoded dilated mask used for MAE generation (removal task with brush mask only)
   // Prompt info
   original_prompt?: string;
   refined_prompt?: string;
@@ -85,7 +94,7 @@ export interface ApiError {
   success: false;
   error: string;
   error_type: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
 }
 
 export interface UploadResponse {
@@ -113,51 +122,16 @@ export interface WhiteBalanceResponse {
   };
 }
 
-export interface EvaluationImagePair {
-  original_image: string;
-  target_image: string;
-  filename?: string;
-}
-
-export interface EvaluationRequest {
-  original_image?: string;
-  target_image?: string;
-  image_pairs?: EvaluationImagePair[];
-  conditional_images?: string[];
-  input_image?: string;
-}
-
-export interface EvaluationMetrics {
-  psnr?: number;
-  ssim?: number;
-  lpips?: number;
-  fid?: number;
-  custom_metric_1?: number;
-  custom_metric_2?: number;
-  evaluation_time?: number;
-}
-
-export interface EvaluationResult {
-  filename?: string;
-  metrics: EvaluationMetrics;
-  success: boolean;
-  error?: string;
-}
-
-export interface EvaluationResponse {
-  success: boolean;
-  results: EvaluationResult[];
-  total_pairs: number;
-  successful_evaluations: number;
-  failed_evaluations: number;
-  total_evaluation_time: number;
-}
 
 class ApiService {
   private baseUrl: string; // API Gateway (single entry point)
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl; // API Gateway
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   private async makeRequest<T>(
@@ -319,7 +293,7 @@ class ApiService {
           status: string;
           model_loaded: boolean;
           device: string;
-          device_info?: Record<string, any>;
+          device_info?: Record<string, unknown>;
         }>('/api/health');
 
         const result = await Promise.race([requestPromise, timeoutPromise]);
@@ -343,26 +317,6 @@ class ApiService {
 
     // This should never be reached, but TypeScript needs it
     throw new Error('Health check failed after all retries');
-  }
-
-  // Get available models (not implemented in backend yet)
-  async getModels() {
-    // Backend doesn't have this endpoint yet
-    return {
-      success: true,
-      models: [],
-      default: 'qwen-image-edit'
-    };
-  }
-
-  // Get available presets (not implemented in backend yet)
-  async getPresets() {
-    // Backend doesn't have this endpoint yet
-    return {
-      success: true,
-      presets: {},
-      default_preset: 'default'
-    };
   }
 
   // Generate image
@@ -529,88 +483,6 @@ class ApiService {
     }
   }
 
-  // Generate image with preset
-  async generateWithPreset(
-    presetName: string,
-    request: Omit<GenerationRequest, 'settings'>
-  ): Promise<GenerationResponse> {
-    return this.makeRequest<GenerationResponse>(`/api/generate/preset/${presetName}`, {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
-
-  // Batch generation
-  async generateBatch(requests: GenerationRequest[]) {
-    return this.makeRequest<{
-      success: boolean;
-      batch_id: string;
-      total_requests: number;
-      results: Array<{
-        index: number;
-        success: boolean;
-        result?: GenerationResponse;
-        error?: ApiError;
-      }>;
-    }>('/api/generate/batch', {
-      method: 'POST',
-      body: JSON.stringify(requests),
-    });
-  }
-
-  // Get API configuration (not implemented in backend yet)
-  async getConfig() {
-    // Backend doesn't have this endpoint yet
-    return {
-      success: true,
-      config: {
-        available_formats: ['base64'],
-        max_prompt_length: 1000,
-        supported_models: ['qwen-image-edit'],
-        model_info: {
-          'qwen-image-edit': { description: 'Qwen Image Edit Model' }
-        },
-        available_presets: [],
-        default_settings: {
-          guidance_scale: 3.5,
-          num_inference_steps: 30,
-          true_cfg_scale: 6.0
-        },
-        preset_descriptions: {}
-      }
-    };
-  }
-
-  // Upload image
-  async uploadImage(file: File): Promise<UploadResponse> {
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const response = await fetch(`${this.baseUrl}/upload-image`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Upload failed');
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('Error uploading image:', error);
-      throw error;
-    }
-  }
-
-  // Evaluate images
-  async evaluateImages(request: EvaluationRequest): Promise<EvaluationResponse> {
-    return this.makeRequest<EvaluationResponse>('/api/evaluate', {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
-  }
 
   // Apply white balance
   async whiteBalance(file: File, options: WhiteBalanceRequest): Promise<WhiteBalanceResponse> {
@@ -737,7 +609,66 @@ class ApiService {
     }
   }
 
-  // Download debug session as ZIP
+  // Get debug session details (metadata, lora_log, image_files)
+  async getDebugSession(sessionName: string): Promise<{
+    session_name: string;
+    metadata: unknown;
+    lora_log: string;
+    image_files: string[];
+  }> {
+    const url = `${this.baseUrl}/api/debug/sessions/${sessionName}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to get debug session: HTTP ${response.status}`;
+        
+        if (response.status === 404) {
+          throw new Error(`Debug session "${sessionName}" not found. It may have been deleted or never existed.`);
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error getting debug session:', error);
+      throw error;
+    }
+  }
+
+  // Get a specific debug image
+  async getDebugImage(sessionName: string, imageName: string): Promise<Blob> {
+    const url = `${this.baseUrl}/api/debug/sessions/${sessionName}/images/${imageName}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to get debug image: HTTP ${response.status}`;
+        
+        if (response.status === 404) {
+          throw new Error(`Debug image "${imageName}" not found in session "${sessionName}".`);
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      return await response.blob();
+    } catch (error) {
+      console.error('Error getting debug image:', error);
+      throw error;
+    }
+  }
+
+  // Download debug session as ZIP (kept for backward compatibility)
   async downloadDebugSession(sessionName: string): Promise<Blob> {
     const url = `${this.baseUrl}/api/debug/sessions/${sessionName}/download`;
 
@@ -748,7 +679,14 @@ class ApiService {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `Failed to download debug session: HTTP ${response.status}`);
+        const errorMessage = errorData.detail || `Failed to download debug session: HTTP ${response.status}`;
+        
+        // Xử lý 404 với message rõ ràng hơn
+        if (response.status === 404) {
+          throw new Error(`Debug session "${sessionName}" not found. It may have been deleted or never existed.`);
+        }
+        
+        throw new Error(errorMessage);
       }
 
       return await response.blob();
@@ -794,103 +732,6 @@ class ApiService {
     return `${this.baseUrl}/api/visualization/${requestId}/generated`;
   }
 
-  // Benchmark methods
-  async validateBenchmarkFolder(file: File | File[]): Promise<{
-    success: boolean;
-    message: string;
-    image_count: number;
-    details?: Record<string, number>;
-  }> {
-    try {
-      const formData = new FormData();
-
-      if (Array.isArray(file)) {
-        // Folder upload: append all files with their relative paths
-        file.forEach((f) => {
-          const relativePath = (f as any).webkitRelativePath || f.name;
-          formData.append('files', f, relativePath);
-        });
-        formData.append('upload_type', 'folder');
-      } else {
-        // ZIP file upload
-        formData.append('file', file);
-        formData.append('upload_type', 'zip');
-      }
-
-      const response = await fetch(`${this.baseUrl}/api/benchmark/validate`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Validation failed');
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('Error validating benchmark folder:', error);
-      throw error;
-    }
-  }
-
-  async runBenchmark(
-    file: File | File[],
-    options: {
-      task_type?: string;
-      prompt?: string;
-      sample_count?: number;
-      num_inference_steps?: number;
-      guidance_scale?: number;
-      true_cfg_scale?: number;
-      negative_prompt?: string;
-      seed?: number;
-      input_quality?: string;
-    }
-  ): Promise<any> {
-    try {
-      const formData = new FormData();
-
-      if (Array.isArray(file)) {
-        // Folder upload: append all files with their relative paths
-        file.forEach((f) => {
-          const relativePath = (f as any).webkitRelativePath || f.name;
-          formData.append('files', f, relativePath);
-        });
-        formData.append('upload_type', 'folder');
-      } else {
-        // ZIP file upload
-        formData.append('file', file);
-        formData.append('upload_type', 'zip');
-      }
-
-      formData.append('task_type', options.task_type || 'object-removal');
-      // Prompt is required - will be used for ALL images
-      formData.append('prompt', options.prompt || '');
-      if (options.sample_count !== undefined) formData.append('sample_count', options.sample_count.toString());
-      if (options.num_inference_steps) formData.append('num_inference_steps', options.num_inference_steps.toString());
-      if (options.guidance_scale) formData.append('guidance_scale', options.guidance_scale.toString());
-      if (options.true_cfg_scale) formData.append('true_cfg_scale', options.true_cfg_scale.toString());
-      if (options.negative_prompt) formData.append('negative_prompt', options.negative_prompt);
-      if (options.seed !== undefined) formData.append('seed', options.seed.toString());
-      if (options.input_quality) formData.append('input_quality', options.input_quality);
-
-      const response = await fetch(`${this.baseUrl}/api/benchmark/run`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Benchmark failed');
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('Error running benchmark:', error);
-      throw error;
-    }
-  }
 
   async generateImageAsync(
     taskId: string,
@@ -964,14 +805,31 @@ class ApiService {
             });
           }
 
-          // If done, fetch result and close connection
+          // If done, use result from SSE event if available, otherwise fetch from API
           if (data.status === "done") {
             cleanup();
             if (!isResolved) {
               isResolved = true;
-              this.getGenerationResult(taskId)
-                .then(result => resolve(result))
-                .catch(err => reject(err));
+              // Use result from SSE event if available (faster, no extra HTTP request)
+              if (data.result) {
+                console.log('✅ [SSE] Using result from SSE event (no extra API call needed)');
+                const sseResult: GenerationResponse = {
+                  success: true,
+                  image: data.result,
+                  generation_time: 0,
+                  model_used: "qwen-image-edit",
+                  parameters_used: {},
+                  request_id: taskId,
+                  debug_info: data.debug_info,
+                };
+                resolve(sseResult);
+              } else {
+                // Fallback to API call if result not in SSE event
+                console.log('⚠️ [SSE] Result not in SSE event, fetching from API...');
+                this.getGenerationResult(taskId)
+                  .then(result => resolve(result))
+                  .catch(err => reject(err));
+              }
             }
             return;
           }
@@ -1002,13 +860,58 @@ class ApiService {
         }
       };
 
-      eventSource.onerror = async (error) => {
+      eventSource.onerror = async () => {
         console.warn('⚠️ [SSE] Connection error, attempting to recover with status polling...');
 
-        // Try to recover by checking status and polling if task is still active
-        try {
-          const status = await this.getGenerationStatus(taskId);
+        // Helper function to retry status check with exponential backoff
+        const retryStatusCheck = async (
+          maxRetries: number = 5,
+          initialDelay: number = 1000
+        ): Promise<{
+          status: string;
+          progress: number;
+          current_step?: number;
+          total_steps?: number;
+          error?: string;
+          loading_message?: string;
+        }> => {
+          for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+              const status = await this.getGenerationStatus(taskId);
+              return status;
+            } catch (err) {
+              if (attempt === maxRetries - 1) {
+                throw err; // Last attempt failed
+              }
+              // Exponential backoff: 1s, 2s, 4s, 8s
+              const delay = initialDelay * Math.pow(2, attempt);
+              console.warn(`⚠️ [SSE] Status check failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+          throw new Error('Max retries exceeded');
+        };
 
+        // Try to recover by checking status and polling if task is still active
+        let status: {
+          status: string;
+          progress: number;
+          current_step?: number;
+          total_steps?: number;
+          error?: string;
+          loading_message?: string;
+        } | null = null;
+        try {
+          status = await retryStatusCheck(5, 1000);
+        } catch {
+          // If status check fails after retries, still start polling (don't reject immediately)
+          // The task might still be running on backend
+          console.warn('⚠️ [SSE] Status check failed after retries, starting polling anyway...');
+          status = null; // Will be checked in polling loop
+        }
+
+        // If we got status, check if task is done/error
+        if (status) {
           // If task is done, fetch result
           if (status.status === "done") {
             cleanup();
@@ -1042,7 +945,7 @@ class ApiService {
             return;
           }
 
-          // Task is still active, update progress and continue polling
+          // Task is still active, update progress
           if (onProgress) {
             onProgress({
               current_step: status.current_step,
@@ -1052,71 +955,75 @@ class ApiService {
               loading_message: status.loading_message,
             });
           }
+        }
 
-          // Start polling as fallback
-          pollInterval = setInterval(async () => {
-            try {
-              const pollStatus = await this.getGenerationStatus(taskId);
+        // Start polling as fallback (even if initial status check failed)
+        let consecutiveFailures = 0;
+        const maxConsecutiveFailures = 10; // Allow 10 consecutive failures (20 seconds) before giving up
+        
+        pollInterval = setInterval(async () => {
+          try {
+            const pollStatus = await this.getGenerationStatus(taskId);
+            consecutiveFailures = 0; // Reset failure counter on success
 
-              // Update progress
-              if (onProgress) {
-                onProgress({
-                  current_step: pollStatus.current_step,
-                  total_steps: pollStatus.total_steps,
-                  status: pollStatus.status,
-                  progress: pollStatus.progress,
-                  loading_message: pollStatus.loading_message,
-                });
-              }
+            // Update progress
+            if (onProgress) {
+              onProgress({
+                current_step: pollStatus.current_step,
+                total_steps: pollStatus.total_steps,
+                status: pollStatus.status,
+                progress: pollStatus.progress,
+                loading_message: pollStatus.loading_message,
+              });
+            }
 
-              // Check if done
-              if (pollStatus.status === "done") {
-                cleanup();
-                if (!isResolved) {
-                  isResolved = true;
-                  this.getGenerationResult(taskId)
-                    .then(result => resolve(result))
-                    .catch(err => reject(err));
-                }
-              } else if (pollStatus.status === "error" || pollStatus.status === "cancelled") {
-                cleanup();
-                if (!isResolved) {
-                  isResolved = true;
-                  const errorText = pollStatus.error || "Generation failed";
-                  let errorMessage = typeof errorText === 'string' ? errorText : String(errorText);
-                  if (errorText.toLowerCase().includes('out of memory') ||
-                    errorText.toLowerCase().includes('cuda out of memory') ||
-                    errorText.toLowerCase().includes('oom')) {
-                    errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
-                  }
-                  reject(new Error(JSON.stringify({
-                    status: 500,
-                    error: errorMessage,
-                    endpoint: `/api/generate/status/${taskId}`
-                  })));
-                }
-              }
-            } catch (pollError) {
-              console.error('Error polling status:', pollError);
+            // Check if done
+            if (pollStatus.status === "done") {
               cleanup();
               if (!isResolved) {
                 isResolved = true;
-                reject(pollError);
+                this.getGenerationResult(taskId)
+                  .then(result => resolve(result))
+                  .catch(err => reject(err));
+              }
+            } else if (pollStatus.status === "error" || pollStatus.status === "cancelled") {
+              cleanup();
+              if (!isResolved) {
+                isResolved = true;
+                const errorText = pollStatus.error || "Generation failed";
+                let errorMessage = typeof errorText === 'string' ? errorText : String(errorText);
+                if (errorText.toLowerCase().includes('out of memory') ||
+                  errorText.toLowerCase().includes('cuda out of memory') ||
+                  errorText.toLowerCase().includes('oom')) {
+                  errorMessage = 'GPU hết bộ nhớ (Out of Memory). Vui lòng thử lại sau hoặc giảm kích thước ảnh/số bước inference.';
+                }
+                reject(new Error(JSON.stringify({
+                  status: 500,
+                  error: errorMessage,
+                  endpoint: `/api/generate/status/${taskId}`
+                })));
               }
             }
-          }, 2000); // Poll every 2 seconds
-        } catch (statusError) {
-          // If status check also fails, reject
-          cleanup();
-          if (!isResolved) {
-            isResolved = true;
-            reject(new Error(JSON.stringify({
-              status: 500,
-              error: 'SSE connection error and status check failed',
-              endpoint: `/api/generate/stream/${taskId}`
-            })));
+          } catch (pollError) {
+            consecutiveFailures++;
+            console.warn(`⚠️ [SSE] Polling error (${consecutiveFailures}/${maxConsecutiveFailures}):`, pollError);
+            
+            // Only reject after many consecutive failures
+            if (consecutiveFailures >= maxConsecutiveFailures) {
+              console.error(`❌ [SSE] Too many consecutive polling failures (${consecutiveFailures}), giving up...`);
+              cleanup();
+              if (!isResolved) {
+                isResolved = true;
+                reject(new Error(JSON.stringify({
+                  status: 500,
+                  error: 'SSE connection error and status polling failed after multiple retries. Generation may still be running on backend.',
+                  endpoint: `/api/generate/stream/${taskId}`
+                })));
+              }
+            }
+            // Otherwise, continue polling (network might recover)
           }
-        }
+        }, 2000); // Poll every 2 seconds
       };
 
       // Handle cancellation
@@ -1184,10 +1091,10 @@ class ApiService {
     const result = await response.json();
     return {
       success: true,
-      image: result.image,
-      generation_time: 0, // Not provided by async endpoint
-      model_used: "qwen-image-edit",
-      parameters_used: {},
+      image: "", // Field removed from backend response - use /result-image endpoint instead
+      generation_time: result.generation_time || 0,
+      model_used: result.model_used || "qwen-image-edit",
+      parameters_used: result.parameters_used || {},
       debug_info: result.debug_info,
     };
   }

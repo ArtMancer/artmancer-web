@@ -60,7 +60,7 @@ export default function StatusBar({
         {/* Viewport Zoom */}
         {uploadedImage && viewportZoom !== 1 && (
           <span className="text-[var(--text-secondary)]">
-            Zoom {Math.round(viewportZoom * 100)}%
+            Zoom {Math.round(viewportZoom * 1000) / 10}%
           </span>
         )}
 
@@ -81,7 +81,7 @@ export default function StatusBar({
             <>
               <span className="text-[var(--text-secondary)]">•</span>
               <span className="text-[var(--text-secondary)]">
-                Scale {Math.round(transform.scale * 100)}%
+                Scale {Math.round(transform.scale * 1000) / 10}%
               </span>
             </>
           )}

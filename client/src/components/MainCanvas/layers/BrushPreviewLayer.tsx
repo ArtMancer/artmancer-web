@@ -16,7 +16,7 @@ interface BrushPreviewLayerProps {
   viewportZoom: number;
   imageContainerRef: React.RefObject<HTMLDivElement | null>;
   maskCanvasRef: React.RefObject<HTMLCanvasElement | null>;
-  maskToolType: "brush" | "box";
+  maskToolType: "brush" | "box" | "eraser";
 }
 
 export default function BrushPreviewLayer({
@@ -36,7 +36,7 @@ export default function BrushPreviewLayer({
   useEffect(() => {
     if (
       !isMaskingMode ||
-      maskToolType !== "brush" ||
+      (maskToolType !== "brush" && maskToolType !== "eraser") ||
       !imageDimensions ||
       !maskCanvasRef.current
     ) {
@@ -69,25 +69,30 @@ export default function BrushPreviewLayer({
       // Get the mask canvas bounding rect (same calculation as getCanvasCoordinates)
       const canvasRect = maskCanvas.getBoundingClientRect();
 
-      // Calculate relative position (0-1)
+      // Calculate relative position (có thể < 0 hoặc > 1 khi nằm ngoài canvas)
       const relativeX = (e.clientX - canvasRect.left) / canvasRect.width;
       const relativeY = (e.clientY - canvasRect.top) / canvasRect.height;
+
+      // Nếu trỏ chuột đã ra khỏi vùng canvas chính thì ẩn preview hẳn
+      if (relativeX < 0 || relativeX > 1 || relativeY < 0 || relativeY > 1) {
+        mousePosRef.current = null;
+        const previewCanvas = canvasRef.current;
+        if (previewCanvas) {
+          const previewCtx = previewCanvas.getContext("2d", {
+            willReadFrequently: true,
+          });
+          if (previewCtx) {
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+          }
+        }
+        return;
+      }
 
       // Convert to canvas internal coordinates
       const canvasX = relativeX * imageDimensions.width;
       const canvasY = relativeY * imageDimensions.height;
 
-      // Check if mouse is within image bounds
-      if (
-        canvasX >= 0 &&
-        canvasX <= imageDimensions.width &&
-        canvasY >= 0 &&
-        canvasY <= imageDimensions.height
-      ) {
-        mousePosRef.current = { x: canvasX, y: canvasY };
-      } else {
-        mousePosRef.current = null;
-      }
+      mousePosRef.current = { x: canvasX, y: canvasY };
 
       // Redraw preview
       drawPreview(ctx);
@@ -110,39 +115,45 @@ export default function BrushPreviewLayer({
 
       if (!mousePosRef.current) return;
 
-      // Calculate brush size in canvas coordinates
-      // Dynamic brush size: scale from 0.5% to 10% of base image size
-      const baseImageSize = Math.min(
-        imageDimensions.width,
-        imageDimensions.height
-      );
-      const brushSize = (maskBrushSize / 100) * (baseImageSize / 5);
+      // Interpret maskBrushSize as brush RADIUS in pixels (matches UI "px")
+      // Scale up for better visual feedback on high-res images
+      const brushRadius = (maskBrushSize || 1) * 2;
 
       const { x, y } = mousePosRef.current;
 
-      // Draw preview circle with contrasting colors (white + black border for visibility)
+      // Clamp coordinates to canvas bounds for preview display
+      // This allows preview to show even when mouse is outside canvas,
+      // but clamped to the edge of the canvas
+      const clampedX = Math.max(0, Math.min(x, imageDimensions.width));
+      const clampedY = Math.max(0, Math.min(y, imageDimensions.height));
+
+      // Draw preview circle with strong contrasting visuals for better accessibility
       ctx.globalCompositeOperation = "source-over";
+
+      // Semi-transparent fill to show affected area clearly
+      ctx.beginPath();
+      ctx.arc(clampedX, clampedY, brushRadius, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+      ctx.fill();
 
       // Outer black border (shadow effect for visibility)
       ctx.beginPath();
-      ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2);
+      ctx.arc(clampedX, clampedY, brushRadius, 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      // Inner white dashed border (main preview)
+      // Inner white solid border (main preview)
       ctx.beginPath();
-      ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]); // Dashed line
+      ctx.arc(clampedX, clampedY, brushRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.98)";
+      ctx.lineWidth = 2;
       ctx.stroke();
-      ctx.setLineDash([]); // Reset
 
       // Center dot for precision
       ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.arc(clampedX, clampedY, 2, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
       ctx.fill();
       ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
       ctx.lineWidth = 1;
@@ -152,8 +163,10 @@ export default function BrushPreviewLayer({
     const container = imageContainerRef.current;
     if (!container) return;
 
+    // Attach to both container and document to support strokes outside canvas
     container.addEventListener("mousemove", handleMouseMove);
     container.addEventListener("mouseleave", handleMouseLeave);
+    document.addEventListener("mousemove", handleMouseMove);
 
     // Initial draw
     drawPreview(ctx);
@@ -161,6 +174,7 @@ export default function BrushPreviewLayer({
     return () => {
       container.removeEventListener("mousemove", handleMouseMove);
       container.removeEventListener("mouseleave", handleMouseLeave);
+      document.removeEventListener("mousemove", handleMouseMove);
     };
   }, [
     isMaskingMode,
@@ -174,7 +188,11 @@ export default function BrushPreviewLayer({
     maskToolType,
   ]);
 
-  if (!isMaskingMode || maskToolType !== "brush" || !imageDimensions) {
+  if (
+    !isMaskingMode ||
+    (maskToolType !== "brush" && maskToolType !== "eraser") ||
+    !imageDimensions
+  ) {
     return null;
   }
 

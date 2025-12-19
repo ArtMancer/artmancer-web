@@ -4,43 +4,30 @@ Used by JobManagerService (CPU-only).
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import uuid
 import time
+import logging
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
-from typing import Dict, Any
+from fastapi.responses import StreamingResponse, Response
+from typing import Dict, Any, List
+from pathlib import Path
+import base64
+import io
+
+from PIL import Image
 
 from ...models import GenerationRequest
+from ._helpers import (
+    get_modal_imports,
+    get_job_state_dictio,
+    create_job_state,
+    update_job_state_error,
+    generate_sse_events,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/generate", tags=["generation-async"])
-
-# Import qwen_worker function from modal_app
-# This will be available when running in Modal environment
-# Use lazy import to avoid circular dependencies
-MODAL_ENV = False
-qwen_worker = None
-job_state_dictio = None
-
-def _get_modal_imports():
-    """Lazy import of Modal components."""
-    global MODAL_ENV, qwen_worker, job_state_dictio
-    if qwen_worker is None:
-        try:
-            import sys
-            if 'modal_app' not in sys.modules:
-                import modal_app
-            else:
-                modal_app = sys.modules['modal_app']
-            qwen_worker = getattr(modal_app, 'qwen_worker', None)
-            job_state_dictio = getattr(modal_app, 'job_state_dictio', None)
-            MODAL_ENV = qwen_worker is not None and job_state_dictio is not None
-        except (ImportError, AttributeError):
-            MODAL_ENV = False
-            qwen_worker = None
-            job_state_dictio = None
-    return qwen_worker, job_state_dictio
 
 
 @router.post("/async")
@@ -51,39 +38,19 @@ def submit_generation_job(request: GenerationRequest) -> Dict[str, Any]:
     Returns task_id immediately, generation runs in background on A100.
     Use /api/generate/status/{task_id} to poll status.
     """
-    worker, job_dictio = _get_modal_imports()
-    if not MODAL_ENV or worker is None or job_dictio is None:
+    worker, job_dictio, is_modal = get_modal_imports()
+    
+    if not is_modal or worker is None or job_dictio is None:
         raise HTTPException(
             status_code=501,
             detail="Async generation not available (not running in Modal environment)"
         )
     
-    # Generate unique task ID
     task_id = str(uuid.uuid4())
-    
-    # Convert request to dict for payload
     payload = request.model_dump()
     
-    # Initialize job state
     try:
-        job_dictio[task_id] = {
-            "status": "queued",
-            "progress": 0.0,
-            "error": None,
-            "result": None,
-            "debug_info": None,
-            "created_at": time.time(),  # Timestamp for cleanup
-        }
-        
-        # Add to tracking list
-        tracking_key = "__job_tracking_list__"
-        try:
-            job_ids = job_dictio.get(tracking_key, [])
-            if task_id not in job_ids:
-                job_ids.append(task_id)
-                job_dictio[tracking_key] = job_ids
-        except Exception:
-            pass  # Tracking list might not be available
+        create_job_state(task_id)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -94,20 +61,12 @@ def submit_generation_job(request: GenerationRequest) -> Dict[str, Any]:
     try:
         worker.spawn(task_id, payload)
     except Exception as e:
-        # Update state to error
-        job_dictio[task_id] = {
-            "status": "error",
-            "progress": 0.0,
-            "error": str(e),
-            "result": None,
-            "debug_info": None,
-            "created_at": job_dictio.get(task_id, {}).get("created_at", time.time()),
-        }
+        update_job_state_error(task_id, str(e))
         raise HTTPException(
             status_code=500,
             detail=f"Failed to spawn generation job: {str(e)}"
         )
-    
+
     return {
         "task_id": task_id,
         "status": "queued",
@@ -122,12 +81,7 @@ def get_generation_status(task_id: str) -> Dict[str, Any]:
     
     Returns current status, progress, and error if any.
     """
-    _, job_dictio = _get_modal_imports()
-    if job_dictio is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Job state storage not available"
-        )
+    job_dictio = get_job_state_dictio()
     
     if task_id not in job_dictio:
         raise HTTPException(
@@ -151,12 +105,7 @@ def get_generation_result(task_id: str) -> Dict[str, Any]:
     
     Returns result only if status is "done".
     """
-    _, job_dictio = _get_modal_imports()
-    if job_dictio is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Job state storage not available"
-        )
+    job_dictio = get_job_state_dictio()
     
     if task_id not in job_dictio:
         raise HTTPException(
@@ -194,6 +143,95 @@ def get_generation_result(task_id: str) -> Dict[str, Any]:
     }
 
 
+@router.get("/result-image/{task_id}")
+def get_generation_result_image(task_id: str):
+    """
+    Trả về ảnh kết quả dạng binary (ưu tiên WebP) cho Qwen Image Edit.
+    
+    - Đọc base64 ảnh đang lưu trong job_state_dictio
+    - Decode và convert sang WebP (nếu có thể)
+    - Trả về raw bytes với Content-Type: image/webp
+    """
+    job_dictio = get_job_state_dictio()
+    
+    if task_id not in job_dictio:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not found"
+        )
+    
+    state = job_dictio[task_id]
+    status = state.get("status", "unknown")
+    
+    if status == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=state.get("error", "Generation failed")
+        )
+    
+    if status != "done":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task not completed yet. Current status: {status}"
+        )
+    
+    result_b64 = state.get("result")
+    if not result_b64:
+        raise HTTPException(
+            status_code=500,
+            detail="Result image not available"
+        )
+    
+    try:
+        # Decode base64 từ worker (thường là PNG)
+        image_bytes = base64.b64decode(result_b64)
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
+        # Optional: Resize if image is extremely large (>2560 in any dimension)
+        # This rarely happens but provides extra safety
+        max_dim = max(image.width, image.height)
+        if max_dim > 2560:
+            scale = 2560 / max_dim
+            new_size = (int(image.width * scale), int(image.height * scale))
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+            logger.info(f"🔽 Resized large image from {max_dim}px to {max(new_size)}px")
+        
+        # Encode sang WebP với optimization tối đa
+        # Quality=80: Excellent visual quality, 40-50% smaller than quality=90
+        # method=6: Best compression (slowest but smallest file)
+        # exact=False: Allow encoder flexibility for better compression
+        output = io.BytesIO()
+        image.save(
+            output, 
+            format="WEBP", 
+            quality=80, 
+            method=6,
+            exact=False,
+        )
+        output.seek(0)
+        
+        # Add cache headers for better performance
+        return Response(
+            content=output.getvalue(),
+            media_type="image/webp",
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",  # Cache 1 year
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        # Fallback: trả về PNG raw nếu convert WebP lỗi
+        try:
+            return Response(
+                content=base64.b64decode(result_b64),
+                media_type="image/png",
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to decode generation result: {e}"
+            ) from e
+
+
 @router.post("/async/cancel/{task_id}")
 def cancel_async_generation(task_id: str) -> Dict[str, Any]:
     """
@@ -208,12 +246,7 @@ def cancel_async_generation(task_id: str) -> Dict[str, Any]:
     Returns:
         Success message
     """
-    _, job_dictio = _get_modal_imports()
-    if job_dictio is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Job state storage not available"
-        )
+    job_dictio = get_job_state_dictio()
     
     if task_id not in job_dictio:
         raise HTTPException(
@@ -234,6 +267,75 @@ def cancel_async_generation(task_id: str) -> Dict[str, Any]:
     }
 
 
+@router.post("/multi-steps")
+def generate_multi_steps(request: GenerationRequest) -> Dict[str, Any]:
+    """
+    Run generation sequentially for multiple inference steps (default: 5, 10, 25).
+    Executes on GPU via qwen_worker.call (synchronous). Saves each image to Volume and returns base64 + path.
+    """
+    worker, _, is_modal = get_modal_imports()
+    
+    if not is_modal or worker is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Async generation not available (not running in Modal environment)"
+        )
+
+    # Get VOL_MOUNT_PATH
+    from ._helpers import get_vol_mount_path
+    vol_mount_path = get_vol_mount_path()
+    
+    steps: List[int] = [5, 10, 25]
+    base_request_id = str(uuid.uuid4())
+    results: List[Dict[str, Any]] = []
+
+    # Ensure volume mount path exists
+    save_root = Path(vol_mount_path) / "reports" / base_request_id
+    save_root.mkdir(parents=True, exist_ok=True)
+
+    for step in steps:
+        # Override num_inference_steps per call
+        payload = request.model_copy(update={"num_inference_steps": step}).model_dump()
+        task_id = f"{base_request_id}_s{step}"
+
+        try:
+            # Call GPU worker synchronously
+            result = worker.call(task_id, payload)
+            image_b64 = result.get("image")
+            if not image_b64:
+                raise ValueError("Worker returned no image")
+
+            # Save to volume
+            save_path = save_root / f"step_{step}.png"
+            try:
+                raw = base64.b64decode(image_b64)
+                with open(save_path, "wb") as f:
+                    f.write(raw)
+            except Exception as e:
+                # Continue even if save fails; report error in path field
+                save_path = None
+                result["save_error"] = str(e)
+
+            results.append({
+                    "step": step,
+                    "image": image_b64,
+                    "path": str(save_path) if save_path else None,
+                    "request_id": result.get("request_id"),
+                    "debug_info": result.get("debug_info"),
+            })
+        except Exception as e:
+            results.append({
+                    "step": step,
+                    "error": str(e),
+            })
+
+    return {
+        "base_request_id": base_request_id,
+        "steps": steps,
+        "results": results,
+    }
+
+
 @router.get("/stream/{task_id}")
 async def stream_generation_progress(task_id: str):
     """
@@ -247,77 +349,36 @@ async def stream_generation_progress(task_id: str):
     - error: error message if any
     - loading_message: loading stage message
     """
-    async def event_generator():
-        try:
-            _, job_dictio = _get_modal_imports()
-            if job_dictio is None:
-                yield f"data: {json.dumps({'error': 'Job state storage not available'})}\n\n"
-                return
-            
-            if task_id not in job_dictio:
-                yield f"data: {json.dumps({'error': f'Task {task_id} not found'})}\n\n"
-                return
-            
-            last_step = -1
-            last_status = None
-            last_loading_message = None
-            first_message = True
-            
-            while True:
-                state = job_dictio.get(task_id)
-                if not state:
-                    yield f"data: {json.dumps({'error': f'Task {task_id} not found'})}\n\n"
-                    break
-                
-                status = state.get("status", "unknown")
-                current_step = state.get("current_step")
-                total_steps = state.get("total_steps")
-                progress = state.get("progress", 0.0)
-                error = state.get("error")
-                loading_message = state.get("loading_message")
-                
-                # Send initial state immediately, then only on changes
-                # Also send if loading_message changes (for smooth progress updates)
-                should_send = (
-                    first_message or 
-                    status != last_status or 
-                    (current_step is not None and current_step != last_step) or
-                    (loading_message is not None and loading_message != last_loading_message)
-                )
-                
-                if should_send:
-                    event_data = {
-                        "task_id": task_id,
-                        "status": status,
-                        "progress": progress,
-                        "current_step": current_step,
-                        "total_steps": total_steps,
-                        "error": error,
-                        "loading_message": loading_message,
-                    }
-                    yield f"data: {json.dumps(event_data)}\n\n"
-                    last_step = current_step if current_step is not None else last_step
-                    last_status = status
-                    last_loading_message = loading_message
-                    first_message = False
-                
-                # Stop if done or error
-                if status in ("done", "error", "cancelled"):
-                    break
-                
-                # Poll every 200ms for updates
-                await asyncio.sleep(0.2)
-        
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-    
     return StreamingResponse(
-        event_generator(),
+        generate_sse_events(task_id, include_heartbeat=True, heartbeat_interval=5.0),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable nginx buffering
-        }
+        },
     )
 
+
+@router.post("/stream")
+async def stream_generation_direct(request: GenerationRequest):
+    """
+    Submit a generation job and stream progress using Server-Sent Events (SSE).
+
+    This provides a single POST endpoint that:
+    1) Submits the async job to H200 worker
+    2) Streams job_state_dictio updates as SSE events until completion
+    """
+    # Reuse existing async submission logic to ensure consistent job_state handling
+    job_info = submit_generation_job(request)
+    task_id = job_info["task_id"]
+
+    return StreamingResponse(
+        generate_sse_events(task_id, include_heartbeat=True, heartbeat_interval=5.0),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )

@@ -16,10 +16,6 @@ interface ImageLayerProps {
   comparisonSlider: number;
   isDraggingSeparator: boolean;
   imageRef: React.RefObject<HTMLImageElement | null>;
-  onSeparatorMouseDown: (e: React.MouseEvent) => void;
-  onSeparatorTouchStart: (e: React.TouchEvent) => void;
-  onSeparatorTouchMove: (e: React.TouchEvent) => void;
-  onSeparatorTouchEnd: (e: React.TouchEvent) => void;
 }
 
 export default function ImageLayer({
@@ -32,10 +28,6 @@ export default function ImageLayer({
   comparisonSlider,
   isDraggingSeparator,
   imageRef,
-  onSeparatorMouseDown,
-  onSeparatorTouchStart,
-  onSeparatorTouchMove,
-  onSeparatorTouchEnd,
 }: ImageLayerProps) {
   const imageStyle: React.CSSProperties = {
     width: imageDimensions
@@ -60,10 +52,12 @@ export default function ImageLayer({
           style={getAbsoluteLayerStyle(imageDimensions, displayScale, Z_INDEX.IMAGE)}
         >
           {modifiedImage ? (
+            // Dùng img vì đây là data URL nội bộ, không cần tối ưu Next Image
+            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={modifiedImage}
               alt="AI Result"
-              className="pointer-events-none select-none"
+              className="image-loaded pointer-events-none select-none"
               draggable={false}
               style={imageStyle}
             />
@@ -88,11 +82,12 @@ export default function ImageLayer({
               : 'clip-path 0.1s ease-out',
           }}
         >
+          
           <img
             ref={imageRef}
             src={originalImage || undefined}
             alt="Original"
-            className="pointer-events-none select-none"
+            className="image-loaded pointer-events-none select-none"
             draggable={false}
             style={imageStyle}
           />
@@ -128,11 +123,12 @@ export default function ImageLayer({
     <div
       style={getAbsoluteLayerStyle(imageDimensions, displayScale, Z_INDEX.IMAGE)}
     >
+      
       <img
         ref={imageRef}
         src={uploadedImage || undefined}
         alt="Reference"
-        className="pointer-events-none select-none"
+        className="image-loaded pointer-events-none select-none"
         draggable={false}
         style={imageStyle}
       />

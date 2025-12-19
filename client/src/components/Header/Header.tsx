@@ -1,54 +1,22 @@
 import Image from "next/image";
 import {
-  MdSettings,
-  MdMenu,
-  MdLanguage,
-  MdLightMode,
-  MdDarkMode,
-  MdCheck,
-  MdBugReport,
-} from "react-icons/md";
-import { useState, useRef, useEffect, useCallback } from "react";
-import { useTheme, useLanguage, useServer } from "@/contexts";
-import ServerControl from "@/components/ServerControl";
-import {
-  AppBar,
-  Toolbar,
-  TextField,
-  Button,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Box,
-  Typography,
-  ToggleButton,
-  ToggleButtonGroup,
-  Switch,
-  FormControlLabel,
-  Stack,
-  Grid,
-  Backdrop,
-  Fade,
-} from "@mui/material";
-import {
-  Settings as SettingsIcon,
-  Menu as MenuIcon,
-  Close as CloseIcon,
-  LightMode as LightModeIcon,
-  DarkMode as DarkModeIcon,
-  Language as LanguageIcon,
-  BugReport as BugReportIcon,
-  Check as CheckIcon,
-} from "@mui/icons-material";
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+  startTransition,
+} from "react";
+import { Dialog, ToggleGroup, Switch as RadixSwitch } from "radix-ui";
+import { useTheme, useLanguage } from "@/contexts";
+import { Settings, Menu, X, Sun, Moon, Bug, Check, Wand2 } from "lucide-react";
 
 interface HeaderProps {
   onSummon: (prompt: string) => void;
   isCustomizeOpen: boolean;
   onToggleCustomize: () => void;
   isGenerating?: boolean;
-  aiTask?: "white-balance" | "object-insert" | "object-removal" | "evaluation";
+  aiTask?: "white-balance" | "object-insert" | "object-removal";
   onCancel?: () => void;
   // Debug panel props
   isDebugPanelVisible?: boolean;
@@ -68,51 +36,38 @@ export default function Header({
 }: HeaderProps) {
   const [prompt, setPrompt] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isClosing, setIsClosing] = useState(false);
-  const [isOpening, setIsOpening] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
 
-  const { theme, toggleTheme } = useTheme();
-  const { language, setLanguage, t } = useLanguage();
-  const { isReady } = useServer();
+  const { theme, setTheme } = useTheme();
+  const { t } = useLanguage();
 
-  // Function to handle modal opening with animation
-  const handleOpenModal = useCallback(() => {
-    setIsSettingsOpen(true);
-    setIsOpening(true);
-    // Remove opening state after animation completes
-    setTimeout(() => {
-      setIsOpening(false);
-    }, 50); // Small delay to ensure the initial state is rendered
-  }, []);
+  // Default prompt per task; only replace when empty or when previous default was used
+  const taskDefaultPrompt = useMemo(
+    () => ({
+      "object-removal": "remove object",
+      "object-insert": "insert object",
+      "white-balance": "white balance this image",
+    }),
+    []
+  );
+  const previousTaskRef = useRef<typeof aiTask>(aiTask);
 
-  // Function to handle modal closing with animation
-  const handleCloseModal = useCallback(() => {
-    setIsClosing(true);
-    setTimeout(() => {
-      setIsSettingsOpen(false);
-      setIsClosing(false);
-    }, 300); // Match animation duration
-  }, []);
-
-  // Close settings dropdown when clicking outside
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        settingsRef.current &&
-        !settingsRef.current.contains(event.target as Node)
-      ) {
-        handleCloseModal();
-      }
+    const defaultPrompt = taskDefaultPrompt[aiTask ?? "object-removal"];
+    const previousDefault =
+      previousTaskRef.current && taskDefaultPrompt[previousTaskRef.current];
+
+    const shouldReplace =
+      ((!prompt.trim() || prompt === previousDefault) &&
+        prompt !== defaultPrompt) ||
+      !prompt.trim();
+
+    if (shouldReplace) {
+      startTransition(() => setPrompt(defaultPrompt));
     }
 
-    if (isSettingsOpen && !isClosing) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => {
-        document.removeEventListener("mousedown", handleClickOutside);
-      };
-    }
-  }, [isSettingsOpen, isClosing, handleCloseModal]);
+    previousTaskRef.current = aiTask;
+  }, [aiTask, prompt, taskDefaultPrompt]);
 
   // Ensure focusable elements outside dialog don't retain focus when dialog opens
   useEffect(() => {
@@ -165,7 +120,14 @@ export default function Header({
   }, [isSettingsOpen]);
 
   const handleSubmit = () => {
-    if (!isReady) return; // Không cho submit nếu server chưa sẵn sàng
+    // 🔍 DEBUG: Log when handleSubmit is called
+    console.log("🎯 [Header handleSubmit] Called", {
+      timestamp: new Date().toISOString(),
+      prompt,
+      aiTask,
+      stackTrace: new Error().stack?.split('\n').slice(2, 5).join('\n'),
+    });
+
     const promptValue = prompt.trim();
     if (aiTask === "white-balance" || promptValue) {
       onSummon(promptValue);
@@ -179,28 +141,13 @@ export default function Header({
     }
   };
   return (
-    <AppBar
-      position="static"
-      sx={{
-        bgcolor: "var(--panel-bg)",
-        borderBottom: 1,
-        borderColor: "var(--secondary-bg)",
-        boxShadow: "none",
-        px: 2,
-        py: 1,
-      }}
+    <header
+      className="bg-primary-bg border-b border-secondary-bg px-2 py-1"
+      style={{ boxShadow: "none" }}
     >
-      <Toolbar
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 2,
-          minHeight: "auto !important",
-        }}
-      >
+      <div className="flex items-center justify-between gap-2 min-h-auto">
         {/* Logo */}
-        <Box sx={{ flexShrink: 0 }}>
+        <div style={{ flexShrink: 0 }}>
           <Image
             src="/logo.svg"
             alt="Artmancer"
@@ -209,433 +156,185 @@ export default function Header({
             style={{ height: 48, width: "auto" }}
             priority
           />
-        </Box>
+        </div>
 
         {/* Input Field and Edit Button */}
-        <Box
-          sx={{
-            flex: 1,
-            maxWidth: { xs: "100%", md: 800 },
-            mx: { xs: 0, md: 2 },
-            display: "flex",
-            gap: 1.5,
-            alignItems: "center",
-            position: "relative",
-          }}
+        <div
+          className="flex items-center gap-4 relative"
+          style={{ flex: 1, maxWidth: "800px", marginLeft: 0, marginRight: 0 }}
         >
-          {!isReady && (
-            <Backdrop
-              open={!isReady}
-              sx={{
-                position: "absolute",
-                zIndex: 10,
-                bgcolor: "rgba(0, 0, 0, 0.1)",
-                backdropFilter: "blur(4px)",
-                borderRadius: 1,
-                border: 2,
-                borderStyle: "dashed",
-                borderColor: "divider",
-              }}
-            >
-              <Typography
-                variant="body2"
-                sx={{
-                  color: "text.secondary",
-                  fontWeight: 500,
-                  textAlign: "center",
-                }}
-              >
-                Hệ thống đang Offline
-              </Typography>
-            </Backdrop>
-          )}
-          <TextField
-            fullWidth
+          <input
+            type="text"
             placeholder={t("header.placeholder")}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isGenerating || !isReady}
-            size="small"
-            sx={{
-              "& .MuiOutlinedInput-root": {
-                bgcolor: "transparent",
-                borderColor: "var(--primary-accent)",
-                borderWidth: 2,
-                borderStyle: "solid",
-                color: "var(--text-primary)",
-                fontSize: isReady ? "0.875rem" : "0.75rem",
-                "& fieldset": {
-                  borderColor: "var(--primary-accent)",
-                },
-                "&:hover fieldset": {
-                  borderColor: "var(--highlight-accent)",
-                },
-                "&.Mui-focused fieldset": {
-                  borderColor: "var(--highlight-accent)",
-                },
-                "&.Mui-disabled": {
-                  opacity: 0.5,
-                },
-              },
-              "& .MuiInputBase-input::placeholder": {
-                color: "var(--text-secondary)",
-                opacity: 1,
-              },
+            disabled={isGenerating}
+            className={`w-full rounded-md border-2 px-3 py-2 text-sm outline-none transition-colors ${
+              isGenerating ? "opacity-50 cursor-not-allowed" : ""
+            }`}
+            style={{
+              backgroundColor: "transparent",
+              borderColor: "var(--primary-accent)",
+              color: "var(--text-primary)",
             }}
           />
           {isGenerating && onCancel ? (
-            <Button
-              variant="contained"
-              color="error"
+            <button
               onClick={onCancel}
-              sx={{
-                flexShrink: 0,
-                height: 48,
-                px: 3,
-                fontSize: isReady ? "0.875rem" : "0.75rem",
-                textTransform: "none",
-                fontWeight: 600,
-              }}
+              className="shrink-0 h-10 px-3 bg-red-600 text-white font-semibold rounded flex items-center justify-center"
+              style={{ fontSize: "0.875rem" }}
             >
               {t("header.cancel")}
-            </Button>
+            </button>
           ) : (
-            <Button
-              variant="contained"
+            <button
               onClick={handleSubmit}
               disabled={
-                !isReady ||
-                isGenerating ||
-                (!prompt.trim() && aiTask !== "white-balance")
+                isGenerating || (!prompt.trim() && aiTask !== "white-balance")
               }
-              sx={{
-                flexShrink: 0,
-                height: 48,
-                px: 3,
-                bgcolor: "var(--primary-accent)",
-                color: "white",
-                fontSize: isReady ? "0.875rem" : "0.75rem",
-                textTransform: "none",
-                fontWeight: 600,
-                "&:hover": {
-                  bgcolor: "var(--highlight-accent)",
-                },
-                "&.Mui-disabled": {
-                  opacity: 0.5,
-                },
-              }}
+              className={`shrink-0 h-10 px-4 font-semibold rounded text-white flex items-center justify-center gap-2 ${
+                isGenerating || (!prompt.trim() && aiTask !== "white-balance")
+                  ? "opacity-50 cursor-not-allowed"
+                  : "bg-primary-accent hover:bg-highlight-accent"
+              }`}
+              style={{ fontSize: "0.875rem" }}
             >
+              <Wand2 size={16} />
               {isGenerating ? t("header.generating") : t("header.edit")}
-            </Button>
+            </button>
           )}
-        </Box>
+        </div>
 
         {/* Header Actions */}
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            gap: 1,
-            flexShrink: 0,
-          }}
-        >
-          {/* Server Control */}
-          <ServerControl />
-
+        <div className="flex items-center gap-2 shrink-0">
           {/* Settings Button */}
-          <IconButton
-            onClick={() => {
-              if (isSettingsOpen) {
-                handleCloseModal();
-              } else {
-                handleOpenModal();
-              }
-            }}
-            sx={{
-              bgcolor: "var(--secondary-bg)",
-              color: "var(--text-secondary)",
-              width: 48,
-              height: 48,
-              "&:hover": {
-                bgcolor: "var(--primary-accent)",
-                color: "white",
-              },
-            }}
+          <button
+            onClick={() => setIsSettingsOpen(!isSettingsOpen)}
             aria-label={t("header.settings")}
+            className="btn-interactive w-10 h-10 inline-flex items-center justify-center rounded bg-secondary-bg text-text-secondary hover:bg-primary-accent hover:text-white transition-colors"
           >
-            <SettingsIcon />
-          </IconButton>
-          <IconButton
+            <Settings size={18} />
+          </button>
+          <button
             onClick={onToggleCustomize}
-            sx={{
-              bgcolor: isCustomizeOpen
-                ? "var(--primary-accent)"
-                : "var(--secondary-bg)",
-              color: isCustomizeOpen ? "white" : "var(--text-secondary)",
-              width: 48,
-              height: 48,
-              "&:hover": {
-                bgcolor: "var(--primary-accent)",
-                color: "white",
-              },
-            }}
             aria-label={t("header.toggleSidebar")}
+            className={`btn-interactive w-10 h-10 inline-flex items-center justify-center rounded transition-colors ${
+              isCustomizeOpen
+                ? "bg-primary-accent text-white"
+                : "bg-secondary-bg text-text-secondary hover:bg-primary-accent hover:text-white"
+            }`}
           >
-            <MenuIcon />
-          </IconButton>
-        </Box>
-      </Toolbar>
+            <Menu size={18} />
+          </button>
+        </div>
+      </div>
 
-      {/* Settings Modal */}
-      <Dialog
+      {/* Settings Modal (Radix Dialog) */}
+      <Dialog.Root
         open={isSettingsOpen}
-        onClose={handleCloseModal}
-        maxWidth="sm"
-        fullWidth
-        disableEnforceFocus={false}
-        disableAutoFocus={false}
-        disableScrollLock={false}
-        TransitionComponent={Fade}
-        TransitionProps={{ timeout: 300 }}
-        PaperProps={{
-          sx: {
-            bgcolor: "var(--primary-bg)",
-            border: 1,
-            borderColor: "var(--border-color)",
-            borderRadius: 3,
-          },
-        }}
-        BackdropProps={{
-          sx: {
-            backdropFilter: "blur(8px)",
-            bgcolor: "rgba(0, 0, 0, 0.5)",
-          },
-        }}
+        onOpenChange={(open: boolean) => setIsSettingsOpen(open)}
       >
-        <DialogTitle
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            pb: 2,
-            borderBottom: 1,
-            borderColor: "var(--border-color)",
-            color: "var(--text-primary)",
-            fontWeight: 600,
-          }}
-        >
-          {t("settings.title")}
-          <IconButton
-            onClick={handleCloseModal}
-            size="small"
-            sx={{
-              color: "var(--text-secondary)",
-              "&:hover": {
-                bgcolor: "var(--secondary-bg)",
-              },
-            }}
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay fixed inset-0 z-1300 bg-black/50 backdrop-blur-md" />
+          <Dialog.Content
+            ref={settingsRef}
+            className="dialog-content fixed z-1301 left-1/2 top-1/2 w-full max-w-[700px] -translate-x-1/2 -translate-y-1/2 bg-primary-bg border border-border-color rounded-lg shadow-xl outline-none"
           >
-            <CloseIcon />
-          </IconButton>
-        </DialogTitle>
+            <div className="flex items-center justify-between pb-2 px-3 pt-2 border-b border-border-color text-text-primary font-semibold">
+                <Dialog.Title className="text-text-primary text-base font-semibold">
+                  {t("settings.title")}
+                </Dialog.Title>
+                <Dialog.Close asChild>
+                <button className="p-1 rounded text-text-secondary hover:bg-secondary-bg">
+                    <X size={18} />
+                </button>
+                </Dialog.Close>
+            </div>
 
-        <DialogContent sx={{ pt: 3 }}>
-          <Stack spacing={3}>
-            {/* Theme Setting */}
-            <Box>
-              <Typography
-                variant="subtitle2"
-                sx={{
-                  color: "var(--text-primary)",
-                  fontWeight: 500,
-                  mb: 2,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                }}
-              >
-                <LightModeIcon
-                  sx={{ color: "var(--primary-accent)", fontSize: 18 }}
-                />
-                {t("settings.theme")}
-              </Typography>
-              <ToggleButtonGroup
-                value={theme}
-                exclusive
-                onChange={(_, value) => {
-                  if (value !== null && value !== theme) {
-                    toggleTheme();
-                  }
-                }}
-                fullWidth
-                sx={{
-                  "& .MuiToggleButton-root": {
-                    borderColor: "var(--border-color)",
-                    color: "var(--text-secondary)",
-                    "&.Mui-selected": {
-                      bgcolor: "var(--primary-accent)",
-                      color: "white",
-                      "&:hover": {
-                        bgcolor: "var(--primary-accent)",
-                      },
-                    },
-                  },
-                }}
-              >
-                <ToggleButton value="light">
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <LightModeIcon fontSize="small" />
-                    <Typography variant="body2">
-                      {t("settings.light")}
-                    </Typography>
-                    {theme === "light" && <CheckIcon fontSize="small" />}
-                  </Stack>
-                </ToggleButton>
-                <ToggleButton value="dark">
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <DarkModeIcon fontSize="small" />
-                    <Typography variant="body2">
-                      {t("settings.dark")}
-                    </Typography>
-                    {theme === "dark" && <CheckIcon fontSize="small" />}
-                  </Stack>
-                </ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-
-            {/* Language Setting */}
-            <Box>
-              <Typography
-                variant="subtitle2"
-                sx={{
-                  color: "var(--text-primary)",
-                  fontWeight: 500,
-                  mb: 2,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                }}
-              >
-                <LanguageIcon
-                  sx={{ color: "var(--primary-accent)", fontSize: 18 }}
-                />
-                {t("settings.language")}
-              </Typography>
-              <ToggleButtonGroup
-                value={language}
-                exclusive
-                onChange={(_, value) => {
-                  if (value !== null) {
-                    setLanguage(value);
-                  }
-                }}
-                fullWidth
-                sx={{
-                  "& .MuiToggleButton-root": {
-                    borderColor: "var(--border-color)",
-                    color: "var(--text-secondary)",
-                    "&.Mui-selected": {
-                      bgcolor: "var(--primary-accent)",
-                      color: "white",
-                      "&:hover": {
-                        bgcolor: "var(--primary-accent)",
-                      },
-                    },
-                  },
-                }}
-              >
-                <ToggleButton value="en">
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography variant="h6">🇺🇸</Typography>
-                    <Typography variant="body2">
-                      {t("settings.english")}
-                    </Typography>
-                    {language === "en" && <CheckIcon fontSize="small" />}
-                  </Stack>
-                </ToggleButton>
-                <ToggleButton value="vi">
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography variant="h6">🇻🇳</Typography>
-                    <Typography variant="body2">
-                      {t("settings.vietnamese")}
-                    </Typography>
-                    {language === "vi" && <CheckIcon fontSize="small" />}
-                  </Stack>
-                </ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-
-            {/* Debug Panel Setting */}
-            <Box>
-              <Typography
-                variant="subtitle2"
-                sx={{
-                  color: "var(--text-primary)",
-                  fontWeight: 500,
-                  mb: 2,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                }}
-              >
-                <BugReportIcon
-                  sx={{ color: "var(--primary-accent)", fontSize: 18 }}
-                />
-                Debug
-              </Typography>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={isDebugPanelVisible}
-                    onChange={(e) =>
-                      onDebugPanelVisibilityChange?.(e.target.checked)
-                    }
-                    sx={{
-                      "& .MuiSwitch-switchBase.Mui-checked": {
-                        color: "var(--primary-accent)",
-                      },
-                      "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track":
-                        {
-                          bgcolor: "var(--primary-accent)",
-                        },
+            <div className="px-4 pt-4 pb-3">
+              <div className="flex flex-col gap-6">
+                  {/* Theme Setting */}
+                <div>
+                  <div className="flex items-center gap-1 mb-2 text-text-primary font-semibold text-sm">
+                    <Sun color="var(--primary-accent)" size={16} />
+                    {t("settings.theme")}
+                  </div>
+                  <ToggleGroup.Root
+                    type="single"
+                    value={theme}
+                    onValueChange={(value: string) => {
+                      if (value === "light" || value === "dark") {
+                        setTheme(value);
+                      }
                     }}
-                  />
-                }
-                label={
-                  <Typography
-                    variant="body2"
-                    sx={{ color: "var(--text-primary)" }}
+                    className="grid grid-cols-2 gap-1"
                   >
-                    {isDebugPanelVisible ? "Enabled" : "Disabled"}
-                  </Typography>
-                }
-              />
-            </Box>
-          </Stack>
-        </DialogContent>
+                    <ToggleGroup.Item
+                      value="light"
+                      className={`flex items-center justify-center gap-1 rounded border px-2 py-1 text-sm transition-colors ${
+                        theme === "light"
+                          ? "bg-primary-accent text-white border-primary-accent"
+                          : "bg-primary-bg text-text-secondary border-border-color hover:bg-secondary-bg"
+                      }`}
+                    >
+                      <Sun size={16} />
+                      <span>{t("settings.light")}</span>
+                      {theme === "light" && <Check size={16} />}
+                    </ToggleGroup.Item>
+                    <ToggleGroup.Item
+                      value="dark"
+                      className={`flex items-center justify-center gap-1 rounded border px-2 py-1 text-sm transition-colors ${
+                        theme === "dark"
+                          ? "bg-primary-accent text-white border-primary-accent"
+                          : "bg-primary-bg text-text-secondary border-border-color hover:bg-secondary-bg"
+                      }`}
+                    >
+                      <Moon size={16} />
+                      <span>{t("settings.dark")}</span>
+                      {theme === "dark" && <Check size={16} />}
+                    </ToggleGroup.Item>
+                  </ToggleGroup.Root>
+                </div>
 
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button
-            onClick={handleCloseModal}
-            fullWidth
-            variant="outlined"
-            sx={{
-              bgcolor: "var(--secondary-bg)",
-              color: "var(--text-primary)",
-              borderColor: "var(--border-color)",
-              "&:hover": {
-                bgcolor: "var(--primary-accent)",
-                color: "white",
-                borderColor: "var(--primary-accent)",
-              },
-              textTransform: "none",
-            }}
-          >
-            Close
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </AppBar>
+                {/* Debug Panel Setting */}
+                <div>
+                  <div className="flex items-center gap-1 mb-2 text-text-primary font-semibold text-sm">
+                    <Bug color="var(--primary-accent)" size={16} />
+                    {t("settings.debug")}
+                  </div>
+                  <label className="flex items-center gap-2">
+                    <RadixSwitch.Root
+                      checked={isDebugPanelVisible}
+                      onCheckedChange={(checked: boolean | "indeterminate") =>
+                        onDebugPanelVisibilityChange?.(!!checked)
+                      }
+                      className="relative h-5 w-9 cursor-pointer rounded-full bg-border-color data-[state=checked]:bg-primary-accent transition-colors"
+                    >
+                      <RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow transition-transform translate-x-0.5 data-[state=checked]:translate-x-4" />
+                    </RadixSwitch.Root>
+                    <span className="text-text-primary text-sm">
+                      {isDebugPanelVisible
+                        ? t("settings.debugEnabled")
+                        : t("settings.debugDisabled")}
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-3 pb-2">
+              <Dialog.Close asChild>
+                <button
+                  className="w-full rounded border border-border-color bg-secondary-bg text-text-primary hover:bg-primary-accent hover:text-white hover:border-primary-accent py-2 transition-colors"
+                >
+                  {t("settings.close")}
+                </button>
+              </Dialog.Close>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </header>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useServer } from "@/contexts/ServerContext";
-import { MdCloudOff, MdCloudDone, MdRefresh } from "react-icons/md";
+import { CloudOff, CloudCheck, RefreshCw } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 
 export default function ServerControl() {
@@ -16,7 +16,7 @@ export default function ServerControl() {
     switch (status) {
       case "online":
         return {
-          icon: MdCloudDone,
+          icon: CloudCheck,
           color: "text-green-500 dark:text-green-400",
           bgColor: "bg-green-500/10 dark:bg-green-500/20",
           hoverBg: "hover:bg-green-500/20 dark:hover:bg-green-500/30",
@@ -25,7 +25,7 @@ export default function ServerControl() {
         };
       default:
         return {
-          icon: MdCloudOff,
+          icon: CloudOff,
           color: "text-red-500 dark:text-red-400",
           bgColor: "bg-red-500/10 dark:bg-red-500/20",
           hoverBg: "hover:bg-red-500/20 dark:hover:bg-red-500/30",
@@ -98,7 +98,7 @@ export default function ServerControl() {
           className="p-3 rounded-lg transition-all duration-200 h-12 w-12 flex items-center justify-center bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-500 dark:text-blue-400 disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label="Check server status"
         >
-          <MdRefresh size={20} className={isChecking ? "animate-spin" : ""} />
+          <RefreshCw size={20} className={isChecking ? "animate-spin" : ""} />
         </button>
         {showRefreshTooltip && (
           <div className="absolute right-0 top-full mt-2 px-2 py-1 bg-[var(--primary-bg)] border border-[var(--border-color)] rounded-lg shadow-lg text-xs text-[var(--text-primary)] z-50 whitespace-nowrap transition-all duration-200 opacity-100 translate-y-0">

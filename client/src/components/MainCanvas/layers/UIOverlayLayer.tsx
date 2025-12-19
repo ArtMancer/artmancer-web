@@ -12,7 +12,6 @@ interface UIOverlayLayerProps {
   imageDimensions: { width: number; height: number } | null;
   displayScale: number;
   comparisonSlider: number;
-  isDraggingSeparator: boolean;
   onSeparatorMouseDown: (e: React.MouseEvent) => void;
   onSeparatorTouchStart: (e: React.TouchEvent) => void;
   onSeparatorTouchMove: (e: React.TouchEvent) => void;
@@ -25,7 +24,6 @@ export default function UIOverlayLayer({
   imageDimensions,
   displayScale,
   comparisonSlider,
-  isDraggingSeparator,
   onSeparatorMouseDown,
   onSeparatorTouchStart,
   onSeparatorTouchMove,

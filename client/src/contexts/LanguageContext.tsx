@@ -1,20 +1,10 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
-type Language = "en" | "vi";
+type Language = "en";
 
-interface Translations {
-  [key: string]: string;
-}
-
-interface LanguageContextType {
-  language: Language;
-  setLanguage: (language: Language) => void;
-  t: (key: string) => string;
-}
-
-const translations: Record<Language, Translations> = {
+const translations = {
   en: {
     // Header
     "header.placeholder": "Describe the edits you want to make...",
@@ -37,6 +27,10 @@ const translations: Record<Language, Translations> = {
     "settings.dark": "Dark",
     "settings.english": "English",
     "settings.vietnamese": "Vietnamese",
+    "settings.debug": "Debug mode",
+    "settings.debugEnabled": "Debug mode is enabled",
+    "settings.debugDisabled": "Debug mode is disabled",
+    "settings.close": "Close",
 
     // Sidebar
     "sidebar.imageUpload": "Image Upload",
@@ -95,7 +89,6 @@ const translations: Record<Language, Translations> = {
     "sidebar.autoFillToEdges": "Auto-fill to edges",
     "sidebar.smartMasking": "Smart Masking",
     "sidebar.smartMaskModel": "Model",
-    "sidebar.birefnetNote": "BiRefNet only supports box tool (crops region before detection)",
     "sidebar.birefnetBrushDisabled": "BiRefNet does not support brush tool",
     "sidebar.borderAdjustment": "Border Adjustment",
     "sidebar.shrink": "Shrink",
@@ -186,6 +179,20 @@ const translations: Record<Language, Translations> = {
     "sidebar.2Images": "2 Images",
     "sidebar.3Images": "3 Images",
     "sidebar.4Images": "4 Images",
+    "sidebar.maeRefinement": "MAE Refinement",
+    "sidebar.maeRefinementDescription": "Refine image using MAE (Mean Absolute Error) method",
+
+    // Image Resolution Section
+    "imageResolution.title": "Image Resolution",
+    "imageResolution.helpTooltip": "Reduce input image size to save VRAM. Lower levels run faster but with less detail.",
+    "imageResolution.resize11": "Resize 1:1",
+    "imageResolution.originalImage": "Original Image",
+    "imageResolution.original": "Original",
+    "imageResolution.squareSize": "Square size (px):",
+    "imageResolution.willResizeTo": "Image will be resized to {size}×{size}",
+    "imageResolution.currentlySelected": "Currently selected: {label} ({ratio} original size)",
+    "imageResolution.applyingResolution": "Applying new resolution, please wait...",
+    "imageResolution.largeImageWarning": "Large image ({width}×{height}). May take a lot of time and VRAM.",
 
     // Canvas
     "canvas.clickToChange": "Click to change image",
@@ -210,251 +217,24 @@ const translations: Record<Language, Translations> = {
     "toolbox.zoomOut": "Zoom Out",
     "toolbox.resetZoom": "Reset Zoom",
     "toolbox.help": "Help",
-  },
-  vi: {
-    // Header
-    "header.placeholder": "Mô tả những chỉnh sửa bạn muốn thực hiện...",
-    "header.edit": "Chỉnh sửa!",
-    "header.generating": "Đang tạo...",
-    "header.evaluate": "Đánh giá!",
-    "header.evaluating": "Đang đánh giá...",
-    "header.settings": "Cài đặt",
-    "header.profile": "Hồ sơ",
-    "header.toggleSidebar": "Bật/Tắt thanh bên",
-
-    // Settings
-    "settings.title": "Cài đặt",
-    "settings.theme": "Chủ đề",
-    "settings.language": "Ngôn ngữ",
-    "settings.mode": "Chế độ ứng dụng",
-    "settings.inference": "Suy luận",
-    "settings.evaluation": "Đánh giá",
-    "settings.light": "Sáng",
-    "settings.dark": "Tối",
-    "settings.english": "Tiếng Anh",
-    "settings.vietnamese": "Tiếng Việt",
-
-    // Sidebar
-    "sidebar.imageUpload": "Tải ảnh lên",
-    "sidebar.chooseImage": "Chọn ảnh",
-    "sidebar.removeImage": "Xóa ảnh hiện tại",
-    "sidebar.aiTask": "Nhiệm vụ AI",
-    "sidebar.whiteBalance": "Cân bằng trắng",
-    "sidebar.objectInsert": "Chèn đối tượng",
-    "sidebar.objectRemoval": "Xóa đối tượng",
-    "sidebar.evaluation": "Đánh giá",
-    "sidebar.referenceImage": "Ảnh tham khảo",
-    "sidebar.editReference": "Chỉnh sửa",
-    "sidebar.chooseReference": "Chọn ảnh tham khảo",
-    "sidebar.removeReference": "Xóa",
-    "sidebar.evaluationMode": "Chế độ đánh giá",
-    "sidebar.uploadOriginal": "Tải ảnh gốc",
-    "sidebar.uploadTarget": "Tải ảnh đích",
-    "sidebar.uploadSinglePair": "Tải một cặp ảnh",
-    "sidebar.uploadMultiplePairs": "Tải nhiều cặp ảnh",
-    "sidebar.singleImage": "Đơn",
-    "sidebar.multipleImages": "Nhiều",
-    "sidebar.optional": "Tùy chọn",
-    "sidebar.required": "Bắt buộc",
-    "sidebar.pairsLoaded": "cặp đã tải",
-    "sidebar.imagesLoaded": "ảnh đã tải",
-    "sidebar.loaded": "Đã tải",
-    "sidebar.allowMultipleFolders": "Cho phép tải nhiều thư mục",
-    "sidebar.uploadConditionalImages": "Tải ảnh điều kiện (Tùy chọn)",
-    "sidebar.uploadInputImage": "Tải ảnh đầu vào (Tùy chọn)",
-    "sidebar.evaluateImages": "Đánh giá ảnh",
-    "sidebar.evaluationResults": "Kết quả đánh giá",
-    "sidebar.fileNameMismatch": "Tên file phải khớp nhau cho các cặp",
-    "sidebar.selectMatchingFiles": "Chọn file có tên khớp nhau",
-    "sidebar.selectOriginalFolder": "Chọn thư mục ảnh gốc",
-    "sidebar.selectTargetFolder": "Chọn thư mục ảnh đích",
-    "sidebar.originalImagesFolder": "Thư mục ảnh gốc",
-    "sidebar.targetImagesFolder": "Thư mục ảnh đích",
-    "sidebar.quality": "Chất lượng",
-    "sidebar.standard": "Tiêu chuẩn",
-    "sidebar.high": "Cao",
-    "sidebar.ultra": "Siêu cao",
-    "sidebar.markInsertArea": "Đánh dấu vùng chèn",
-    "sidebar.markRemovalArea": "Đánh dấu vùng xóa",
-    "sidebar.style": "Phong cách",
-    "sidebar.realistic": "Thực tế",
-    "sidebar.artistic": "Nghệ thuật",
-    "sidebar.cartoon": "Hoạt hình",
-    "sidebar.sketch": "Phác thảo",
-    "sidebar.masking": "Tạo mặt nạ",
-    "sidebar.enableMasking": "Bắt đầu tạo mặt nạ",
-    "sidebar.disableMasking": "Thoát khỏi tạo mặt nạ",
-    "sidebar.clearMask": "Xóa mặt nạ",
-    "sidebar.brushSize": "Kích thước cọ",
-    "sidebar.maskSettings": "Cài đặt mặt nạ",
-    "sidebar.autoDetectEdges": "Tự động phát hiện cạnh",
-    "sidebar.autoFillToEdges": "Tự động tô đến cạnh",
-    "sidebar.smartMasking": "Tạo mặt nạ thông minh",
-    "sidebar.smartMaskModel": "Mô hình",
-    "sidebar.birefnetNote": "BiRefNet chỉ hỗ trợ công cụ box (cắt vùng trước khi phát hiện)",
-    "sidebar.birefnetBrushDisabled": "BiRefNet không hỗ trợ công cụ brush",
-    "sidebar.borderAdjustment": "Điều chỉnh viền",
-    "sidebar.shrink": "Thu nhỏ",
-    "sidebar.grow": "Mở rộng",
-    "sidebar.noAdjustment": "Không điều chỉnh",
-    "sidebar.advanced": "Nâng cao",
-    "sidebar.creativity": "Sáng tạo",
-    "sidebar.negativePrompt": "Lời nhắc tiêu cực",
-    "sidebar.negativePromptPlaceholder":
-      "Những gì cần tránh trong quá trình tạo...",
-    "sidebar.guidanceScale": "Thang điểm hướng dẫn",
-    "sidebar.moreCreative": "Sáng tạo hơn",
-    "sidebar.followPromptStrictly": "Tuân thủ lời nhắc nghiêm ngặt",
-    "sidebar.imageSize": "Kích thước ảnh",
-    "sidebar.width": "Chiều rộng",
-    "sidebar.height": "Chiều cao",
-    "sidebar.inferenceSteps": "Số bước suy luận",
-    "sidebar.faster": "Nhanh hơn",
-    "sidebar.higherQuality": "Chất lượng cao hơn",
-    "sidebar.numImages": "Số lượng ảnh",
-    "sidebar.cfgScale": "Thang điểm CFG",
-    "sidebar.cfgDescription":
-      "Bật hướng dẫn không phân loại (cần lời nhắc tiêu cực)",
-    "sidebar.seed": "Seed",
-    "sidebar.seedDescription": "Seed ngẫu nhiên để tái tạo kết quả (mặc định: 42)",
-    "sidebar.whiteBalanceSettings": "Cài đặt cân bằng trắng",
-    "sidebar.autoCorrectionStrength": "Cường độ tự động hiệu chỉnh",
-    "sidebar.whiteBalanceDescription":
-      "AI sẽ tự động điều chỉnh cân bằng trắng của ảnh để hiệu chỉnh màu sắc tự nhiên.",
-    "sidebar.method": "Phương pháp",
-    "sidebar.autoWhiteBalance": "Cân bằng trắng tự động",
-    "sidebar.manualWhiteBalance": "Cân bằng trắng thủ công",
-    "sidebar.aiWhiteBalance": "Cân bằng trắng AI",
-    "sidebar.temperature": "Nhiệt độ màu",
-    "sidebar.tint": "Sắc độ",
-    "sidebar.applyWhiteBalance": "Áp dụng cân bằng trắng",
-    "sidebar.editingComplete": "Hoàn tất chỉnh sửa!",
-    "sidebar.editingCompleteDesc":
-      "Ảnh của bạn đã được xử lý thành công. Sử dụng thanh trượt so sánh để xem các thay đổi, hoặc tải xuống/tải lên ảnh mới.",
-    "sidebar.downloadImage": "Tải xuống ảnh",
-    "sidebar.downloadVisualization": "Tải Visualization",
-    "sidebar.returnToOriginal": "Quay về ảnh gốc",
-    "sidebar.newImage": "Ảnh mới",
-    "sidebar.uploadFirst": "Tải ảnh lên trước để sử dụng tính năng tạo mặt nạ",
-    "sidebar.maskingHelp":
-      "Vẽ lên ảnh để tạo vùng mặt nạ. Vùng màu đỏ sẽ được tạo lại.",
-    "sidebar.enableMaskingHelp":
-      "Bật chế độ tạo mặt nạ để vẽ vùng mặt nạ trực tiếp lên ảnh.",
-    "sidebar.objectInsertion": "chèn đối tượng",
-    "sidebar.objectRemovalText": "xóa đối tượng",
-    "sidebar.insertion": "chèn",
-    "sidebar.removal": "xóa",
-    "sidebar.undo": "Hoàn tác",
-    "sidebar.redo": "Làm lại",
-
-    // New translation keys for sidebar sections
-    "sidebar.maskingTool": "Công cụ tạo mặt nạ",
-    "sidebar.maskTool": "Công cụ Mask",
-    "sidebar.brush": "Cọ",
-    "sidebar.box": "Hộp",
-    "sidebar.eraser": "Tẩy",
-    "sidebar.startMasking": "Bắt đầu tạo mặt nạ",
-    "sidebar.exitMasking": "Thoát khỏi tạo mặt nạ",
-    "sidebar.undoMaskStroke": "Hoàn tác nét vẽ mặt nạ",
-    "sidebar.redoMaskStroke": "Làm lại nét vẽ mặt nạ",
-    "sidebar.uploadFirstObjectInsert":
-      "Tải ảnh lên trước để sử dụng chèn đối tượng",
-    "sidebar.uploadFirstObjectRemove":
-      "Tải ảnh lên trước để sử dụng xóa đối tượng",
-    "sidebar.drawForInsertion":
-      "Vẽ lên ảnh để đánh dấu vùng chèn đối tượng. Vùng màu đỏ sẽ được xử lý.",
-    "sidebar.drawForRemoval":
-      "Vẽ lên ảnh để đánh dấu vùng xóa. Vùng màu đỏ sẽ được xử lý.",
-    "sidebar.enableMaskingInsertion":
-      "Bật chế độ tạo mặt nạ để đánh dấu vùng chèn trực tiếp lên ảnh.",
-    "sidebar.enableMaskingRemoval":
-      "Bật chế độ tạo mặt nạ để đánh dấu vùng xóa trực tiếp lên ảnh.",
-    "sidebar.aiAutoAdjust":
-      "AI sẽ tự động điều chỉnh cân bằng trắng của ảnh để hiệu chỉnh màu sắc tự nhiên.",
-    "sidebar.numberOfImages": "Số lượng ảnh",
-    "sidebar.oneImage": "1 Ảnh",
-    "sidebar.twoImages": "2 Ảnh",
-    "sidebar.threeImages": "3 Ảnh",
-    "sidebar.fourImages": "4 Ảnh",
-    "sidebar.cfgGuidanceDescription":
-      "Bật hướng dẫn không phân loại (cần lời nhắc tiêu cực)",
-
-    "sidebar.1Image": "1 Ảnh",
-    "sidebar.2Images": "2 Ảnh",
-    "sidebar.3Images": "3 Ảnh",
-    "sidebar.4Images": "4 Ảnh",
-
-    // Canvas
-    "canvas.clickToChange": "Nhấp để thay đổi ảnh",
-    "canvas.uploadImage": "Nhấp để tải ảnh lên",
-    "canvas.dragDrop": "hoặc kéo thả vào đây",
-    "canvas.removeImage": "Xóa ảnh",
-
-    // Status Bar
-    "status.dimensions": "Kích thước",
-    "status.scale": "Tỉ lệ",
-    "status.zoom": "Thu phóng",
-    "status.masking": "Tạo mặt nạ",
-    "status.enabled": "Đã bật",
-    "status.disabled": "Đã tắt",
-
-    // Toolbox
-    "toolbox.comparison": "So sánh",
-    "toolbox.download": "Tải xuống",
-    "toolbox.undo": "Hoàn tác",
-    "toolbox.redo": "Làm lại",
-    "toolbox.zoomIn": "Phóng to",
-    "toolbox.zoomOut": "Thu nhỏ",
-    "toolbox.resetZoom": "Đặt lại thu phóng",
-    "toolbox.help": "Trợ giúp",
+    "toolbox.original": "Original",
+    "toolbox.modified": "Modified",
   },
 };
 
-const LanguageContext = createContext<LanguageContextType | undefined>(
-  undefined
-);
+const tFn = (key: string): string => {
+  const dict = translations.en as Record<string, string>;
+  return dict[key] || key;
+};
 
-export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [language, setLanguageState] = useState<Language>("en");
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-    const saved = localStorage.getItem("artmancer-language") as Language;
-    if (saved && (saved === "en" || saved === "vi")) {
-      setLanguageState(saved);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (mounted) {
-      localStorage.setItem("artmancer-language", language);
-    }
-  }, [language, mounted]);
-
-  const setLanguage = (newLanguage: Language) => {
-    setLanguageState(newLanguage);
-  };
-
-  const t = (key: string): string => {
-    return translations[language][key] || key;
-  };
-
-  if (!mounted) {
-    return null;
-  }
-
-  return (
-    <LanguageContext.Provider value={{ language, setLanguage, t }}>
-      {children}
-    </LanguageContext.Provider>
-  );
+export function LanguageProvider({ children }: { children: ReactNode }) {
+  return <>{children}</>;
 }
 
 export function useLanguage() {
-  const context = useContext(LanguageContext);
-  if (context === undefined) {
-    throw new Error("useLanguage must be used within a LanguageProvider");
-  }
-  return context;
+  return {
+    language: "en" as Language,
+    setLanguage: () => undefined,
+    t: tFn,
+  };
 }
