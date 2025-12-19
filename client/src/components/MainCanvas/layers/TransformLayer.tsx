@@ -8,14 +8,12 @@ import { getFixedSizeStyle } from '../utils';
 interface TransformLayerProps {
   imageDimensions: { width: number; height: number } | null;
   displayScale: number;
-  transformScale: number;
   children: React.ReactNode;
 }
 
 export default function TransformLayer({
   imageDimensions,
   displayScale,
-  transformScale,
   children,
 }: TransformLayerProps) {
   const style: React.CSSProperties = {
@@ -23,7 +21,9 @@ export default function TransformLayer({
     position: 'absolute',
     top: 0,
     left: 0,
-    transform: `scale(${transformScale})`,
+    // Zoom is now handled by ViewportLayer (viewportZoom).
+    // Keep this at scale(1) so image and mask canvases stay perfectly in sync.
+    transform: 'scale(1)',
     transformOrigin: 'center center',
     willChange: 'transform',
     transition: 'transform 75ms ease-out',

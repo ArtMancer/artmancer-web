@@ -67,9 +67,9 @@ const ImageContainerLayer = forwardRef<
         ref={ref}
         className={`${
           imageDimensions ? '' : 'w-72 h-72 lg:w-96 lg:h-96'
-        } bg-[var(--primary-accent)] rounded-lg shadow-2xl transition-all duration-200 select-none ring-1 ${
+        } bg-primary-accent rounded-lg shadow-2xl transition-all duration-200 select-none ring-1 ${
           isDragOver 
-            ? 'ring-4 ring-[var(--highlight-accent)] ring-offset-2 bg-[var(--highlight-accent)]/20' 
+            ? 'ring-4 ring-highlight-accent ring-offset-2 bg-highlight-accent/20' 
             : 'ring-white/10'
         }`}
         style={containerStyle}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, use } from "react";
 import Header from "@/components/Header";
 import Sidebar from "@/components/Sidebar";
 import HelpBox from "@/components/HelpBox";
@@ -15,88 +15,104 @@ import {
   useImageTransform,
   useImageGeneration,
 } from "@/hooks";
+import { useNotification } from "@/hooks/Page/useNotification";
+import { useImageQuality } from "@/hooks/Page/useImageQuality";
+import { useReferenceImage } from "@/hooks/Page/useReferenceImage";
+import { useSidebarResize } from "@/hooks/Page/useSidebarResize";
 import type { InputQualityPreset, DebugInfo } from "@/services/api";
-import { apiService } from "@/services/api";
 import DebugPanel from "@/components/DebugPanel";
 import ReferenceImageEditor from "@/components/ReferenceImageEditor";
 
-export default function Home() {
+type PageProps = {
+  params: Promise<Record<string, string>>;
+  searchParams: Promise<Record<string, string>>;
+};
+
+export default function Home({ params, searchParams }: PageProps) {
+  // Next.js 16: unwrap params/searchParams (even if unused) to avoid sync access warnings
+  use(params);
+  use(searchParams);
   // Basic UI state
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(true);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  // Legacy error/success state - kept for backward compatibility with notification system
+  // Notification management hook
+  const {
+    notificationType,
+    notificationMessage,
+    isNotificationVisible,
+    showNotification,
+    hideNotification,
+    clearNotification,
+  } = useNotification();
+
+  // Legacy error/success state - kept for backward compatibility (unused but kept for potential future use)
   const [, setError] = useState<string | null>(null);
   const [, setSuccess] = useState<string | null>(null);
 
-  // Enhanced notification state
-  const [notificationType, setNotificationType] =
-    useState<NotificationType>("success");
-  const [notificationMessage, setNotificationMessage] = useState<string>("");
-  const [isNotificationVisible, setIsNotificationVisible] = useState(false);
-
-  // App Mode state (Inference or Benchmark)
-  const [appMode, setAppMode] = useState<"inference" | "benchmark">(
-    "inference"
-  );
-
   // AI Task state
   const [aiTask, setAiTask] = useState<
-    "white-balance" | "object-insert" | "object-removal" | "evaluation"
+    "white-balance" | "object-insert" | "object-removal"
   >("white-balance");
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  const [referenceMaskR, setReferenceMaskR] = useState<string | null>(null);
   
   // Saved mask states - lưu mask khi generation bắt đầu để không bị mất
   // savedMaskData: mask binary (đen trắng) để gửi API - được lưu nhưng không cần restore
   // savedMaskCanvasState: mask canvas UI (đỏ trong suốt) để restore mask brush sau generation
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [savedMaskData, setSavedMaskData] = useState<string | null>(null);
+   
+  const [, setSavedMaskData] = useState<string | null>(null);
   const [savedMaskCanvasState, setSavedMaskCanvasState] = useState<string | null>(null);
   const [maskVisible, setMaskVisible] = useState(true);
+  
+  // Track previous uploadedImage to prevent mask visibility reset when generating multiple times
+  const prevUploadedImageRef = useRef<string | null>(null);
 
-  // Reference Image Editor state
-  const [isRefEditorOpen, setIsRefEditorOpen] = useState(false);
-  const [pendingRefImage, setPendingRefImage] = useState<string | null>(null);
+  // Reference image management hook
+  const {
+    referenceImage,
+    referenceMaskR,
+    isRefEditorOpen,
+    pendingRefImage,
+    handleReferenceImageUpload,
+    handleRefEditorSubmit,
+    handleRefEditorClose,
+    handleRemoveReferenceImage,
+    handleEditReferenceImage,
+    setReferenceImage,
+    setReferenceMaskR,
+  } = useReferenceImage();
 
   // Advanced options state
   const [negativePrompt, setNegativePrompt] = useState<string>("");
   const [seed, setSeed] = useState<number>(42); // Default seed: 42 (famous default)
+  const [enableMaeRefinement, setEnableMaeRefinement] = useState<boolean>(true); // Default: enabled
   // Task-specific default parameters
+  // All tasks use the same defaults: inferenceSteps=15, guidanceScale=2.0
   const getDefaultParametersForTask = useCallback((task: string) => {
     switch (task) {
       case "object-removal":
         return {
-          guidanceScale: 7.0, // Strict for removal (higher in 1-10 range)
-          inferenceSteps: 20, // Default 20 steps
-          cfgScale: 4.0, // Keep default
+          guidanceScale: 2.0, // Default 2.0 for all tasks
+          inferenceSteps: 15, // Default 15 steps for all tasks
         };
       case "object-insert":
         return {
-          guidanceScale: 4.0, // Balanced for insertion (middle of 1-10 range)
-          inferenceSteps: 20, // Default 20 steps
-          cfgScale: 4.0, // Keep default
+          guidanceScale: 2.0, // Default 2.0 for all tasks
+          inferenceSteps: 15, // Default 15 steps for all tasks
         };
       case "white-balance":
         return {
-          guidanceScale: 1.0, // Not used for white-balance
-          inferenceSteps: 20, // Pix2Pix default
-          cfgScale: 4.0, // Keep default
+          guidanceScale: 2.0, // Default 2.0 for all tasks
+          inferenceSteps: 15, // Default 15 steps for all tasks
         };
       default:
         return {
-          guidanceScale: 1.0,
-          inferenceSteps: 20,
-          cfgScale: 4.0,
+          guidanceScale: 2.0, // Default 2.0 for all tasks
+          inferenceSteps: 15, // Default 15 steps for all tasks
         };
     }
   }, []);
 
-  const [guidanceScale, setGuidanceScale] = useState<number>(1.0);
-  const [inferenceSteps, setInferenceSteps] = useState<number>(10); // Default steps
-  const [cfgScale, setCfgScale] = useState<number>(4.0);
-  const [inputQuality, setInputQuality] =
-    useState<InputQualityPreset>("resized");
-  const [customSquareSize, setCustomSquareSize] = useState<number>(1024);
+  const [guidanceScale, setGuidanceScale] = useState<number>(2.0); // Default 2.0 (used for both guidance_scale and true_cfg_scale)
+  const [inferenceSteps, setInferenceSteps] = useState<number>(15); // Default 15 steps
   const [borderAdjustment, setBorderAdjustment] = useState<number>(0); // Border adjustment for smart masks
 
   const [baseImageData, setBaseImageData] = useState<string | null>(null);
@@ -112,8 +128,6 @@ export default function Home() {
     width: number;
     height: number;
   } | null>(null);
-  const [isApplyingQuality, setIsApplyingQuality] = useState(false);
-  const qualityChangeRequestRef = useRef(0);
 
   // White balance state
 
@@ -122,110 +136,22 @@ export default function Home() {
 
   // Debug panel state
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
-  const [isDebugPanelVisible, setIsDebugPanelVisible] = useState(true); // Always on by default
+  const [isDebugPanelVisible, setIsDebugPanelVisible] = useState(false); // Default: OFF, enable in settings when needed
 
   // Auto-refine prompt state
 
-  // Benchmark mode state
-  const [benchmarkFolder, setBenchmarkFolder] = useState<string>("");
-  const [benchmarkValidation, setBenchmarkValidation] = useState<{
-    success: boolean;
-    message: string;
-    image_count: number;
-    details?: Record<string, number>;
-  } | null>(null);
-  const [benchmarkSampleCount, setBenchmarkSampleCount] = useState<number>(0);
-  const [benchmarkTask, setBenchmarkTask] = useState<
-    "white-balance" | "object-insert" | "object-removal"
-  >("object-removal");
-  const [isRunningBenchmark, setIsRunningBenchmark] = useState<boolean>(false);
-  const [benchmarkProgress, setBenchmarkProgress] = useState<{
-    current: number;
-    total: number;
-    currentImage?: string;
-  } | null>(null);
-  const [benchmarkResults, setBenchmarkResults] = useState<any>(null);
-  const [benchmarkPrompt, setBenchmarkPrompt] = useState<string>("");
-  const [isValidatingBenchmark, setIsValidatingBenchmark] =
-    useState<boolean>(false);
+  // Sidebar resize management hook
+  const {
+    sidebarWidth,
+    isResizing,
+    handleResizeStart,
+    setSidebarWidth,
+  } = useSidebarResize(320);
 
-  // Legacy evaluation state (kept for backward compatibility, will be removed)
-  const [evaluationTask, setEvaluationTask] = useState<
-    "white-balance" | "object-insert" | "object-removal"
-  >("white-balance");
-  const [evaluationMode, setEvaluationMode] = useState<"single" | "multiple">(
-    "single"
-  );
-  const [evaluationSingleOriginal, setEvaluationSingleOriginal] = useState<
-    string | null
-  >(null);
-  const [evaluationSingleTarget, setEvaluationSingleTarget] = useState<
-    string | null
-  >(null);
-  const [evaluationImagePairs, setEvaluationImagePairs] = useState<
-    Array<{
-      original: string | null;
-      target: string | null;
-      filename: string;
-    }>
-  >([]);
-  const [evaluationConditionalImages, setEvaluationConditionalImages] =
-    useState<string[]>([]);
-  const [evaluationReferenceImage, setEvaluationReferenceImage] = useState<
-    string | null
-  >(null);
-  const [evaluationResults, setEvaluationResults] = useState<any[]>([]);
-  const [evaluationResponse, setEvaluationResponse] = useState<any>(null);
-  const [evaluationDisplayLimit, setEvaluationDisplayLimit] =
-    useState<number>(10);
-  const [allowMultipleFolders, setAllowMultipleFolders] =
-    useState<boolean>(false);
-  const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
-  const [evaluationProgress, setEvaluationProgress] = useState<{
-    current: number;
-    total: number;
-    currentPair?: string;
-  } | null>(null);
-
-  // Notification timeout refs
-  const notificationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Resizable panel state - start with default, then load from localStorage
-  const [sidebarWidth, setSidebarWidth] = useState(320);
-  const [isResizing, setIsResizing] = useState(false);
-
-  // Load sidebar width from localStorage after hydration
-  useEffect(() => {
-    const saved = localStorage.getItem("artmancer-sidebar-width");
-    if (saved) {
-      setSidebarWidth(parseInt(saved, 10));
-    }
-  }, []);
-
-  // Notification helpers with auto-hide functionality
-  const clearNotificationTimeout = useCallback(() => {
-    if (notificationTimeoutRef.current) {
-      clearTimeout(notificationTimeoutRef.current);
-      notificationTimeoutRef.current = null;
-    }
-  }, []);
-
-  const handleCloseNotification = useCallback(() => {
-    setIsNotificationVisible(false);
-    clearNotificationTimeout();
-    setSuccess(null);
-    setError(null);
-  }, [clearNotificationTimeout]);
-
+  // Legacy notification wrapper for backward compatibility
+  // Maps old setNotificationWithTimeout to new showNotification
   const setNotificationWithTimeout = useCallback(
     (type: NotificationType, message: string, timeoutMs: number = 5000) => {
-      clearNotificationTimeout();
-
-      // Set new notification
-      setNotificationType(type);
-      setNotificationMessage(message);
-      setIsNotificationVisible(true);
-
       // Legacy state for backward compatibility
       if (type === "success") {
         setSuccess(message);
@@ -235,25 +161,26 @@ export default function Home() {
         setSuccess(null);
       }
 
-      // Auto-hide timer
-      notificationTimeoutRef.current = setTimeout(() => {
-        setIsNotificationVisible(false);
-        if (type === "success") {
-          setSuccess(null);
-        } else {
-          setError(null);
-        }
-      }, timeoutMs);
+      // Use new notification hook
+      showNotification(type, message, timeoutMs);
     },
-    [clearNotificationTimeout]
+    [showNotification]
   );
 
-  const clearAllNotifications = useCallback(() => {
-    clearNotificationTimeout();
+  // Legacy close handler wrapper
+  const handleCloseNotification = useCallback(() => {
+    hideNotification();
     setSuccess(null);
     setError(null);
-    setIsNotificationVisible(false);
-  }, [clearNotificationTimeout]);
+  }, [hideNotification]);
+
+  // Legacy clear all wrapper
+  const clearAllNotifications = useCallback(() => {
+    clearNotification();
+    setSuccess(null);
+    setError(null);
+  }, [clearNotification]);
+
 
   // Listen for server notifications from ServerContext
   useEffect(() => {
@@ -298,20 +225,26 @@ export default function Home() {
     status?: string;
     loadingMessage?: string;
     estimatedTimeRemaining?: number; // in seconds
+    progressPercent?: number; // 0.0-1.0 for loading phase
   } | null>(null);
 
   // Track step timing for ETR calculation
   const stepTimingRef = useRef<{ step: number; timestamp: number }[]>([]);
+  // Track if generation has completed to prevent progress updates after completion
+  const generationCompletedRef = useRef(false);
+  // Track when processing starts to show different messages during initialization
+  const processingStartTimeRef = useRef<number | null>(null);
 
   // API integration
   const {
     generateImage,
-    applyWhiteBalance,
     isGenerating,
     error: generationError,
     clearError,
     cancelGeneration,
   } = useImageGeneration();
+
+  const { transform, imageRef, setTransform } = useImageTransform();
 
   const {
     viewportZoom,
@@ -321,855 +254,14 @@ export default function Home() {
     zoomViewportIn,
     zoomViewportOut,
     resetViewportZoom,
-  } = useViewportControls(imageDimensions, displayScale);
+  } = useViewportControls({
+    imageDimensions,
+    setTransform,
+  });
 
-  const { transform, imageRef } = useImageTransform();
-
-  // Reference image handling for AI tasks
-  const handleReferenceImageUpload = (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    if (event.target.files && event.target.files[0]) {
-      const file = event.target.files[0];
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        if (e.target && typeof e.target.result === "string") {
-          // Open editor instead of setting directly
-          setPendingRefImage(e.target.result);
-          setIsRefEditorOpen(true);
-          setError(null);
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const handleRefEditorSubmit = async (
-    processedImage: string,
-    maskData?: string | null
-  ) => {
-    // Store both reference image and Mask R (for two-source mask workflow)
-    setReferenceImage(processedImage);
-    setReferenceMaskR(maskData || null);
-    setPendingRefImage(null);
-    setIsRefEditorOpen(false);
-  };
-
-  const handleRefEditorClose = () => {
-    setPendingRefImage(null);
-    setIsRefEditorOpen(false);
-  };
-
-  const handleRemoveReferenceImage = () => {
-    setReferenceImage(null);
-    setReferenceMaskR(null);
-  };
-
-  const handleEditReferenceImage = useCallback(() => {
-    if (referenceImage) {
-      // Open editor with current reference image
-      setPendingRefImage(referenceImage);
-      setIsRefEditorOpen(true);
-    }
-  }, [referenceImage]);
-
-  // Evaluation mode handlers
-  const handleEvaluationModeChange = (mode: "single" | "multiple") => {
-    setEvaluationMode(mode);
-    // Clear data when switching modes
-    if (mode === "single") {
-      setEvaluationImagePairs([]);
-    } else {
-      setEvaluationSingleOriginal(null);
-      setEvaluationSingleTarget(null);
-    }
-  };
-
-  const handleEvaluationTaskChange = (
-    task: "white-balance" | "object-insert" | "object-removal"
-  ) => {
-    setEvaluationTask(task);
-    // Clear reference image when switching away from object-insert
-    if (task !== "object-insert") {
-      setEvaluationReferenceImage(null);
-    }
-  };
-
-  const handleEvaluationSingleOriginalUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      setEvaluationSingleOriginal(base64);
-      // Set to canvas for preview
-      if (appMode === "benchmark") {
-        setUploadedImage(base64);
-      }
-    } catch (error) {
-      console.error("Error reading file:", error);
-      setNotificationWithTimeout("error", "Failed to load original image");
-    }
-  };
-
-  const handleEvaluationSingleTargetUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      setEvaluationSingleTarget(base64);
-    } catch (error) {
-      console.error("Error reading file:", error);
-      setNotificationWithTimeout("error", "Failed to load target image");
-    }
-  };
-
-  // Handle folder upload for original images
-  const handleEvaluationOriginalFolderUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    try {
-      // Sort files by numeric name (1.png, 2.png, ...)
-      const sortedFiles = files
-        .filter((file) => {
-          const match = file.name.match(/^(\d+)\.(png|jpg|jpeg|webp)$/i);
-          return match !== null;
-        })
-        .sort((a, b) => {
-          const numA = parseInt(a.name.match(/^(\d+)/)?.[1] || "0");
-          const numB = parseInt(b.name.match(/^(\d+)/)?.[1] || "0");
-          return numA - numB;
-        });
-
-      if (sortedFiles.length === 0) {
-        setNotificationWithTimeout(
-          "error",
-          "No valid image files found. Files should be named as 1.png, 2.png, etc."
-        );
-        return;
-      }
-
-      // Store original images temporarily
-      const originalImages: string[] = [];
-      for (const file of sortedFiles) {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        originalImages.push(base64);
-      }
-
-      // Update pairs with original images
-      const newPairs = originalImages.map((original, index) => {
-        const existingPair = evaluationImagePairs[index];
-        return {
-          original: original,
-          target: existingPair?.target || null, // Use null instead of empty string
-          filename: `${index + 1}`,
-        };
-      });
-
-      // If we have fewer originals than existing pairs, keep existing pairs
-      if (originalImages.length < evaluationImagePairs.length) {
-        const remainingPairs = evaluationImagePairs.slice(
-          originalImages.length
-        );
-        setEvaluationImagePairs([...newPairs, ...remainingPairs]);
-      } else {
-        setEvaluationImagePairs(newPairs);
-      }
-
-      setNotificationWithTimeout(
-        "success",
-        `Loaded ${originalImages.length} original image(s)`
-      );
-    } catch (error) {
-      console.error("Error processing original folder:", error);
-      setNotificationWithTimeout("error", "Failed to process original images");
-    }
-  };
-
-  // Handle folder upload for target images
-  const handleEvaluationTargetFolderUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    try {
-      // Sort files by numeric name (1.png, 2.png, ...)
-      const sortedFiles = files
-        .filter((file) => {
-          const match = file.name.match(/^(\d+)\.(png|jpg|jpeg|webp)$/i);
-          return match !== null;
-        })
-        .sort((a, b) => {
-          const numA = parseInt(a.name.match(/^(\d+)/)?.[1] || "0");
-          const numB = parseInt(b.name.match(/^(\d+)/)?.[1] || "0");
-          return numA - numB;
-        });
-
-      if (sortedFiles.length === 0) {
-        setNotificationWithTimeout(
-          "error",
-          "No valid image files found. Files should be named as 1.png, 2.png, etc."
-        );
-        return;
-      }
-
-      // Store target images temporarily
-      const targetImages: string[] = [];
-      for (const file of sortedFiles) {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        targetImages.push(base64);
-      }
-
-      // Update pairs with target images
-      const newPairs = targetImages.map((target, index) => {
-        const existingPair = evaluationImagePairs[index];
-        return {
-          original: existingPair?.original || null, // Use null instead of empty string
-          target: target,
-          filename: `${index + 1}`,
-        };
-      });
-
-      // If we have fewer targets than existing pairs, keep existing pairs
-      if (targetImages.length < evaluationImagePairs.length) {
-        const remainingPairs = evaluationImagePairs.slice(targetImages.length);
-        setEvaluationImagePairs([...newPairs, ...remainingPairs]);
-      } else {
-        setEvaluationImagePairs(newPairs);
-      }
-
-      setNotificationWithTimeout(
-        "success",
-        `Loaded ${targetImages.length} target image(s)`
-      );
-    } catch (error) {
-      console.error("Error processing target folder:", error);
-      setNotificationWithTimeout("error", "Failed to process target images");
-    }
-  };
-
-  // Legacy function for backward compatibility (kept but deprecated)
-  const handleEvaluationMultipleUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    // Redirect to folder upload
-    handleEvaluationOriginalFolderUpload(event);
-  };
-
-  const handleEvaluationConditionalImagesUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    try {
-      // Sort files by numeric name (1.png, 2.png, ...)
-      const sortedFiles = files
-        .filter((file) => {
-          const match = file.name.match(/^(\d+)\.(png|jpg|jpeg|webp)$/i);
-          return match !== null;
-        })
-        .sort((a, b) => {
-          const numA = parseInt(a.name.match(/^(\d+)/)?.[1] || "0");
-          const numB = parseInt(b.name.match(/^(\d+)/)?.[1] || "0");
-          return numA - numB;
-        });
-
-      if (sortedFiles.length === 0) {
-        setNotificationWithTimeout(
-          "error",
-          "No valid image files found. Files should be named as 1.png, 2.png, etc."
-        );
-        return;
-      }
-
-      const base64Images = await Promise.all(
-        sortedFiles.map(
-          (file) =>
-            new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
-      );
-      setEvaluationConditionalImages(base64Images);
-      setNotificationWithTimeout(
-        "success",
-        `Loaded ${base64Images.length} conditional image(s) from folder`
-      );
-    } catch (error) {
-      console.error("Error reading files:", error);
-      setNotificationWithTimeout("error", "Failed to load conditional images");
-    }
-  };
-
-  const handleEvaluationReferenceImageUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      setEvaluationReferenceImage(base64);
-      setNotificationWithTimeout("success", "Reference image loaded");
-    } catch (error) {
-      console.error("Error reading file:", error);
-      setNotificationWithTimeout("error", "Failed to load reference image");
-    }
-  };
-
-  const handleEvaluate = async (prompt: string) => {
-    // If in benchmark mode, run benchmark instead of evaluation
-    if (appMode === "benchmark") {
-      // Update benchmark prompt state
-      setBenchmarkPrompt(prompt);
-      // Run benchmark with the prompt from header
-      await handleRunBenchmarkWithPrompt(prompt);
-    } else {
-      // Legacy evaluation mode
-      await handleEvaluateImages(prompt);
-    }
-  };
-
-  const handleRunBenchmarkWithPrompt = async (prompt: string) => {
-    console.log("🚀 Running benchmark with prompt:", {
-      hasFile: !!benchmarkFile,
-      file: benchmarkFile?.name,
-      validation: benchmarkValidation,
-      prompt: prompt,
-      task: benchmarkTask,
-    });
-
-    if (!benchmarkFile) {
-      setNotificationWithTimeout(
-        "error",
-        "Please upload a benchmark ZIP file first"
-      );
-      return;
-    }
-
-    if (!benchmarkValidation?.success) {
-      setNotificationWithTimeout(
-        "error",
-        "Please validate the benchmark ZIP file first. Make sure it contains input/, mask/, and groundtruth/ folders."
-      );
-      return;
-    }
-
-    if (!prompt || prompt.trim().length === 0) {
-      setNotificationWithTimeout(
-        "error",
-        "Please enter a benchmark prompt in the header. This prompt will be used for all images."
-      );
-      return;
-    }
-
-    if (benchmarkTask !== "object-removal") {
-      setNotificationWithTimeout(
-        "error",
-        `Task "${benchmarkTask}" is not yet implemented. Only Object Removal is available.`
-      );
-      return;
-    }
-
-    setIsRunningBenchmark(true);
-    setBenchmarkProgress({
-      current: 0,
-      total: benchmarkValidation.image_count,
-    });
-    setBenchmarkResults(null);
-
-    try {
-      const { apiService } = await import("@/services/api");
-      // benchmarkFile can be File (ZIP) or File[] (folder)
-      const result = await apiService.runBenchmark(
-        benchmarkFile as File | File[],
-        {
-          task_type: benchmarkTask,
-          prompt: prompt.trim(), // Use prompt from header for ALL images
-          sample_count: benchmarkSampleCount,
-          num_inference_steps: inferenceSteps,
-          guidance_scale: guidanceScale,
-          // Only send true_cfg_scale if negative prompt is provided
-          true_cfg_scale:
-            negativePrompt.trim().length > 0 ? cfgScale : undefined,
-          negative_prompt: negativePrompt || undefined,
-          input_quality: inputQuality,
-        }
-      );
-
-      setBenchmarkResults(result);
-      setNotificationWithTimeout(
-        "success",
-        `Benchmark completed! Processed ${
-          result.summary?.successful_evaluations || 0
-        } images`
-      );
-    } catch (error: any) {
-      setNotificationWithTimeout("error", `Benchmark failed: ${error.message}`);
-    } finally {
-      setIsRunningBenchmark(false);
-      setBenchmarkProgress(null);
-    }
-  };
-
-  const handleEvaluateImages = async (prompt?: string) => {
-    // Validate based on task type
-    if (evaluationTask === "object-insert" && !evaluationReferenceImage) {
-      setNotificationWithTimeout(
-        "error",
-        "Please upload a reference image for object insertion evaluation"
-      );
-      return;
-    }
-    // White-balance and object-removal don't require reference image
-
-    if (evaluationMode === "single") {
-      if (!evaluationSingleOriginal || !evaluationSingleTarget) {
-        setNotificationWithTimeout(
-          "error",
-          "Please upload both original and target images"
-        );
-        return;
-      }
-    } else {
-      if (evaluationImagePairs.length === 0) {
-        setNotificationWithTimeout(
-          "error",
-          "Please upload at least one image pair"
-        );
-        return;
-      }
-    }
-
-    try {
-      setIsEvaluating(true);
-      setEvaluationProgress(null); // Reset progress
-
-      // Calculate total pairs for progress tracking
-      const totalPairs =
-        evaluationMode === "single"
-          ? 1
-          : evaluationImagePairs.filter((pair) => pair.original && pair.target)
-              .length;
-
-      setEvaluationProgress({ current: 0, total: totalPairs });
-
-      const { apiService } = await import("@/services/api");
-
-      const request: any = {
-        task_type: evaluationTask, // "white-balance" | "object-insert" | "object-removal"
-        conditional_images:
-          evaluationConditionalImages.length > 0
-            ? evaluationConditionalImages
-            : undefined,
-      };
-
-      // Add reference image for object-insert task only
-      if (evaluationTask === "object-insert" && evaluationReferenceImage) {
-        // Extract base64 from data URL if needed
-        const base64Ref = evaluationReferenceImage.startsWith("data:")
-          ? evaluationReferenceImage.split(",")[1]
-          : evaluationReferenceImage;
-        request.reference_image = base64Ref;
-      }
-
-      if (evaluationMode === "single") {
-        request.original_image = evaluationSingleOriginal;
-        request.target_image = evaluationSingleTarget;
-        if (prompt) {
-          request.prompt = prompt;
-        }
-      } else {
-        // Filter out pairs that don't have both original and target images
-        const validPairs = evaluationImagePairs.filter(
-          (pair) => pair.original && pair.target
-        );
-
-        if (validPairs.length === 0) {
-          setNotificationWithTimeout(
-            "error",
-            "Please upload both original and target images for all pairs"
-          );
-          setIsEvaluating(false);
-          return;
-        }
-
-        // For multiple pairs, assign prompt to each pair
-        request.image_pairs = validPairs.map((pair, index) => {
-          const pairData: any = {
-            original_image: pair.original!,
-            target_image: pair.target!,
-            filename: pair.filename,
-          };
-          // If prompt provided, assign to this pair
-          // If prompt contains newlines or is formatted for multiple pairs, split it
-          if (prompt) {
-            const prompts = prompt.split("\n").filter((p) => p.trim());
-            if (prompts.length > index) {
-              pairData.prompt = prompts[index].trim();
-            } else if (prompts.length === 1) {
-              // Single prompt for all pairs
-              pairData.prompt = prompts[0].trim();
-            } else {
-              // Use the prompt as-is for all pairs
-              pairData.prompt = prompt.trim();
-            }
-          }
-          return pairData;
-        });
-      }
-
-      const response = await apiService.evaluateImages(request);
-
-      if (response.success) {
-        setEvaluationResults(response.results);
-        setEvaluationResponse(response);
-        setNotificationWithTimeout(
-          "success",
-          `Evaluation completed: ${response.successful_evaluations}/${response.total_pairs} successful`
-        );
-      } else {
-        setNotificationWithTimeout("error", "Evaluation failed");
-        setEvaluationResponse(null);
-      }
-    } catch (error: any) {
-      console.error("Evaluation error:", error);
-      setNotificationWithTimeout(
-        "error",
-        error.message || "Failed to evaluate images"
-      );
-    } finally {
-      setIsEvaluating(false);
-    }
-  };
-
-  // Export evaluation results as JSON
-  const handleExportEvaluationJSON = () => {
-    if (!evaluationResponse) return;
-
-    const dataStr = JSON.stringify(evaluationResponse, null, 2);
-    const dataBlob = new Blob([dataStr], { type: "application/json" });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `evaluation-results-${
-      new Date().toISOString().split("T")[0]
-    }.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  // Export evaluation results as CSV
-  const handleExportEvaluationCSV = () => {
-    if (!evaluationResults || evaluationResults.length === 0) return;
-
-    const headers = [
-      "Filename",
-      "PSNR (dB)",
-      "SSIM",
-      "LPIPS",
-      "ΔE00",
-      "Time (s)",
-      "Status",
-    ];
-    const rows = evaluationResults.map((result) => {
-      const metrics = result.metrics || {};
-      return [
-        result.filename || "N/A",
-        metrics.psnr?.toFixed(3) || "N/A",
-        metrics.ssim?.toFixed(4) || "N/A",
-        metrics.lpips?.toFixed(4) || "N/A",
-        metrics.de00?.toFixed(3) || "N/A",
-        metrics.evaluation_time?.toFixed(2) || "N/A",
-        result.success ? "Success" : "Failed",
-      ];
-    });
-
-    // Add summary row
-    const avgPsnr =
-      evaluationResults
-        .filter((r) => r.success && r.metrics?.psnr)
-        .reduce((sum, r) => sum + (r.metrics.psnr || 0), 0) /
-        evaluationResults.filter((r) => r.success && r.metrics?.psnr).length ||
-      0;
-    const avgSsim =
-      evaluationResults
-        .filter((r) => r.success && r.metrics?.ssim)
-        .reduce((sum, r) => sum + (r.metrics.ssim || 0), 0) /
-        evaluationResults.filter((r) => r.success && r.metrics?.ssim).length ||
-      0;
-
-    rows.push([]);
-    rows.push(["Summary", "", "", "", "", "", ""]);
-    rows.push([
-      "Average",
-      isNaN(avgPsnr) ? "N/A" : avgPsnr.toFixed(3),
-      isNaN(avgSsim) ? "N/A" : avgSsim.toFixed(4),
-      "",
-      "",
-      evaluationResponse?.total_evaluation_time?.toFixed(2) || "N/A",
-      `${evaluationResponse?.successful_evaluations || 0}/${
-        evaluationResponse?.total_pairs || 0
-      }`,
-    ]);
-
-    const csvContent = [headers, ...rows]
-      .map((row) => row.map((cell) => `"${cell}"`).join(","))
-      .join("\n");
-
-    const dataBlob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `evaluation-results-${
-      new Date().toISOString().split("T")[0]
-    }.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  // Benchmark handlers
-  const [benchmarkFile, setBenchmarkFile] = useState<File | null>(null);
-
-  const handleBenchmarkFolderChange = (path: string) => {
-    setBenchmarkFolder(path);
-  };
-
-  const handleBenchmarkFolderValidate = async (
-    fileOrPath: File | File[] | string
-  ) => {
-    setIsValidatingBenchmark(true);
-    try {
-      // Handle folder upload (File[])
-      if (Array.isArray(fileOrPath)) {
-        const files = fileOrPath;
-        console.log("📁 Validating benchmark folder:", files.length, "files");
-
-        const { apiService } = await import("@/services/api");
-        const validation = await apiService.validateBenchmarkFolder(files);
-
-        console.log("✅ Validation result:", validation);
-
-        setBenchmarkValidation(validation);
-        if (validation.success) {
-          // Store files for later use
-          setBenchmarkFile(files as any); // Store File[] as marker
-          const folderName =
-            files[0]?.webkitRelativePath?.split("/")[0] || "folder";
-          setBenchmarkFolder(folderName);
-          setNotificationWithTimeout("success", validation.message);
-        } else {
-          setNotificationWithTimeout("error", validation.message);
-          setBenchmarkFile(null);
-          setBenchmarkFolder("");
-        }
-        return;
-      }
-
-      // Handle ZIP file upload (File)
-      if (fileOrPath instanceof File) {
-        const file = fileOrPath;
-        // Set file and folder name first
-        setBenchmarkFile(file);
-        setBenchmarkFolder(file.name);
-        // Clear previous validation
-        setBenchmarkValidation(null);
-
-        console.log(
-          "📦 Validating benchmark ZIP file:",
-          file.name,
-          file.size,
-          "bytes"
-        );
-
-        const { apiService } = await import("@/services/api");
-        const validation = await apiService.validateBenchmarkFolder(file);
-
-        console.log("✅ Validation result:", validation);
-
-        setBenchmarkValidation(validation);
-        if (validation.success) {
-          setNotificationWithTimeout("success", validation.message);
-        } else {
-          setNotificationWithTimeout("error", validation.message);
-          // Clear file if validation failed
-          setBenchmarkFile(null);
-          setBenchmarkFolder("");
-        }
-        return;
-      }
-
-      // Legacy support - string path (should not happen with new UI)
-      setNotificationWithTimeout("error", "Please upload a ZIP file or folder");
-      setBenchmarkFile(null);
-      setBenchmarkFolder("");
-      setBenchmarkValidation(null);
-    } catch (error: any) {
-      console.error("❌ Validation error:", error);
-      setNotificationWithTimeout(
-        "error",
-        `Validation failed: ${error.message}`
-      );
-      setBenchmarkValidation({
-        success: false,
-        message: `❌ Validation failed: ${error.message}`,
-        image_count: 0,
-      });
-      setBenchmarkFile(null);
-      setBenchmarkFolder("");
-    } finally {
-      setIsValidatingBenchmark(false);
-    }
-  };
-
-  const handleBenchmarkSampleCountChange = (count: number) => {
-    // Validate and normalize count
-    const totalImages = benchmarkValidation?.image_count || 0;
-
-    let normalizedCount = count;
-
-    // Handle edge cases
-    if (isNaN(normalizedCount) || normalizedCount < 0) {
-      normalizedCount = 0; // Fallback to all images
-      if (count < 0) {
-        setNotificationWithTimeout(
-          "warning",
-          `Invalid sample count (${count}). Using 0 to process all images.`
-        );
-      }
-    } else if (totalImages > 0 && normalizedCount > totalImages) {
-      normalizedCount = totalImages; // Fallback to all available images
-      setNotificationWithTimeout(
-        "warning",
-        `Requested ${count} samples but only ${totalImages} available. Will process all ${totalImages} images.`
-      );
-    }
-
-    setBenchmarkSampleCount(normalizedCount);
-    console.log(
-      `🔢 Sample count changed: ${count} → ${normalizedCount} (total: ${totalImages})`
-    );
-  };
-
-  const handleBenchmarkTaskChange = (
-    task: "white-balance" | "object-insert" | "object-removal"
-  ) => {
-    setBenchmarkTask(task);
-  };
-
-  const handleBenchmarkPromptChange = (prompt: string) => {
-    setBenchmarkPrompt(prompt);
-  };
-
-  const handleRunBenchmark = async () => {
-    if (!benchmarkFile || !benchmarkValidation?.success) {
-      setNotificationWithTimeout(
-        "error",
-        "Please upload and validate a benchmark dataset (ZIP file or folder) first"
-      );
-      return;
-    }
-
-    if (!benchmarkPrompt || benchmarkPrompt.trim().length === 0) {
-      setNotificationWithTimeout(
-        "error",
-        "Please enter a benchmark prompt. This prompt will be used for all images."
-      );
-      return;
-    }
-
-    if (benchmarkTask !== "object-removal") {
-      setNotificationWithTimeout(
-        "error",
-        `Task "${benchmarkTask}" is not yet implemented. Only Object Removal is available.`
-      );
-      return;
-    }
-
-    setIsRunningBenchmark(true);
-    setBenchmarkProgress({
-      current: 0,
-      total: benchmarkValidation.image_count,
-    });
-    setBenchmarkResults(null);
-
-    try {
-      const { apiService } = await import("@/services/api");
-      // benchmarkFile can be File (ZIP) or File[] (folder)
-      const result = await apiService.runBenchmark(
-        benchmarkFile as File | File[],
-        {
-          task_type: benchmarkTask,
-          prompt: benchmarkPrompt.trim(), // Use the entered prompt for ALL images
-          sample_count: benchmarkSampleCount,
-          num_inference_steps: inferenceSteps,
-          guidance_scale: guidanceScale,
-          // Only send true_cfg_scale if negative prompt is provided
-          true_cfg_scale:
-            negativePrompt.trim().length > 0 ? cfgScale : undefined,
-          negative_prompt: negativePrompt || undefined,
-          input_quality: inputQuality,
-        }
-      );
-
-      setBenchmarkResults(result);
-      setNotificationWithTimeout(
-        "success",
-        `Benchmark completed! Processed ${
-          result.summary?.successful_evaluations || 0
-        } images`
-      );
-    } catch (error: any) {
-      setNotificationWithTimeout("error", `Benchmark failed: ${error.message}`);
-    } finally {
-      setIsRunningBenchmark(false);
-      setBenchmarkProgress(null);
-    }
-  };
 
   const handleAiTaskChange = (
-    task: "white-balance" | "object-insert" | "object-removal" | "evaluation"
+    task: "white-balance" | "object-insert" | "object-removal"
   ) => {
     const previousTask = aiTask;
     setAiTask(task);
@@ -1181,14 +273,6 @@ export default function Home() {
       currentReferenceImage: referenceImage ? "exists" : "null",
     });
 
-    // Legacy support: "evaluation" task maps to benchmark mode
-    // Note: "evaluation" is kept in aiTask type for backward compatibility
-    if (task === "evaluation") {
-      setAppMode("benchmark");
-    } else if (appMode === "benchmark") {
-      // Switch back to inference mode if selecting other tasks (not evaluation)
-      setAppMode("inference");
-    }
     // Clear reference image and mask when switching away from object-insert
     if (task !== "object-insert") {
       console.log(
@@ -1208,7 +292,6 @@ export default function Home() {
 
   const {
     isMaskingMode,
-    isMaskDrawing,
     maskBrushSize,
     maskToolType,
     maskCanvasRef,
@@ -1220,10 +303,6 @@ export default function Home() {
     handleMaskMouseDown,
     handleMaskMouseMove,
     handleMaskMouseUp,
-    maskHistoryIndex,
-    maskHistoryLength,
-    undoMask,
-    redoMask,
     hasMaskContent,
     getFinalMask,
     saveMaskCanvasState,
@@ -1233,7 +312,9 @@ export default function Home() {
     smartMaskModelType,
     setSmartMaskModelType,
     isSmartMaskLoading,
+    generateSmartMaskFromBox,
     edgeOverlayCanvasRef,
+    setIsMaskVisible,
   } = useMasking(
     uploadedImage,
     imageDimensions,
@@ -1246,9 +327,13 @@ export default function Home() {
     skipMaskResetRef
   );
 
-  // Reset trạng thái hiển thị mask và batch results khi thay ảnh gốc/ảnh generate mới
+  // Track last uploaded image just for potential future use (no auto mask reset here)
   useEffect(() => {
-    setMaskVisible(true);
+    if (uploadedImage) {
+      prevUploadedImageRef.current = uploadedImage;
+    } else {
+      prevUploadedImageRef.current = null;
+    }
   }, [uploadedImage]);
 
   const {
@@ -1268,61 +353,67 @@ export default function Home() {
 
   const handleToggleMaskVisible = () => {
     setMaskVisible((prev) => !prev);
+    setIsMaskVisible((prev) => !prev);
   };
 
-  const scaleImageDataUrl = (
-    dataUrl: string,
-    targetWidth: number,
-    targetHeight: number,
-    preserveAspectRatio: boolean = false
-  ): Promise<{ dataUrl: string; width: number; height: number }> => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (!ctx) {
-          reject(new Error("Cannot get canvas context"));
-          return;
+  // Smart mask detect from current mask
+  const handleDetectSmartMask = useCallback(async () => {
+    if (!hasMaskContent) {
+      setNotificationWithTimeout("warning", "Please draw a mask first");
+      return;
+    }
+
+    try {
+      // Calculate bbox from current mask canvas
+      const canvas = maskCanvasRef.current;
+      if (!canvas) {
+        setNotificationWithTimeout("error", "Mask canvas not found");
+        return;
+      }
+
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      // Find bounding box of drawn mask
+      let minX = canvas.width;
+      let minY = canvas.height;
+      let maxX = 0;
+      let maxY = 0;
+      let hasPixels = false;
+
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          const alpha = data[idx + 3];
+          if (alpha > 0) {
+            hasPixels = true;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
         }
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = "high";
+      }
 
-        if (preserveAspectRatio) {
-          // Fill canvas with black background
-          ctx.fillStyle = "#000000";
-          ctx.fillRect(0, 0, targetWidth, targetHeight);
+      if (!hasPixels) {
+        setNotificationWithTimeout("warning", "No mask content found");
+        return;
+      }
 
-          // Calculate scale to fit image within target size (preserve aspect ratio)
-          const scale = Math.min(
-            targetWidth / img.width,
-            targetHeight / img.height
-          );
-          const newWidth = img.width * scale;
-          const newHeight = img.height * scale;
+      // Call smart mask generation with calculated bbox
+      const bbox: [number, number, number, number] = [minX, minY, maxX, maxY];
+      await generateSmartMaskFromBox(bbox);
+    } catch (error) {
+      console.error("Error detecting smart mask:", error);
+      setNotificationWithTimeout("error", "Failed to detect smart mask");
+    }
+  }, [hasMaskContent, maskCanvasRef, generateSmartMaskFromBox, setNotificationWithTimeout]);
 
-          // Center the image
-          const x = (targetWidth - newWidth) / 2;
-          const y = (targetHeight - newHeight) / 2;
-
-          ctx.drawImage(img, x, y, newWidth, newHeight);
-        } else {
-          // Force resize (may distort)
-          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-        }
-
-        resolve({
-          dataUrl: canvas.toDataURL("image/png"),
-          width: targetWidth,
-          height: targetHeight,
-        });
-      };
-      img.onerror = (err) => reject(err);
-      img.src = dataUrl;
-    });
-  };
+  // Auto-unhide mask before undo/redo for better UX
+  // Undo/Redo removed per requirement
 
   const setBaseImage = useCallback(
     (dataUrl: string | null, dims?: { width: number; height: number }) => {
@@ -1344,122 +435,33 @@ export default function Home() {
     []
   );
 
-  const applyInputQualityPreset = useCallback(
-    async (
-      quality: InputQualityPreset,
-      options?: {
-        sourceData?: string;
-        sourceDimensions?: { width: number; height: number };
-        silent?: boolean;
-        squareSize?: number; // Custom square size override
-      }
-    ): Promise<boolean> => {
-      // For "original" quality, always use the original upload data (never resized)
-      // For "resized" quality, use current base image or source data
-      const useOriginalUpload =
-        quality === "original" &&
-        originalUploadData &&
-        originalUploadDimensions;
-      const sourceData = useOriginalUpload
-        ? originalUploadData
-        : options?.sourceData ?? baseImageData;
-      const sourceDimensions = useOriginalUpload
-        ? originalUploadDimensions
-        : options?.sourceDimensions ?? baseImageDimensions;
-
-      if (!sourceData || !sourceDimensions) {
-        return false;
-      }
-
-      const requestId = ++qualityChangeRequestRef.current;
-      setIsApplyingQuality(true);
-
-      try {
-        let targetWidth = sourceDimensions.width;
-        let targetHeight = sourceDimensions.height;
-        let resultDataUrl = sourceData;
-
-        // If quality is "resized", resize to 1:1 aspect ratio (square) with padding
-        if (quality === "resized") {
-          // Use custom size if provided, otherwise use state value
-          const squareSize = options?.squareSize ?? customSquareSize;
-
-          targetWidth = squareSize;
-          targetHeight = squareSize;
-
-          const scaled = await scaleImageDataUrl(
-            sourceData,
-            targetWidth,
-            targetHeight,
-            true // preserveAspectRatio = true (pad with black)
-          );
-          resultDataUrl = scaled.dataUrl;
-          targetWidth = scaled.width;
-          targetHeight = scaled.height;
-        }
-        // If quality is "original", use the original upload dimensions (already set above)
-
-        if (qualityChangeRequestRef.current !== requestId) {
-          return false;
-        }
-
-        setUploadedImage(resultDataUrl);
-        setModifiedImage(resultDataUrl);
-        setImageDimensions({ width: targetWidth, height: targetHeight });
-        setOriginalImage(resultDataUrl);
-        setModifiedImageForComparison(null);
-        setComparisonSlider(50);
-        initializeHistory(resultDataUrl);
-        setSavedMaskData(null); // Clear saved mask when applying quality preset
-        setSavedMaskCanvasState(null); // Clear saved mask canvas state
-        resetMaskHistory();
-        clearMask();
-        setLastRequestId(null);
-
-        if (!options?.silent) {
-          console.log("✅ Applied input quality preset:", {
-            quality,
-            mode: quality === "resized" ? "1:1 square" : "original",
-            width: targetWidth,
-            height: targetHeight,
-          });
-        }
-
-        return true;
-      } catch (error) {
-        console.error("Failed to apply input quality:", error);
-        if (!options?.silent) {
-          setNotificationWithTimeout(
-            "error",
-            "Không thể thay đổi chất lượng ảnh. Vui lòng thử lại."
-          );
-        }
-        return false;
-      } finally {
-        if (qualityChangeRequestRef.current === requestId) {
-          setIsApplyingQuality(false);
-        }
-      }
-    },
-    [
-      customSquareSize,
-      baseImageData,
-      baseImageDimensions,
-      originalUploadData,
-      originalUploadDimensions,
-      clearMask,
-      initializeHistory,
-      resetMaskHistory,
-      setImageDimensions,
-      setModifiedImage,
-      setModifiedImageForComparison,
-      setOriginalImage,
-      setComparisonSlider,
-      setLastRequestId,
-      setNotificationWithTimeout,
-      setUploadedImage,
-    ]
-  );
+  // Image quality management hook
+  const {
+    inputQuality,
+    setInputQuality,
+    customSquareSize,
+    setCustomSquareSize,
+    isApplyingQuality,
+    applyInputQualityPreset,
+  } = useImageQuality({
+    baseImageData,
+    baseImageDimensions,
+    originalUploadData,
+    originalUploadDimensions,
+    setUploadedImage,
+    setModifiedImage,
+    setImageDimensions,
+    setOriginalImage,
+    setModifiedImageForComparison,
+    setComparisonSlider,
+    setSavedMaskData,
+    setSavedMaskCanvasState,
+    resetMaskHistory,
+    clearMask,
+    initializeHistory,
+    setLastRequestId,
+    setNotificationWithTimeout,
+  });
 
   // Track if this is a new upload to properly set originalImage
   const isNewUploadRef = useRef(false);
@@ -1472,9 +474,10 @@ export default function Home() {
     // Only update if task actually changed (not on initial mount)
     if (previousTaskRef.current !== aiTask && previousTaskRef.current !== "") {
       const defaults = getDefaultParametersForTask(aiTask);
-      setGuidanceScale(defaults.guidanceScale);
-      setInferenceSteps(defaults.inferenceSteps);
-      setCfgScale(defaults.cfgScale);
+      queueMicrotask(() => {
+        setGuidanceScale(defaults.guidanceScale);
+        setInferenceSteps(defaults.inferenceSteps);
+      });
     }
     previousTaskRef.current = aiTask;
   }, [aiTask, getDefaultParametersForTask]);
@@ -1486,8 +489,10 @@ export default function Home() {
       // Only set originalImage if flag is true (new upload)
       // This is a backup in case handleImageUploadWrapper didn't set it
       if (!originalImage) {
-        setOriginalImage(uploadedImage);
-        initializeHistory(uploadedImage);
+        queueMicrotask(() => {
+          setOriginalImage(uploadedImage);
+          initializeHistory(uploadedImage);
+        });
       }
       isNewUploadRef.current = false; // Reset flag
     }
@@ -1496,16 +501,58 @@ export default function Home() {
     // Don't overwrite originalImage in this case
   }, [uploadedImage, originalImage, imageDimensions, initializeHistory]);
 
-  // Simple download handler
-  const handleDownload = () => {
+  // Download handler - handles both Object URL (blob:) and base64 data URLs
+  const handleDownload = async () => {
     if (!uploadedImage) return;
 
-    const link = document.createElement("a");
-    link.href = uploadedImage;
-    link.download = "artmancer-edited-image.png";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      let blob: Blob;
+      let downloadUrl: string;
+
+      // Check if it's a blob URL (Object URL)
+      if (uploadedImage.startsWith("blob:")) {
+        // Fetch the blob from the Object URL
+        const response = await fetch(uploadedImage);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch image: ${response.statusText}`);
+        }
+        blob = await response.blob();
+        downloadUrl = URL.createObjectURL(blob);
+      } 
+      // Check if it's a base64 data URL
+      else if (uploadedImage.startsWith("data:")) {
+        // Convert base64 to blob
+        const response = await fetch(uploadedImage);
+        blob = await response.blob();
+        downloadUrl = URL.createObjectURL(blob);
+      } 
+      // Fallback: try to use directly (shouldn't happen but just in case)
+      else {
+        downloadUrl = uploadedImage;
+      }
+
+      // Create download link
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = "artmancer-edited-image.png";
+      document.body.appendChild(link);
+      link.click();
+      
+      // Cleanup
+      setTimeout(() => {
+        document.body.removeChild(link);
+        // Only revoke if we created a new Object URL
+        if (downloadUrl.startsWith("blob:") && downloadUrl !== uploadedImage) {
+          URL.revokeObjectURL(downloadUrl);
+        }
+      }, 100);
+    } catch (error) {
+      console.error("❌ [handleDownload] Failed to download image:", error);
+      setNotificationWithTimeout(
+        "error",
+        `Failed to download image: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   };
 
   // Create wrapped image upload handler that initializes history
@@ -1544,6 +591,9 @@ export default function Home() {
         // This ensures the canvas shows the new image right away
         // applyInputQualityPreset will update it again with the processed version
         setUploadedImage(imageData);
+        // For a brand new upload, show mask by default so user can start masking
+        setMaskVisible(true);
+        setIsMaskVisible(true);
         setImageDimensions(dims);
 
         void applyInputQualityPreset(inputQuality, {
@@ -1574,18 +624,8 @@ export default function Home() {
     setOriginalUploadDimensions(null);
     setInputQuality("resized");
     setLastRequestId(null);
-    setIsApplyingQuality(false);
   };
 
-  // Handle remove evaluation pair
-  const handleRemoveEvaluationPair = (index: number) => {
-    setEvaluationImagePairs((prevPairs) => {
-      const newPairs = [...prevPairs];
-      newPairs.splice(index, 1);
-      return newPairs;
-    });
-    setNotificationWithTimeout("success", "Image pair removed");
-  };
 
   // Handle return to original image
   const handleReturnToOriginal = () => {
@@ -1602,6 +642,27 @@ export default function Home() {
       // resetMaskHistory();
       // clearMask();
       setBaseImage(originalImage, imageDimensions ?? undefined);
+      // Reset mask visibility to show (because after generation, mask is hidden)
+      setMaskVisible(true);
+      setIsMaskVisible(true);
+      
+      // CRITICAL: Restore mask canvas state khi quay lại original image
+      // Đảm bảo mask hiển thị đúng (mask của lần generate hiện tại, không phải lần trước)
+      if (savedMaskCanvasState) {
+        console.log("🔄 [handleReturnToOriginal] Restoring mask canvas state", {
+          savedStateLength: savedMaskCanvasState.length,
+        });
+        // Đợi sau khi resizeCanvas hoàn thành (tương tự như sau generation)
+        setTimeout(async () => {
+          const restored = await restoreMaskCanvasState(savedMaskCanvasState);
+          if (restored) {
+            console.log("✅ [handleReturnToOriginal] Mask canvas restored successfully");
+          } else {
+            console.warn("⚠️ [handleReturnToOriginal] Failed to restore mask canvas");
+          }
+        }, 250);
+      }
+      
       setNotificationWithTimeout("success", "Returned to original image");
     }
   };
@@ -1619,9 +680,6 @@ export default function Home() {
     setInferenceSteps(value);
   };
 
-  const handleCfgScaleChange = (value: number) => {
-    setCfgScale(value);
-  };
 
   const handleSeedChange = (value: number) => {
     setSeed(value);
@@ -1642,7 +700,7 @@ export default function Home() {
       }
       await applyInputQualityPreset(quality);
     },
-    [applyInputQualityPreset, baseImageData, inputQuality]
+    [applyInputQualityPreset, baseImageData, inputQuality, setInputQuality]
   );
 
   const handleCustomSquareSizeChange = useCallback(
@@ -1653,74 +711,18 @@ export default function Home() {
         await applyInputQualityPreset("resized", { squareSize: size });
       }
     },
-    [applyInputQualityPreset, baseImageData, inputQuality]
+    [applyInputQualityPreset, baseImageData, inputQuality, setCustomSquareSize]
   );
-
-  // Handle white balance
-  const handleWhiteBalance = async (
-    method: "auto" | "manual" | "ai" = "auto"
-  ) => {
-    try {
-      clearAllNotifications();
-      clearError();
-
-      if (!uploadedImage) {
-        setNotificationWithTimeout(
-          "error",
-          "Please upload an image first to apply white balance."
-        );
-        return;
-      }
-
-      // Convert base64 to File object
-      const response = await fetch(uploadedImage);
-      const blob = await response.blob();
-      const file = new File([blob], "image.jpg", { type: "image/jpeg" });
-
-      // Store the original image before editing
-      setOriginalImage(uploadedImage);
-
-      const result = await applyWhiteBalance(file, method);
-
-      if (result && result.corrected_image) {
-        const imageData = `data:image/png;base64,${result.corrected_image}`;
-        setUploadedImage(imageData);
-        setModifiedImage(imageData);
-        setModifiedImageForComparison(imageData);
-
-        // Add to history
-        addToHistory(imageData);
-
-        const wbImg = new Image();
-        wbImg.onload = () => {
-          setBaseImage(imageData, {
-            width: wbImg.width,
-            height: wbImg.height,
-          });
-        };
-        wbImg.src = imageData;
-
-        setNotificationWithTimeout(
-          "success",
-          `White balance applied successfully using ${method} method!`
-        );
-
-        console.log("White balance successful:", {
-          method: result.method_used,
-          parameters: result.parameters,
-        });
-      }
-    } catch (err) {
-      console.error("White balance failed:", err);
-      setNotificationWithTimeout(
-        "error",
-        "Failed to apply white balance. Please try again."
-      );
-    }
-  };
 
   // Handle image generation
   const handleEdit = async (prompt: string): Promise<void> => {
+    // 🔍 DEBUG: Log when handleEdit is called
+    console.log("🎯 [page.tsx handleEdit] Called", {
+      timestamp: new Date().toISOString(),
+      prompt,
+      stackTrace: new Error().stack?.split('\n').slice(2, 5).join('\n'),
+    });
+
     // Declare intervals outside try block so they can be cleared in catch
     let pipelineInterval: NodeJS.Timeout | null = null;
     let generationInterval: NodeJS.Timeout | null = null;
@@ -1765,8 +767,18 @@ export default function Home() {
         // Lưu mask canvas state (UI mask brush) TRƯỚC khi export
         const canvasState = saveMaskCanvasState();
         if (canvasState) {
-          console.log("💾 [handleEdit] Saving mask canvas state (UI mask brush)");
+          console.log("💾 [handleEdit] Saving mask canvas state (UI mask brush)", {
+            stateLength: canvasState.length,
+            previousStateLength: savedMaskCanvasState?.length || 0,
+          });
+          // CRITICAL: Clear state cũ trước khi set state mới để tránh conflict
+          setSavedMaskCanvasState(null);
+          // Set state mới
           setSavedMaskCanvasState(canvasState);
+        } else {
+          console.warn("⚠️ [handleEdit] No mask canvas state to save");
+          // Clear state nếu không có mask
+          setSavedMaskCanvasState(null);
         }
         
         maskImageData = await getFinalMask();
@@ -1815,6 +827,7 @@ export default function Home() {
         current: 0,
         total: inferenceSteps, // Initial total, will be updated from SSE
         status: "loading_pipeline",
+        progressPercent: undefined,
       });
 
       // Get settings from state
@@ -1822,8 +835,8 @@ export default function Home() {
       const settings = {
         num_inference_steps: inferenceSteps,
         guidance_scale: guidanceScale,
-        // Only send true_cfg_scale if negative prompt is provided
-        true_cfg_scale: negativePrompt.trim().length > 0 ? cfgScale : undefined,
+        // Use same value for true_cfg_scale (Qwen uses this, SD uses guidance_scale)
+        true_cfg_scale: guidanceScale,
         negative_prompt: negativePrompt || undefined,
         generator_seed: seed, // Use seed from state (default: 42)
         input_quality: inputQuality,
@@ -1861,6 +874,9 @@ export default function Home() {
       // Use prompt directly (no temperature/tint conversion)
       const finalPrompt = prompt;
 
+      // Reset generation completed flag at start of new generation
+      generationCompletedRef.current = false;
+
       // Progress callback to update from SSE events
       const progressCallback = (progress: {
         current_step?: number;
@@ -1869,6 +885,12 @@ export default function Home() {
         progress: number;
         loading_message?: string;
       }) => {
+        // Don't update progress if generation has already completed
+        if (generationCompletedRef.current) {
+          console.log("🚫 [Progress Callback] Ignoring update - generation already completed");
+          return;
+        }
+
         console.log("🔄 [Progress Callback] Received update:", {
           status: progress.status,
           current_step: progress.current_step,
@@ -1886,7 +908,7 @@ export default function Home() {
           let status = prev.status;
           if (
             progress.status === "queued" ||
-            progress.status === "initializing_a100" ||
+            progress.status === "initializing_h100" ||
             progress.status === "loading_pipeline"
           ) {
             status = "loading_pipeline";
@@ -1904,6 +926,18 @@ export default function Home() {
           let current = prev.current;
           let estimatedTimeRemaining: number | undefined = undefined;
 
+          // Reset current to 0 when transitioning from loading to processing
+          if (
+            status === "processing" &&
+            prev.status === "loading_pipeline"
+          ) {
+            current = 0;
+            // Clear step timing when starting processing
+            stepTimingRef.current = [];
+            // Track when processing starts
+            processingStartTimeRef.current = Date.now();
+          }
+
           // Reset current to 0 when processing starts (if no step info yet)
           if (
             status === "processing" &&
@@ -1911,9 +945,15 @@ export default function Home() {
               progress.current_step === undefined)
           ) {
             current = 0;
+            // Track when processing starts if not already tracked
+            if (processingStartTimeRef.current === null) {
+              processingStartTimeRef.current = Date.now();
+            }
           }
 
+          // Only use step count when status is "processing"
           if (
+            status === "processing" &&
             progress.current_step !== undefined &&
             progress.current_step !== null &&
             progress.total_steps !== undefined
@@ -1944,10 +984,10 @@ export default function Home() {
                 (remainingSteps * avgTimePerStep) / 1000
               ); // Convert to seconds
             }
-          } else if (progress.progress !== undefined) {
-            // For loading phase, use progress percentage
-            // Map progress (0.0-1.0) to current step based on total
-            current = Math.floor(progress.progress * total);
+          } else if (status === "loading_pipeline") {
+            // For loading phase, keep current at 0 (don't map progress to steps)
+            // Progress bar will use progress.progress (0.0-1.0) directly
+            current = 0;
           }
 
           // Ensure current is always a number (default to 0 if null/undefined)
@@ -1961,6 +1001,7 @@ export default function Home() {
             status,
             loadingMessage: progress.loading_message,
             estimatedTimeRemaining,
+            progressPercent: progress.progress !== undefined ? progress.progress : undefined,
           };
         });
       };
@@ -1973,7 +1014,10 @@ export default function Home() {
         referenceImageForApi,
         referenceMaskRForApi,
         taskType,
-        progressCallback
+        progressCallback,
+        maskToolType === "eraser" ? "brush" : maskToolType, // Convert "eraser" to "brush" for API
+        enableMaeRefinement, // Pass MAE refinement setting
+        isDebugPanelVisible // Pass debug panel visibility as enable_debug flag
       );
 
       // Clear intervals and progress when generation completes
@@ -1985,10 +1029,13 @@ export default function Home() {
         clearInterval(generationInterval);
         generationInterval = null;
       }
+      // Mark generation as completed to prevent any late SSE events from updating progress
+      generationCompletedRef.current = true;
       setGenerationProgress(null);
 
       if (result && result.image) {
-        const imageData = `data:image/png;base64,${result.image}`;
+        // Backend giờ trả về Object URL (blob:...) thay vì base64
+        const imageData = result.image;
 
         // Update image dimensions from the generated image to ensure correct display
         const img = new Image();
@@ -2023,6 +1070,7 @@ export default function Home() {
 
         // Ẩn mask mặc định sau khi có kết quả mới (giữ dữ liệu mask để toggle lại)
         setMaskVisible(false);
+        setIsMaskVisible(false);
 
         // Restore mask canvas state (UI mask brush) sau khi generation hoàn thành
         // Đợi tất cả resizeCanvas hoàn thành (resizeCanvas chạy ở 0ms, 50ms, 200ms)
@@ -2033,10 +1081,14 @@ export default function Home() {
           });
           // Đợi sau khi tất cả resizeCanvas hoàn thành (sau 250ms)
           // Sau đó restore một lần, nếu không được thì xóa savedMaskCanvasState
-          setTimeout(() => {
-            const restored = restoreMaskCanvasState(savedMaskCanvasState);
+          setTimeout(async () => {
+            const currentSavedState = savedMaskCanvasState; // Capture current state
+            const restored = await restoreMaskCanvasState(currentSavedState);
             if (restored) {
               console.log("✅ [handleEdit] Mask canvas restored successfully");
+              // CRITICAL: Clear saved state sau khi restore thành công
+              // Để đảm bảo lần generate tiếp theo sẽ dùng mask mới nhất
+              setSavedMaskCanvasState(null);
               // Reset flag sau khi restore xong
               skipMaskResetRef.current = false;
             } else {
@@ -2098,7 +1150,10 @@ export default function Home() {
         clearInterval(generationInterval);
         generationInterval = null;
       }
+      // Mark generation as completed to prevent any late SSE events from updating progress
+      generationCompletedRef.current = true;
       setGenerationProgress(null);
+      processingStartTimeRef.current = null;
       setNotificationWithTimeout(
         "error",
         "Failed to edit image. Please try again."
@@ -2109,7 +1164,9 @@ export default function Home() {
   // Effect to handle generation errors
   useEffect(() => {
     if (generationError) {
-      setNotificationWithTimeout("error", generationError);
+      queueMicrotask(() =>
+        setNotificationWithTimeout("error", generationError)
+      );
     }
   }, [generationError, setNotificationWithTimeout]);
 
@@ -2121,132 +1178,19 @@ export default function Home() {
   // Cleanup effect to clear notification timeouts
   useEffect(() => {
     return () => {
-      clearNotificationTimeout();
+      clearNotification();
     };
-  }, [clearNotificationTimeout]);
+  }, [clearNotification]);
 
-  // Throttle function for better performance
-  const throttle = useCallback(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    <T extends (...args: any[]) => void>(func: T, delay: number): T => {
-      let timeoutId: NodeJS.Timeout | null = null;
-      let lastExecTime = 0;
-
-      return ((...args: Parameters<T>) => {
-        const currentTime = Date.now();
-
-        if (currentTime - lastExecTime > delay) {
-          func(...args);
-          lastExecTime = currentTime;
-        } else {
-          if (timeoutId) clearTimeout(timeoutId);
-          timeoutId = setTimeout(() => {
-            func(...args);
-            lastExecTime = Date.now();
-          }, delay - (currentTime - lastExecTime));
-        }
-      }) as T;
-    },
-    []
-  );
-
-  // Resize handlers for the sidebar - optimized for performance
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-  }, []);
-
-  const updateSidebarWidth = useCallback((e: MouseEvent) => {
-    const newWidth = window.innerWidth - e.clientX;
-    const minWidth = 280; // Minimum sidebar width
-    const maxWidth = Math.min(600, window.innerWidth * 0.5); // Maximum 50% of screen
-
-    const clampedWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
-    setSidebarWidth(clampedWidth);
-  }, []);
-
-  // Throttled resize function for smoother performance
-  const throttledResize = useMemo(
-    () => throttle(updateSidebarWidth as (e: MouseEvent) => void, 16), // ~60fps
-    [throttle, updateSidebarWidth]
-  );
-
-  const handleResizeMove = useCallback(
-    (e: MouseEvent) => {
-      if (!isResizing) return;
-
-      // Use requestAnimationFrame for smooth resizing
-      requestAnimationFrame(() => {
-        throttledResize(e);
-      });
-    },
-    [isResizing, throttledResize]
-  );
-
-  const handleResizeEnd = useCallback(() => {
-    setIsResizing(false);
-    // Save the width to localStorage with a slight delay
-    setTimeout(() => {
-      if (typeof window !== "undefined") {
-        localStorage.setItem(
-          "artmancer-sidebar-width",
-          sidebarWidth.toString()
-        );
-      }
-    }, 100);
-  }, [sidebarWidth]);
-
-  // Save sidebar width to localStorage when it changes
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("artmancer-sidebar-width", sidebarWidth.toString());
-    }
-  }, [sidebarWidth]);
-
-  // Mouse event listeners for resizing with passive listeners for better performance
-  useEffect(() => {
-    if (isResizing) {
-      const handleMove = (e: MouseEvent | TouchEvent) => {
-        const clientX = "touches" in e ? e.touches[0]?.clientX : e.clientX;
-        if (clientX !== undefined) {
-          handleResizeMove({ clientX } as MouseEvent);
-        }
-      };
-      const handleEnd = () => handleResizeEnd();
-
-      document.addEventListener("mousemove", handleMove as EventListener, {
-        passive: true,
-      });
-      document.addEventListener("mouseup", handleEnd);
-      document.addEventListener("touchmove", handleMove as EventListener, {
-        passive: true,
-      });
-      document.addEventListener("touchend", handleEnd);
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      // Prevent text selection during resize
-      document.body.style.webkitUserSelect = "none";
-
-      return () => {
-        document.removeEventListener("mousemove", handleMove as EventListener);
-        document.removeEventListener("mouseup", handleEnd);
-        document.removeEventListener("touchmove", handleMove as EventListener);
-        document.removeEventListener("touchend", handleEnd);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        document.body.style.webkitUserSelect = "";
-      };
-    }
-  }, [isResizing, handleResizeMove, handleResizeEnd]);
 
   return (
-    <div className="min-h-screen max-h-screen bg-[var(--primary-bg)] text-[var(--text-primary)] flex flex-col dots-pattern-small overflow-hidden">
+    <div className="min-h-screen max-h-screen bg-primary-bg text-text-primary flex flex-col dots-pattern-small overflow-hidden">
       {/* Header */}
       <Header
-        onSummon={appMode === "benchmark" ? handleEvaluate : handleEdit}
+        onSummon={handleEdit}
         isCustomizeOpen={isCustomizeOpen}
         onToggleCustomize={() => setIsCustomizeOpen(!isCustomizeOpen)}
-        isGenerating={isGenerating || isEvaluating}
+        isGenerating={isGenerating}
         aiTask={aiTask}
         isDebugPanelVisible={isDebugPanelVisible}
         onDebugPanelVisibilityChange={setIsDebugPanelVisible}
@@ -2265,88 +1209,112 @@ export default function Home() {
         }}
       >
         {/* Loading Overlay */}
-        {(isGenerating || isEvaluating) && (
+        {isGenerating && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-40">
-            <div className="bg-[var(--secondary-bg)] border border-[var(--primary-accent)] rounded-lg p-6 text-center min-w-[300px]">
-              <div className="animate-spin w-8 h-8 border-4 border-[var(--primary-accent)] border-t-transparent rounded-full mx-auto mb-3"></div>
-              <p className="text-[var(--text-primary)] font-medium">
-                {isGenerating ? "Generating image..." : "Evaluating images..."}
+            <div className="bg-secondary-bg border border-primary-accent rounded-lg p-6 text-center min-w-[300px]">
+              <div className="animate-spin w-8 h-8 border-4 border-primary-accent border-t-transparent rounded-full mx-auto mb-3"></div>
+              <p className="text-text-primary font-medium">
+                Generating image...
               </p>
-              {/* Evaluation Progress */}
-              {isEvaluating && evaluationProgress && (
-                <div className="mt-4">
-                  <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2">
-                    <div
-                      className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-300"
-                      style={{
-                        width: `${
-                          (evaluationProgress.current /
-                            evaluationProgress.total) *
-                          100
-                        }%`,
-                      }}
-                    ></div>
-                  </div>
-                  <p className="text-[var(--text-secondary)] text-sm">
-                    {evaluationProgress.current} / {evaluationProgress.total}{" "}
-                    pairs
-                    {evaluationProgress.currentPair && (
-                      <span className="block text-xs mt-1 opacity-75">
-                        {evaluationProgress.currentPair}
-                      </span>
-                    )}
-                  </p>
-                </div>
-              )}
               {/* Generation Progress */}
-              {isGenerating && generationProgress && (
-                <div className="mt-4">
-                  <div className="w-full bg-[var(--border-color)] rounded-full h-2 mb-2 overflow-hidden">
-                    <div
-                      className="bg-[var(--primary-accent)] h-2 rounded-full transition-all duration-500 ease-out"
-                      style={{
-                        width: `${
-                          ((generationProgress.current ?? 0) /
-                            generationProgress.total) *
-                          100
-                        }%`,
-                      }}
-                    ></div>
-                  </div>
-                  <p className="text-[var(--text-secondary)] text-sm">
-                    {generationProgress.status === "loading_pipeline"
-                      ? generationProgress.loadingMessage || "Loading model..."
-                      : generationProgress.status === "processing"
-                      ? `Processing: ${generationProgress.current ?? 0} / ${
-                          generationProgress.total
-                        } steps`
-                      : `Step ${generationProgress.current ?? 0} / ${
-                          generationProgress.total
-                        }`}
-                    {generationProgress.total > 0 && (
-                      <span className="block text-xs mt-1 opacity-75">
-                        {Math.round(
-                          ((generationProgress.current ?? 0) /
-                            generationProgress.total) *
-                            100
+              {isGenerating &&
+                generationProgress &&
+                !(
+                  generationProgress.status === "processing" &&
+                  generationProgress.total > 0 &&
+                  (generationProgress.current ?? 0) >= generationProgress.total
+                ) && (() => {
+                  // Determine current status message
+                  const statusMessage = generationProgress.status === "loading_pipeline"
+                    ? generationProgress.loadingMessage || "Loading model..."
+                    : generationProgress.status === "processing"
+                    ? (() => {
+                        const current = generationProgress.current ?? 0;
+                        const total = generationProgress.total;
+                        
+                        // If no steps have started yet, show initialization messages
+                        if (current === 0 && processingStartTimeRef.current !== null) {
+                          const elapsedSeconds = Math.floor(
+                            (Date.now() - processingStartTimeRef.current) / 1000
+                          );
+                          
+                          // Show different messages based on elapsed time
+                          if (elapsedSeconds < 3) {
+                            return "Initializing...";
+                          } else if (elapsedSeconds < 6) {
+                            return "Preparing model...";
+                          } else if (elapsedSeconds < 10) {
+                            return "Setting up pipeline...";
+                          } else {
+                            return "Almost ready...";
+                          }
+                        }
+                        
+                        // Once steps start, show normal progress
+                        return `Processing: ${current} / ${total} steps`;
+                      })()
+                    : `Step ${generationProgress.current ?? 0} / ${
+                        generationProgress.total
+                      }`;
+                  
+                  // Check if we should hide progress bar and percentage
+                  const shouldHideProgress = statusMessage === "Almost ready...";
+                  
+                  return (
+                    <div className="mt-4">
+                      {/* Only show progress bar if not "Almost ready..." */}
+                      {!shouldHideProgress && (
+                        <div className="w-full bg-border-color rounded-full h-2 mb-2 overflow-hidden">
+                          <div
+                            className="progress-bar-smooth bg-primary-accent h-2 rounded-full"
+                            style={{
+                              width: `${
+                                generationProgress.status === "loading_pipeline"
+                                  ? // For loading phase, use progressPercent (0.0-1.0) if available
+                                    generationProgress.progressPercent !== undefined
+                                    ? generationProgress.progressPercent * 100
+                                    : 0
+                                  : // For processing phase, use step-based progress
+                                    generationProgress.total > 0
+                                  ? ((generationProgress.current ?? 0) /
+                                      generationProgress.total) *
+                                    100
+                                  : 0
+                              }%`,
+                            }}
+                          ></div>
+                        </div>
+                      )}
+                      <p className="text-text-secondary text-sm">
+                        {statusMessage}
+                      </p>
+                      {/* Only show percentage for processing phase and not "Almost ready..." */}
+                      {!shouldHideProgress &&
+                        generationProgress.status === "processing" &&
+                        generationProgress.total > 0 && (
+                          <span className="block text-xs mt-1 opacity-75">
+                            {Math.round(
+                              ((generationProgress.current ?? 0) /
+                                generationProgress.total) *
+                                100
+                            )}
+                            %
+                            {generationProgress.estimatedTimeRemaining !==
+                              undefined &&
+                              generationProgress.status === "processing" && (
+                                <span className="ml-2">
+                                  • ~{generationProgress.estimatedTimeRemaining}s
+                                  remaining
+                                </span>
+                              )}
+                          </span>
                         )}
-                        %
-                        {generationProgress.estimatedTimeRemaining !==
-                          undefined &&
-                          generationProgress.status === "processing" && (
-                            <span className="ml-2">
-                              • ~{generationProgress.estimatedTimeRemaining}s
-                              remaining
-                            </span>
-                          )}
-                      </span>
-                    )}
-                  </p>
-                </div>
-              )}
+                    </div>
+                  );
+                })()}
               {/* Fallback message when no progress available */}
-              {!evaluationProgress && !generationProgress && (
-                <p className="text-[var(--text-secondary)] text-sm mt-1">
+              {!generationProgress && (
+                <p className="text-text-secondary text-sm mt-1">
                   {isGenerating
                     ? "This may take a few seconds"
                     : "Please wait..."}
@@ -2355,7 +1323,7 @@ export default function Home() {
               {isGenerating && (
                 <button
                   onClick={cancelGeneration}
-                  className="mt-4 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium transition-colors"
+                  className="btn-interactive mt-4 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium transition-colors"
                 >
                   Cancel
                 </button>
@@ -2382,7 +1350,6 @@ export default function Home() {
           transform={transform}
           viewportZoom={viewportZoom}
           isMaskingMode={isMaskingMode}
-          isMaskDrawing={isMaskDrawing}
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
           maskVisible={maskVisible}
@@ -2414,10 +1381,6 @@ export default function Home() {
           onZoomViewportOut={zoomViewportOut}
           onResetViewportZoom={resetViewportZoom}
           onToggleHelp={() => setIsHelpOpen(!isHelpOpen)}
-          evaluationImagePairs={evaluationImagePairs}
-          evaluationDisplayLimit={evaluationDisplayLimit}
-          onEvaluationDisplayLimitChange={setEvaluationDisplayLimit}
-          onRemoveEvaluationPair={handleRemoveEvaluationPair}
         />
 
         {/* Help Box Component */}
@@ -2433,25 +1396,19 @@ export default function Home() {
           isMaskingMode={isMaskingMode}
           maskBrushSize={maskBrushSize}
           maskToolType={maskToolType}
-          maskVisible={maskVisible}
           referenceImage={referenceImage}
           aiTask={aiTask}
-          appMode={appMode}
           inputQuality={inputQuality}
           customSquareSize={customSquareSize}
           isApplyingQuality={isApplyingQuality}
-          onImageUpload={handleImageUploadWrapper}
           onRemoveImage={handleRemoveImage}
           onToggleMaskingMode={toggleMaskingMode}
           onClearMask={clearMask}
           onMaskBrushSizeChange={setMaskBrushSize}
           onMaskToolTypeChange={setMaskToolType}
           onToggleMaskVisible={handleToggleMaskVisible}
-          maskHistoryIndex={maskHistoryIndex}
-          maskHistoryLength={maskHistoryLength}
-          onMaskUndo={undoMask}
-          onMaskRedo={redoMask}
           hasMaskContent={hasMaskContent}
+          isMaskVisible={maskVisible}
           enableSmartMasking={enableSmartMasking}
           isSmartMaskLoading={isSmartMaskLoading}
           onSmartMaskingChange={setEnableSmartMasking}
@@ -2459,6 +1416,7 @@ export default function Home() {
           onSmartMaskModelTypeChange={setSmartMaskModelType}
           borderAdjustment={borderAdjustment}
           onBorderAdjustmentChange={handleBorderAdjustmentChange}
+          onDetectSmartMask={handleDetectSmartMask}
           onReferenceImageUpload={handleReferenceImageUpload}
           onRemoveReferenceImage={handleRemoveReferenceImage}
           onEditReferenceImage={handleEditReferenceImage}
@@ -2468,71 +1426,18 @@ export default function Home() {
           originalImage={originalImage}
           modifiedImage={modifiedImageForComparison}
           onReturnToOriginal={handleReturnToOriginal}
-          lastRequestId={lastRequestId}
           negativePrompt={negativePrompt}
           guidanceScale={guidanceScale}
           inferenceSteps={inferenceSteps}
-          cfgScale={cfgScale}
           onNegativePromptChange={handleNegativePromptChange}
           onGuidanceScaleChange={handleGuidanceScaleChange}
           onInferenceStepsChange={handleInferenceStepsChange}
-          onCfgScaleChange={handleCfgScaleChange}
           seed={seed}
           onSeedChange={handleSeedChange}
-          // Evaluation mode props
-          evaluationMode={evaluationMode}
-          evaluationTask={evaluationTask}
-          evaluationSingleOriginal={evaluationSingleOriginal}
-          evaluationSingleTarget={evaluationSingleTarget}
-          evaluationImagePairs={evaluationImagePairs}
-          evaluationConditionalImages={evaluationConditionalImages}
-          evaluationReferenceImage={evaluationReferenceImage}
-          evaluationDisplayLimit={evaluationDisplayLimit}
-          allowMultipleFolders={allowMultipleFolders}
-          onEvaluationModeChange={handleEvaluationModeChange}
-          onEvaluationTaskChange={handleEvaluationTaskChange}
-          onEvaluationSingleOriginalUpload={
-            handleEvaluationSingleOriginalUpload
-          }
-          onEvaluationSingleTargetUpload={handleEvaluationSingleTargetUpload}
-          onEvaluationMultipleUpload={handleEvaluationMultipleUpload}
-          onEvaluationOriginalFolderUpload={
-            handleEvaluationOriginalFolderUpload
-          }
-          onEvaluationTargetFolderUpload={handleEvaluationTargetFolderUpload}
-          onEvaluationConditionalImagesUpload={
-            handleEvaluationConditionalImagesUpload
-          }
-          onEvaluationReferenceImageUpload={
-            handleEvaluationReferenceImageUpload
-          }
-          onAllowMultipleFoldersChange={setAllowMultipleFolders}
-          onEvaluationDisplayLimitChange={setEvaluationDisplayLimit}
-          evaluationResults={evaluationResults}
-          evaluationResponse={evaluationResponse}
-          onExportEvaluationJSON={handleExportEvaluationJSON}
-          onExportEvaluationCSV={handleExportEvaluationCSV}
+          enableMaeRefinement={enableMaeRefinement}
+          onEnableMaeRefinementChange={setEnableMaeRefinement}
           onInputQualityChange={handleInputQualityChange}
           onCustomSquareSizeChange={handleCustomSquareSizeChange}
-          // Debug panel props
-          isDebugPanelVisible={isDebugPanelVisible}
-          onDebugPanelVisibilityChange={setIsDebugPanelVisible}
-          // Benchmark mode props
-          benchmarkFolder={benchmarkFolder}
-          benchmarkValidation={benchmarkValidation}
-          isValidatingBenchmark={isValidatingBenchmark}
-          benchmarkSampleCount={benchmarkSampleCount}
-          benchmarkTask={benchmarkTask}
-          isRunningBenchmark={isRunningBenchmark}
-          benchmarkProgress={benchmarkProgress}
-          benchmarkResults={benchmarkResults}
-          onBenchmarkFolderChange={handleBenchmarkFolderChange}
-          onBenchmarkFolderValidate={handleBenchmarkFolderValidate}
-          onBenchmarkSampleCountChange={handleBenchmarkSampleCountChange}
-          onBenchmarkTaskChange={handleBenchmarkTaskChange}
-          benchmarkPrompt={benchmarkPrompt}
-          onBenchmarkPromptChange={handleBenchmarkPromptChange}
-          onRunBenchmark={handleRunBenchmark}
         />
       </main>
 
@@ -2556,6 +1461,9 @@ export default function Home() {
           onModelTypeChange={setSmartMaskModelType}
           borderAdjustment={borderAdjustment}
           onBorderAdjustmentChange={handleBorderAdjustmentChange}
+          enableSmartMasking={enableSmartMasking}
+          onSmartMaskingChange={setEnableSmartMasking}
+          onNotification={setNotificationWithTimeout}
         />
       )}
     </div>

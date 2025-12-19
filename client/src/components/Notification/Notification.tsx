@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MdCheckCircle, MdError, MdInfo, MdWarning, MdClose } from 'react-icons/md';
+import { CheckCircle, XCircle, Info, AlertTriangle, X } from 'lucide-react';
 
 export type NotificationType = 'success' | 'error' | 'info' | 'warning';
 
@@ -15,25 +15,25 @@ interface NotificationProps {
 
 const notificationConfig = {
   success: {
-    icon: MdCheckCircle,
+    icon: CheckCircle,
     bgColor: 'bg-emerald-500',
     borderColor: 'border-emerald-600',
     iconColor: 'text-emerald-100',
   },
   error: {
-    icon: MdError,
+    icon: XCircle,
     bgColor: 'bg-red-500',
     borderColor: 'border-red-600',
     iconColor: 'text-red-100',
   },
   warning: {
-    icon: MdWarning,
+    icon: AlertTriangle,
     bgColor: 'bg-amber-500',
     borderColor: 'border-amber-600',
     iconColor: 'text-amber-100',
   },
   info: {
-    icon: MdInfo,
+    icon: Info,
     bgColor: 'bg-blue-500',
     borderColor: 'border-blue-600',
     iconColor: 'text-blue-100',
@@ -81,8 +81,10 @@ export default function Notification({
   // Handle animations
   useEffect(() => {
     if (isVisible) {
-      setIsAnimating(true);
-      setTimeLeft(duration);
+      queueMicrotask(() => {
+        setIsAnimating(true);
+        setTimeLeft(duration);
+      });
     } else {
       const timer = setTimeout(() => setIsAnimating(false), 300);
       return () => clearTimeout(timer);
@@ -92,7 +94,7 @@ export default function Notification({
   // Reset timer when message changes
   useEffect(() => {
     if (isVisible) {
-      setTimeLeft(duration);
+      queueMicrotask(() => setTimeLeft(duration));
     }
   }, [message, duration, isVisible]);
 
@@ -121,17 +123,17 @@ export default function Notification({
           background: `linear-gradient(135deg, ${config.bgColor.replace('bg-', 'rgb(var(--')} / 0.95), ${config.bgColor.replace('bg-', 'rgb(var(--')} / 0.85))`,
         }}
       >
-        {/* Progress bar */}
-        {duration > 0 && (
-          <div
-            className="absolute top-0 left-0 h-1 bg-white/30 transition-all duration-100 ease-linear"
-            style={{ width: `${progressPercentage}%` }}
-          />
-        )}
+          {/* Progress bar */}
+          {duration > 0 && (
+            <div
+              className="progress-bar-smooth absolute top-0 left-0 h-1 bg-white/30"
+              style={{ width: `${progressPercentage}%` }}
+            />
+          )}
 
         <div className="px-4 py-3 flex items-start gap-3">
           {/* Icon */}
-          <Icon className={`${config.iconColor} flex-shrink-0 mt-0.5`} size={20} />
+          <Icon className={`notification-icon-bounce ${config.iconColor} flex-shrink-0 mt-0.5`} size={20} />
 
           {/* Message */}
           <div className="flex-1 min-w-0">
@@ -147,7 +149,7 @@ export default function Notification({
               className="flex-shrink-0 text-white/80 hover:text-white transition-colors p-1 rounded hover:bg-white/10"
               aria-label="Close notification"
             >
-              <MdClose size={18} />
+              <X size={18} />
             </button>
           )}
         </div>

@@ -1,20 +1,40 @@
 """
 Reference-Guided Object Insertion Pipeline
 
-Implements object insertion where reference_mask_R provides both appearance 
-(via reference_image) and shape (via mask boundary), while main_mask_A only 
-defines placement location. Generation occurs ONLY inside the positioned 
+Implements object insertion where reference_mask_R provides both appearance
+(via reference_image) and shape (via mask boundary), while main_mask_A only
+defines placement location. Generation occurs ONLY inside the positioned
 reference_mask_R region, not the full main_mask_A.
+
+Architecture:
+- Two-source mask workflow:
+  - Mask A (main_mask_A): Placement mask (defines WHERE to insert)
+  - Mask R (reference_mask_R): Object shape mask (defines WHAT shape to insert)
+- Multi-region support: Automatically detects and handles multiple disconnected
+  regions in main_mask_A
+- Positioning: Scales and centers reference_mask_R inside each region of main_mask_A
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Tuple, List, Dict, Any, Optional, Callable
+
 import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Lazy import for shadow hint function
+try:
+    from ..services.image_processing import add_shadow_hint_for_inpainting
+    SHADOW_HINT_AVAILABLE = True
+except ImportError:
+    SHADOW_HINT_AVAILABLE = False
+    logger.warning(
+        "⚠️ Shadow hint function not available. "
+        "Shadows will not be enhanced in insertion pipeline."
+    )
 
 # Lazy import scipy for connected component detection
 try:
@@ -22,7 +42,9 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
-    logger.warning("scipy not available, multi-region mask detection will use fallback method")
+    logger.warning(
+        "scipy not available, multi-region mask detection will use fallback method"
+    )
 
 
 def load_and_validate_inputs(
@@ -49,21 +71,27 @@ def load_and_validate_inputs(
     # Validate base_image
     if base_image is None:
         raise ValueError("base_image is required")
-    if base_image.mode != "RGB":
-        base_image = base_image.convert("RGB")
+    base_image = base_image.convert("RGB") if base_image.mode != "RGB" else base_image
     
     # Validate main_mask_A
     if main_mask_A is None:
         raise ValueError("main_mask_A is required")
     if main_mask_A.size != base_image.size:
-        logger.info(f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size}")
-        main_mask_A = main_mask_A.resize(base_image.size, Image.Resampling.LANCZOS)
+        logger.warning(
+            f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size} "
+            f"(mask will be resampled with NEAREST to preserve hard edges)"
+        )
+        # Use NEAREST for binary masks to avoid blurred edges and bbox drift
+        main_mask_A = main_mask_A.resize(base_image.size, Image.Resampling.NEAREST)
     
     # Validate reference_image
     if reference_image is None:
         raise ValueError("reference_image is required")
-    if reference_image.mode != "RGB":
-        reference_image = reference_image.convert("RGB")
+    reference_image = (
+        reference_image.convert("RGB")
+        if reference_image.mode != "RGB"
+        else reference_image
+    )
     
     # Validate reference_mask_R (MUST be provided, no auto-segmentation)
     if reference_mask_R is None:
@@ -72,8 +100,15 @@ def load_and_validate_inputs(
             "Auto-segmentation is not supported. Please provide reference_mask_R."
         )
     if reference_mask_R.size != reference_image.size:
-        logger.info(f"🔄 Resizing reference_mask_R from {reference_mask_R.size} to {reference_image.size}")
-        reference_mask_R = reference_mask_R.resize(reference_image.size, Image.Resampling.LANCZOS)
+        logger.warning(
+            f"🔄 Resizing reference_mask_R from {reference_mask_R.size} "
+            f"to {reference_image.size} "
+            f"(mask will be resampled with NEAREST to preserve hard edges)"
+        )
+        # Use NEAREST for binary masks to avoid introducing gray values on edges
+        reference_mask_R = reference_mask_R.resize(
+            reference_image.size, Image.Resampling.NEAREST
+        )
     
     logger.info(
         f"✅ Validated inputs: base_image={base_image.size}, "
@@ -93,6 +128,9 @@ def calculate_mask_bounding_box(mask: Image.Image) -> Tuple[int, int, int, int]:
     
     Returns:
         Tuple of (x_min, y_min, x_max, y_max) bounding box coordinates
+    
+    Note:
+        Returns full image bounds if no white pixels found (edge case).
     """
     mask_array = np.array(mask.convert("L"))
     white_pixels = np.where(mask_array > 128)
@@ -107,6 +145,47 @@ def calculate_mask_bounding_box(mask: Image.Image) -> Tuple[int, int, int, int]:
     return (x_min, y_min, x_max, y_max)
 
 
+def _flood_fill_connected_components(binary_mask: np.ndarray) -> Tuple[np.ndarray, int]:
+    """
+    Fallback flood fill implementation for connected component detection.
+    
+    Args:
+        binary_mask: Binary mask array (uint8, 0 or 255)
+    
+    Returns:
+        Tuple of (labeled_array, num_features)
+    """
+    labeled_array = np.zeros_like(binary_mask, dtype=np.int32)
+    num_features = 0
+    visited = np.zeros_like(binary_mask, dtype=bool)
+    
+    def flood_fill(y: int, x: int, label: int) -> None:
+        """Simple flood fill to label connected components."""
+        stack = [(y, x)]
+        while stack:
+            cy, cx = stack.pop()
+            if (
+                cy < 0 or cy >= binary_mask.shape[0] or
+                cx < 0 or cx >= binary_mask.shape[1] or
+                visited[cy, cx] or binary_mask[cy, cx] == 0
+            ):
+                continue
+            visited[cy, cx] = True
+            labeled_array[cy, cx] = label
+            stack.append((cy-1, cx))
+            stack.append((cy+1, cx))
+            stack.append((cy, cx-1))
+            stack.append((cy, cx+1))
+    
+    for y in range(binary_mask.shape[0]):
+        for x in range(binary_mask.shape[1]):
+            if binary_mask[y, x] > 0 and not visited[y, x]:
+                num_features += 1
+                flood_fill(y, x, num_features)
+    
+    return labeled_array, num_features
+
+
 def detect_mask_regions(
     mask: Image.Image,
     min_region_size: int = 100,
@@ -119,7 +198,8 @@ def detect_mask_regions(
     
     Args:
         mask: Mask image (white where region is, black elsewhere)
-        min_region_size: Minimum number of pixels for a region to be considered (default: 100)
+        min_region_size: Minimum number of pixels for a region to be considered
+            (default: 100)
     
     Returns:
         List of tuples: [(region_mask, bbox), ...]
@@ -136,32 +216,10 @@ def detect_mask_regions(
         labeled_array, num_features = ndimage.label(binary_mask)  # type: ignore
     else:
         # Fallback: simple flood fill approach (less efficient but works without scipy)
-        logger.warning("Using fallback connected component detection (scipy not available)")
-        labeled_array = np.zeros_like(binary_mask, dtype=np.int32)
-        num_features = 0
-        visited = np.zeros_like(binary_mask, dtype=bool)
-        
-        def flood_fill(y, x, label):
-            """Simple flood fill to label connected components."""
-            stack = [(y, x)]
-            while stack:
-                cy, cx = stack.pop()
-                if (cy < 0 or cy >= binary_mask.shape[0] or 
-                    cx < 0 or cx >= binary_mask.shape[1] or 
-                    visited[cy, cx] or binary_mask[cy, cx] == 0):
-                    continue
-                visited[cy, cx] = True
-                labeled_array[cy, cx] = label
-                stack.append((cy-1, cx))
-                stack.append((cy+1, cx))
-                stack.append((cy, cx-1))
-                stack.append((cy, cx+1))
-        
-        for y in range(binary_mask.shape[0]):
-            for x in range(binary_mask.shape[1]):
-                if binary_mask[y, x] > 0 and not visited[y, x]:
-                    num_features += 1
-                    flood_fill(y, x, num_features)
+        logger.warning(
+            "Using fallback connected component detection (scipy not available)"
+        )
+        labeled_array, num_features = _flood_fill_connected_components(binary_mask)
     
     if num_features == 0:
         logger.warning("No mask regions detected")
@@ -170,7 +228,7 @@ def detect_mask_regions(
     logger.info(f"🔍 Detected {num_features} connected component(s) in mask")
     
     # Extract each region
-    regions = []
+    regions: List[Tuple[Image.Image, Tuple[int, int, int, int]]] = []
     for label_id in range(1, num_features + 1):
         # Create binary mask for this region
         region_binary = (labeled_array == label_id).astype(np.uint8) * 255
@@ -178,7 +236,10 @@ def detect_mask_regions(
         # Check region size
         region_size = np.sum(region_binary > 0)
         if region_size < min_region_size:
-            logger.debug(f"   Skipping region {label_id}: too small ({region_size} pixels < {min_region_size})")
+            logger.debug(
+                f"   Skipping region {label_id}: too small "
+                f"({region_size} pixels < {min_region_size})"
+            )
             continue
         
         # Calculate bounding box
@@ -194,10 +255,108 @@ def detect_mask_regions(
         region_mask = Image.fromarray(region_binary, mode="L")
         
         regions.append((region_mask, bbox))
-        logger.debug(f"   Region {label_id}: bbox={bbox}, size={region_size} pixels")
+        logger.debug(
+            f"   Region {label_id}: bbox={bbox}, size={region_size} pixels"
+        )
     
-    logger.info(f"✅ Found {len(regions)} valid mask region(s) (filtered from {num_features} components)")
+    logger.info(
+        f"✅ Found {len(regions)} valid mask region(s) "
+        f"(filtered from {num_features} components)"
+    )
     return regions
+
+
+def _calculate_scale_and_size(
+    width_A: int,
+    height_A: int,
+    width_R_bbox: int,
+    height_R_bbox: int,
+    original_mask_R_width: int,
+    original_mask_R_height: int
+) -> Tuple[float, int, int]:
+    """
+    Calculate scale factor and new size for positioning reference mask.
+    
+    Args:
+        width_A, height_A: Dimensions of region mask bounding box
+        width_R_bbox, height_R_bbox: Dimensions of reference mask bounding box
+        original_mask_R_width, original_mask_R_height: Original reference mask size
+    
+    Returns:
+        Tuple of (scale, new_width, new_height)
+    
+    Raises:
+        ValueError: If any dimension is zero
+    """
+    # Validate mask areas
+    if width_A == 0 or height_A == 0:
+        raise ValueError("region_mask has zero area - cannot position reference mask")
+    if width_R_bbox == 0 or height_R_bbox == 0:
+        raise ValueError("reference_mask_R has zero area - cannot position")
+    
+    # Calculate scale factor to fit reference_mask_R bounding box inside region_mask bounding box
+    # IMPORTANT: Preserve aspect ratio to avoid distorting the object
+    # Use the smaller scale factor (min) to ensure the mask fits completely within the region
+    # This ensures both width and height are scaled by the SAME factor, preventing distortion
+    scale_x = width_A / width_R_bbox
+    scale_y = height_A / height_R_bbox
+    scale = min(scale_x, scale_y)  # Use same scale for both dimensions to preserve aspect ratio
+    
+    # Calculate new size for the entire reference_mask_R image
+    # Both dimensions use the SAME scale factor to maintain aspect ratio
+    new_width = int(original_mask_R_width * scale)
+    new_height = int(original_mask_R_height * scale)
+    
+    return scale, new_width, new_height
+
+
+def _calculate_paste_position(
+    x_min_A: int,
+    y_min_A: int,
+    width_A: int,
+    height_A: int,
+    x_min_R_resized: int,
+    y_min_R_resized: int,
+    width_R_resized: int,
+    height_R_resized: int,
+    base_width: int,
+    base_height: int,
+    resized_mask_R_width: int,
+    resized_mask_R_height: int
+) -> Tuple[int, int]:
+    """
+    Calculate paste position to center reference mask in region.
+    
+    Args:
+        x_min_A, y_min_A: Top-left corner of region bounding box
+        width_A, height_A: Dimensions of region bounding box
+        x_min_R_resized, y_min_R_resized: Top-left corner of resized reference mask bbox
+            (kept for backward compatibility, not used in calculation)
+        width_R_resized, height_R_resized: Dimensions of resized reference mask bbox
+            (kept for backward compatibility, not used in calculation)
+        base_width, base_height: Base image dimensions
+        resized_mask_R_width, resized_mask_R_height: Resized mask dimensions (full image size)
+    
+    Returns:
+        Tuple of (paste_x, paste_y) clamped to image bounds
+    """
+    # Calculate center position within region_mask bounding box (in base_image coordinates)
+    center_x_A = x_min_A + width_A // 2
+    center_y_A = y_min_A + height_A // 2
+    
+    # Calculate paste position to center the entire resized_mask_R image (not just bbox)
+    # Use center of entire image, not bounding box center, to ensure proper centering
+    # When PIL pastes an image at (paste_x, paste_y), the center will be at:
+    # (paste_x + resized_mask_R_width // 2, paste_y + resized_mask_R_height // 2)
+    # So we need: paste_x + resized_mask_R_width // 2 = center_x_A
+    paste_x = center_x_A - resized_mask_R_width // 2
+    paste_y = center_y_A - resized_mask_R_height // 2
+    
+    # Ensure paste position is within image bounds
+    paste_x = max(0, min(paste_x, base_width - resized_mask_R_width))
+    paste_y = max(0, min(paste_y, base_height - resized_mask_R_height))
+    
+    return paste_x, paste_y
 
 
 def position_reference_mask_in_single_region(
@@ -217,37 +376,27 @@ def position_reference_mask_in_single_region(
     
     Returns:
         Tuple of (positioned_mask_R, transformation_info)
-        - positioned_mask_R: Reference mask resized and positioned for this region (same size as base_image)
+        - positioned_mask_R: Reference mask resized and positioned for this region
+            (same size as base_image)
         - transformation_info: Dict with scale, position, bounding boxes
     """
     # Calculate bounding boxes
     x_min_A, y_min_A, x_max_A, y_max_A = calculate_mask_bounding_box(region_mask)
     x_min_R, y_min_R, x_max_R, y_max_R = calculate_mask_bounding_box(reference_mask_R)
     
-    # Calculate dimensions of bounding boxes
+    # Calculate dimensions
     width_A = x_max_A - x_min_A
     height_A = y_max_A - y_min_A
     width_R_bbox = x_max_R - x_min_R
     height_R_bbox = y_max_R - y_min_R
-    
-    # Validate mask areas
-    if width_A == 0 or height_A == 0:
-        raise ValueError("region_mask has zero area - cannot position reference mask")
-    if width_R_bbox == 0 or height_R_bbox == 0:
-        raise ValueError("reference_mask_R has zero area - cannot position")
-    
-    # Calculate scale factor to fit reference_mask_R bounding box inside region_mask bounding box
-    # Preserve aspect ratio - use the smaller scale factor
-    scale_x = width_A / width_R_bbox
-    scale_y = height_A / height_R_bbox
-    scale = min(scale_x, scale_y)  # Preserve aspect ratio
-    
-    # Calculate new size for the entire reference_mask_R image
-    # Scale is applied to the full image size, not just the bounding box
     original_mask_R_width = reference_mask_R.width
     original_mask_R_height = reference_mask_R.height
-    new_width = int(original_mask_R_width * scale)
-    new_height = int(original_mask_R_height * scale)
+    
+    # Calculate scale and new size
+    scale, new_width, new_height = _calculate_scale_and_size(
+        width_A, height_A, width_R_bbox, height_R_bbox,
+        original_mask_R_width, original_mask_R_height
+    )
     
     # Resize the entire reference_mask_R image (preserving aspect ratio)
     resized_mask_R = reference_mask_R.resize(
@@ -256,21 +405,19 @@ def position_reference_mask_in_single_region(
     )
     
     # Recalculate bounding box of resized mask R
-    x_min_R_resized, y_min_R_resized, x_max_R_resized, y_max_R_resized = calculate_mask_bounding_box(resized_mask_R)
+    x_min_R_resized, y_min_R_resized, x_max_R_resized, y_max_R_resized = (
+        calculate_mask_bounding_box(resized_mask_R)
+    )
     width_R_resized = x_max_R_resized - x_min_R_resized
     height_R_resized = y_max_R_resized - y_min_R_resized
     
-    # Calculate center position within region_mask bounding box (in base_image coordinates)
-    center_x_A = x_min_A + width_A // 2
-    center_y_A = y_min_A + height_A // 2
-    
-    # Calculate center of bounding box in resized mask R (in resized_mask_R coordinates)
-    center_x_R_resized = x_min_R_resized + width_R_resized // 2
-    center_y_R_resized = y_min_R_resized + height_R_resized // 2
-    
-    # Calculate paste position to align centers
-    paste_x = center_x_A - center_x_R_resized
-    paste_y = center_y_A - center_y_R_resized
+    # Calculate paste position
+    paste_x, paste_y = _calculate_paste_position(
+        x_min_A, y_min_A, width_A, height_A,
+        x_min_R_resized, y_min_R_resized, width_R_resized, height_R_resized,
+        base_image.width, base_image.height,
+        new_width, new_height
+    )
     
     # Create positioned_mask_R canvas (same size as base_image)
     positioned_mask_R = Image.new("L", base_image.size, 0)  # Black background
@@ -280,10 +427,6 @@ def position_reference_mask_in_single_region(
         resized_mask_R = resized_mask_R.convert("L")
     
     # Paste resized reference_mask_R at calculated position
-    # Ensure paste position is within image bounds
-    paste_x = max(0, min(paste_x, base_image.width - resized_mask_R.width))
-    paste_y = max(0, min(paste_y, base_image.height - resized_mask_R.height))
-    
     positioned_mask_R.paste(resized_mask_R, (paste_x, paste_y))
     
     # Store transformation info
@@ -308,8 +451,8 @@ def position_reference_mask_in_multiple_regions(
     """
     Position reference_mask_R inside multiple mask regions.
     
-    Detects all connected components in main_mask_A, scales and positions 
-    reference_mask_R into each region independently, then combines all 
+    Detects all connected components in main_mask_A, scales and positions
+    reference_mask_R into each region independently, then combines all
     positioned masks into a single mask.
     
     Args:
@@ -319,12 +462,18 @@ def position_reference_mask_in_multiple_regions(
     
     Returns:
         Tuple of (combined_positioned_mask_R, transformation_infos)
-        - combined_positioned_mask_R: Combined mask with reference_mask_R positioned in all regions
+        - combined_positioned_mask_R: Combined mask with reference_mask_R positioned
+            in all regions
         - transformation_infos: List of transformation info dicts, one for each region
+    
+    Raises:
+        ValueError: If no valid regions detected or positioning fails for all regions
     """
     # Ensure main_mask_A matches base_image size
     if main_mask_A.size != base_image.size:
-        logger.info(f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size}")
+        logger.info(
+            f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size}"
+        )
         main_mask_A = main_mask_A.resize(base_image.size, Image.Resampling.LANCZOS)
     
     # Detect all mask regions
@@ -333,11 +482,13 @@ def position_reference_mask_in_multiple_regions(
     if len(regions) == 0:
         raise ValueError("No valid mask regions detected in main_mask_A")
     
-    logger.info(f"🎯 Processing {len(regions)} mask region(s) for multi-region insertion")
+    logger.info(
+        f"🎯 Processing {len(regions)} mask region(s) for multi-region insertion"
+    )
     
     # Position reference_mask_R in each region
-    positioned_masks = []
-    transformation_infos = []
+    positioned_masks: List[Image.Image] = []
+    transformation_infos: List[Dict[str, Any]] = []
     
     for idx, (region_mask, region_bbox) in enumerate(regions, 1):
         logger.info(f"   Processing region {idx}/{len(regions)}: bbox={region_bbox}")
@@ -363,7 +514,9 @@ def position_reference_mask_in_multiple_regions(
         raise ValueError("Failed to position reference_mask_R in any region")
     
     # Combine all positioned masks using OR operation (union)
-    combined_mask_array = np.zeros((base_image.height, base_image.width), dtype=np.uint8)
+    combined_mask_array = np.zeros(
+        (base_image.height, base_image.width), dtype=np.uint8
+    )
     
     for positioned_mask in positioned_masks:
         mask_array = np.array(positioned_mask.convert("L"))
@@ -408,8 +561,12 @@ def position_reference_mask_in_main_mask(
     """
     # Ensure masks match base_image size
     if main_mask_A.size != base_image.size:
-        logger.info(f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size}")
-        main_mask_A = main_mask_A.resize(base_image.size, Image.Resampling.LANCZOS)
+        logger.warning(
+            f"🔄 Resizing main_mask_A from {main_mask_A.size} to {base_image.size} "
+            f"(multi-region mask; using NEAREST to preserve binary structure)"
+        )
+        # Use NEAREST here as well to avoid distorting region boundaries for bbox detection
+        main_mask_A = main_mask_A.resize(base_image.size, Image.Resampling.NEAREST)
     
     # Detect mask regions
     regions = detect_mask_regions(main_mask_A)
@@ -423,7 +580,9 @@ def position_reference_mask_in_main_mask(
             base_image, region_mask, reference_mask_R
         )
         # Add main_mask_bbox for backward compatibility
-        transformation_info["main_mask_bbox"] = transformation_info.get("region_bbox", (0, 0, base_image.width, base_image.height))
+        transformation_info["main_mask_bbox"] = transformation_info.get(
+            "region_bbox", (0, 0, base_image.width, base_image.height)
+        )
         
         logger.info(
             f"✅ Positioned reference_mask_R (single region): "
@@ -434,18 +593,24 @@ def position_reference_mask_in_main_mask(
         return positioned_mask_R, transformation_info
     else:
         # Multiple regions: use multi-region positioning
-        logger.info(f"🎯 Multiple regions detected ({len(regions)}), using multi-region positioning")
+        logger.info(
+            f"🎯 Multiple regions detected ({len(regions)}), using multi-region positioning"
+        )
         positioned_mask_R, transformation_infos = position_reference_mask_in_multiple_regions(
             base_image, main_mask_A, reference_mask_R
         )
         
         # Create combined transformation info for backward compatibility
-        transformation_info = {
+        transformation_info: Dict[str, Any] = {
             "num_regions": len(transformation_infos),
             "regions": transformation_infos,
             # For backward compatibility, include first region's info at top level
             "scale": transformation_infos[0]["scale"] if transformation_infos else 1.0,
-            "paste_position": transformation_infos[0]["paste_position"] if transformation_infos else (0, 0),
+            "paste_position": (
+                transformation_infos[0]["paste_position"]
+                if transformation_infos
+                else (0, 0)
+            ),
         }
         
         return positioned_mask_R, transformation_info
@@ -471,10 +636,13 @@ def create_masked_background(
     # Ensure positioned_mask_R matches base_image size
     if positioned_mask_R.size != base_image.size:
         logger.warning(
-            f"⚠️ positioned_mask_R size {positioned_mask_R.size} != base_image size {base_image.size}, "
-            "resizing positioned_mask_R"
+            f"⚠️ positioned_mask_R size {positioned_mask_R.size} != base_image size "
+            f"{base_image.size}, resizing positioned_mask_R with NEAREST"
         )
-        positioned_mask_R = positioned_mask_R.resize(base_image.size, Image.Resampling.LANCZOS)
+        # Use NEAREST to keep mask binary and avoid soft edges affecting coverage
+        positioned_mask_R = positioned_mask_R.resize(
+            base_image.size, Image.Resampling.NEAREST
+        )
     
     # Convert to numpy arrays
     base_array = np.array(base_image.convert("RGB"), dtype=np.float32) / 255.0
@@ -517,7 +685,8 @@ def prepare_condition_images(
     
     Args:
         reference_image: Full reference image (for appearance learning)
-        positioned_mask_R: Reference mask positioned inside main_mask_A (for generation boundary)
+        positioned_mask_R: Reference mask positioned inside main_mask_A
+            (for generation boundary)
         masked_bg: Base image with empty regions at positioned_mask_R location
         base_image: Base image (for size reference)
     
@@ -528,7 +697,9 @@ def prepare_condition_images(
     
     # Resize reference_image to match base_image size
     if reference_image.size != target_size:
-        logger.info(f"🔄 Resizing reference_image from {reference_image.size} to {target_size}")
+        logger.info(
+            f"🔄 Resizing reference_image from {reference_image.size} to {target_size}"
+        )
         reference_image = reference_image.resize(target_size, Image.Resampling.LANCZOS)
     
     # Ensure positioned_mask_R is RGB (Qwen expects RGB masks)
@@ -537,14 +708,16 @@ def prepare_condition_images(
     
     # Ensure masked_bg matches size
     if masked_bg.size != target_size:
-        logger.warning(f"⚠️ masked_bg size {masked_bg.size} != target size {target_size}, resizing")
+        logger.warning(
+            f"⚠️ masked_bg size {masked_bg.size} != target size {target_size}, resizing"
+        )
         masked_bg = masked_bg.resize(target_size, Image.Resampling.LANCZOS)
     
     # Prepare condition images in correct order for Qwen
     conditional_images = [
         reference_image,      # [0] Full reference image (appearance)
-        positioned_mask_R,    # [1] Positioned mask (generation boundary)
-        masked_bg,            # [2] Masked background (context with empty regions)
+        positioned_mask_R,     # [1] Positioned mask (generation boundary)
+        masked_bg,             # [2] Masked background (context with empty regions)
     ]
     
     logger.info(
@@ -571,7 +744,8 @@ def composite_final_result(
     Args:
         generated_image: Generated image (contains content only in positioned_mask_R region)
         base_image: Original base/background image
-        positioned_mask_R: Reference mask positioned inside main_mask_A (generation boundary)
+        positioned_mask_R: Reference mask positioned inside main_mask_A
+            (generation boundary)
     
     Returns:
         Final composited image
@@ -579,14 +753,21 @@ def composite_final_result(
     # Ensure all images have same size
     if generated_image.size != base_image.size:
         logger.warning(
-            f"⚠️ Generated image size {generated_image.size} != base_image size {base_image.size}, "
-            "resizing generated image"
+            f"⚠️ Generated image size {generated_image.size} != base_image size "
+            f"{base_image.size}, resizing generated image"
         )
-        generated_image = generated_image.resize(base_image.size, Image.Resampling.LANCZOS)
+        generated_image = generated_image.resize(
+            base_image.size, Image.Resampling.LANCZOS
+        )
     
     if positioned_mask_R.size != base_image.size:
-        logger.info(f"🔄 Resizing positioned_mask_R from {positioned_mask_R.size} to {base_image.size}")
-        positioned_mask_R = positioned_mask_R.resize(base_image.size, Image.Resampling.LANCZOS)
+        logger.info(
+            f"🔄 Resizing positioned_mask_R from {positioned_mask_R.size} "
+            f"to {base_image.size} (using NEAREST to preserve binary mask edges)"
+        )
+        positioned_mask_R = positioned_mask_R.resize(
+            base_image.size, Image.Resampling.NEAREST
+        )
     
     # Convert to numpy arrays
     base_array = np.array(base_image.convert("RGB"), dtype=np.float32) / 255.0
@@ -613,6 +794,81 @@ def composite_final_result(
     )
     
     return composited_image
+
+
+def _build_qwen_params(
+    conditional_images: List[Image.Image],
+    prompt: str,
+    num_inference_steps: int,
+    true_cfg_scale: float,
+    base_image: Image.Image,
+    negative_prompt: Optional[str],
+    generator: Optional[Any],
+    progress_callback: Optional[Callable[[int, int, int], None]]
+) -> Dict[str, Any]:
+    """
+    Build parameters for Qwen pipeline call.
+    
+    Args:
+        conditional_images: List of conditional images
+        prompt: Generation prompt
+        num_inference_steps: Number of inference steps
+        true_cfg_scale: CFG scale for Qwen
+        base_image: Base image (for dimensions)
+        negative_prompt: Optional negative prompt
+        generator: Optional torch generator
+        progress_callback: Optional progress callback
+    
+    Returns:
+        Dictionary of Qwen pipeline parameters
+    
+    Note:
+        - guidance_scale is ineffective for Qwen. Use true_cfg_scale instead.
+        - negative_prompt is required (even empty string) to enable classifier-free guidance.
+    """
+    qwen_params: Dict[str, Any] = {
+        "image": conditional_images,  # [reference_image, positioned_mask_R, masked_bg]
+        "prompt": prompt,
+        "num_inference_steps": num_inference_steps,
+        "true_cfg_scale": true_cfg_scale,
+        "height": base_image.height,
+        "width": base_image.width,
+        # Always provide negative_prompt (even if empty) to enable classifier-free guidance
+        "negative_prompt": negative_prompt if negative_prompt else " ",
+    }
+    
+    if generator is not None:
+        qwen_params["generator"] = generator
+    
+    # Add progress callback if provided
+    if progress_callback is not None:
+        def callback_on_step_end(
+            pipeline_instance: Any,
+            step: int,
+            timestep: int,
+            callback_kwargs: dict
+        ) -> dict:
+            """
+            Callback function for pipeline progress tracking.
+            
+            Args:
+                pipeline_instance: Pipeline instance (unused)
+                step: Current step number
+                timestep: Current timestep (unused)
+                callback_kwargs: Callback kwargs to return
+            
+            Returns:
+                Callback kwargs dict
+            """
+            try:
+                progress_callback(step, timestep, num_inference_steps)
+            except Exception as e:
+                logger.warning(f"Progress callback error: {e}")
+            return callback_kwargs
+        
+        qwen_params["callback_on_step_end"] = callback_on_step_end
+    
+    return qwen_params
 
 
 def execute_insertion_pipeline(
@@ -654,18 +910,25 @@ def execute_insertion_pipeline(
         seed: Random seed (optional)
         generator: Torch generator (optional, created from seed if not provided)
         debug_session: DebugSession instance (optional, for saving debug images)
+        progress_callback: Optional progress callback
     
     Returns:
         Tuple of (final_composited_image, positioned_mask_R)
         - final_composited_image: Final composited image with generated object inserted
         - positioned_mask_R: Reference mask R after being positioned inside main_mask_A
+    
+    Raises:
+        ValueError: If inputs are invalid
+        RuntimeError: If generation fails
     """
     logger.info("🚀 Starting reference-guided insertion pipeline")
     
     try:
         # Step 1: Load and validate inputs
-        base_image, main_mask_A, reference_image, reference_mask_R = load_and_validate_inputs(
-            base_image, main_mask_A, reference_image, reference_mask_R
+        base_image, main_mask_A, reference_image, reference_mask_R = (
+            load_and_validate_inputs(
+                base_image, main_mask_A, reference_image, reference_mask_R
+            )
         )
         
         # Step 2: Position reference_mask_R inside main_mask_A
@@ -681,7 +944,8 @@ def execute_insertion_pipeline(
             for idx, region_info in enumerate(transformation_info["regions"], 1):
                 logger.info(
                     f"   Region {idx}: scale={region_info['scale']:.3f}, "
-                    f"pos={region_info['paste_position']}, bbox={region_info['region_bbox']}"
+                    f"pos={region_info['paste_position']}, "
+                    f"bbox={region_info['region_bbox']}"
                 )
         else:
             logger.info(
@@ -695,9 +959,9 @@ def execute_insertion_pipeline(
             if "num_regions" in transformation_info:
                 num_regions = transformation_info["num_regions"]
                 debug_session.save_image(
-                    positioned_mask_R, 
-                    "positioned_mask_R", 
-                    "05", 
+                    positioned_mask_R,
+                    "positioned_mask_R",
+                    "05",
                     f"Positioned mask R (combined from {num_regions} region(s))"
                 )
                 debug_session.log_lora(
@@ -713,10 +977,14 @@ def execute_insertion_pipeline(
                     )
             else:
                 debug_session.save_image(
-                    positioned_mask_R, 
-                    "positioned_mask_R", 
-                    "05", 
-                    f"Positioned mask R (scale={transformation_info['scale']:.3f}, pos={transformation_info['paste_position']})"
+                    positioned_mask_R,
+                    "positioned_mask_R",
+                    "05",
+                    (
+                        f"Positioned mask R "
+                        f"(scale={transformation_info['scale']:.3f}, "
+                        f"pos={transformation_info['paste_position']})"
+                    )
                 )
                 debug_session.log_lora(
                     f"Mask positioning: scale={transformation_info['scale']:.3f}, "
@@ -729,6 +997,81 @@ def execute_insertion_pipeline(
         # Step 3: Create masked background
         masked_bg = create_masked_background(base_image, positioned_mask_R)
         
+        # Step 3.5: Add shadow hint for realistic shadow generation
+        # This darkens the background around the object and expands the mask
+        # to give the model context for generating realistic cast shadows
+        if SHADOW_HINT_AVAILABLE:
+            try:
+                # Convert to numpy arrays for shadow hint processing
+                base_array = np.array(base_image.convert("RGB"), dtype=np.uint8)
+                mask_array = np.array(positioned_mask_R.convert("L"), dtype=np.uint8)
+                
+                # Apply shadow hint to base_image (full background)
+                # This creates a darkened "hint" on the floor/background
+                base_with_shadow, expanded_mask = add_shadow_hint_for_inpainting(
+                    composite_image=base_array,
+                    object_mask=mask_array,
+                    shadow_offset=(3, 5),    # Small offset for subtle shadow hint
+                    shadow_opacity=0.4,      # Subtle hint (0.3-0.6 recommended)
+                    blur_radius=21,          # Soft natural shadow
+                )
+                
+                # Convert back to PIL
+                base_with_shadow_pil = Image.fromarray(base_with_shadow, mode="RGB")
+                expanded_mask_pil = Image.fromarray(expanded_mask, mode="L")
+                
+                # Update masked_bg: Apply shadow hint to background regions
+                # Keep empty (black) regions at positioned_mask_R, but darken shadow areas
+                # Convert masked_bg to numpy
+                masked_bg_array = np.array(masked_bg.convert("RGB"), dtype=np.float32) / 255.0
+                base_shadow_array = np.array(base_with_shadow_pil.convert("RGB"), dtype=np.float32) / 255.0
+                mask_array_float = np.array(positioned_mask_R.convert("L"), dtype=np.float32) / 255.0
+                mask_stack = np.repeat(mask_array_float[..., None], 3, axis=2)
+                
+                # Combine: use base_with_shadow for background, keep black for mask region
+                masked_bg_with_shadow = base_shadow_array * (1.0 - mask_stack)
+                masked_bg = Image.fromarray(
+                    np.uint8(np.clip(masked_bg_with_shadow * 255, 0, 255)),
+                    mode="RGB"
+                )
+                
+                # Use expanded mask for generation (gives model more context)
+                positioned_mask_R = expanded_mask_pil
+                
+                logger.info(
+                    "✨ Applied shadow hint: darkened background around object, "
+                    f"expanded mask from {mask_array.shape} to {expanded_mask.shape}"
+                )
+                
+                # Save debug images
+                if debug_session is not None:
+                    debug_session.save_image(
+                        base_with_shadow_pil,
+                        "base_with_shadow_hint",
+                        "06a",
+                        "Base image with shadow hint (darkened background)"
+                    )
+                    debug_session.save_image(
+                        expanded_mask_pil,
+                        "expanded_mask_with_shadow",
+                        "06b",
+                        "Expanded mask including shadow region"
+                    )
+                    debug_session.save_image(
+                        masked_bg,
+                        "masked_bg_with_shadow",
+                        "06c",
+                        "Masked background with shadow hint"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Failed to apply shadow hint: {e}. "
+                    "Continuing without shadow enhancement."
+                )
+                # Continue with original masked_bg and positioned_mask_R
+        else:
+            logger.debug("Shadow hint not available, skipping shadow enhancement")
+        
         # Save debug image for masked background
         if debug_session is not None:
             mask_coverage = np.mean(np.array(positioned_mask_R) > 128) * 100
@@ -736,7 +1079,10 @@ def execute_insertion_pipeline(
                 masked_bg,
                 "masked_bg",
                 "06",
-                f"Masked background (empty regions at positioned_mask_R, {mask_coverage:.1f}% coverage)"
+                (
+                    f"Masked background (empty regions at positioned_mask_R, "
+                    f"{mask_coverage:.1f}% coverage)"
+                )
             )
         
         # Step 4: Prepare condition images
@@ -778,7 +1124,8 @@ def execute_insertion_pipeline(
         logger.info(
             f"🎨 Running Qwen generation: "
             f"prompt='{prompt[:50]}...', steps={num_inference_steps}, "
-            f"cfg_scale={true_cfg_scale}, mask_coverage={np.mean(np.array(positioned_mask_R) > 128) * 100:.1f}%"
+            f"cfg_scale={true_cfg_scale}, "
+            f"mask_coverage={np.mean(np.array(positioned_mask_R) > 128) * 100:.1f}%"
         )
         
         # Prepare generator if not provided
@@ -788,37 +1135,11 @@ def execute_insertion_pipeline(
             device = get_device()
             generator = torch.Generator(device=device).manual_seed(seed)
         
-        # Call Qwen pipeline
-        # Qwen expects: image (list of conditionals), prompt
-        # The positioned_mask_R in conditional_images[1] acts as the generation boundary
-        # Qwen will generate only inside the white regions of positioned_mask_R
-        # Note: guidance_scale is ineffective for Qwen. Use true_cfg_scale instead.
-        # negative_prompt is required (even empty string) to enable classifier-free guidance
-        qwen_params = {
-            "image": conditional_images,  # [reference_image, positioned_mask_R, masked_bg]
-            "prompt": prompt,
-            "num_inference_steps": num_inference_steps,
-            "true_cfg_scale": true_cfg_scale,
-            "height": base_image.height,
-            "width": base_image.width,
-            # Always provide negative_prompt (even if empty) to enable classifier-free guidance
-            "negative_prompt": negative_prompt if negative_prompt else " ",
-        }
-        
-        if generator is not None:
-            qwen_params["generator"] = generator
-        
-        # Add progress callback if provided
-        if progress_callback is not None:
-            def callback_on_step_end(pipeline_instance, step: int, timestep: int, callback_kwargs: dict):
-                """Callback function for pipeline progress tracking."""
-                try:
-                    progress_callback(step, timestep, num_inference_steps)
-                except Exception as e:
-                    logger.warning(f"Progress callback error: {e}")
-                return callback_kwargs
-            
-            qwen_params["callback_on_step_end"] = callback_on_step_end
+        # Build Qwen parameters
+        qwen_params = _build_qwen_params(
+            conditional_images, prompt, num_inference_steps, true_cfg_scale,
+            base_image, negative_prompt, generator, progress_callback
+        )
         
         logger.info(
             f"📥 Calling Qwen pipeline with {len(conditional_images)} conditional images: "
@@ -828,16 +1149,29 @@ def execute_insertion_pipeline(
         # Run inference
         result = pipeline(**qwen_params)
         
-        # Extract generated image
+        # Extract generated image (handle different result formats)
         if hasattr(result, "images"):
-            generated_image = result.images[0] if isinstance(result.images, list) else result.images
+            generated_image = (
+                result.images[0]
+                if isinstance(result.images, list)
+                else result.images
+            )
         else:
-            generated_image = result[0] if isinstance(result, (list, tuple)) else result
+            generated_image = (
+                result[0]
+                if isinstance(result, (list, tuple))
+                else result
+            )
         
         # Ensure generated image matches base_image size
         if generated_image.size != base_image.size:
-            logger.info(f"🔄 Resizing generated image from {generated_image.size} to {base_image.size}")
-            generated_image = generated_image.resize(base_image.size, Image.Resampling.LANCZOS)
+            logger.info(
+                f"🔄 Resizing generated image from {generated_image.size} "
+                f"to {base_image.size}"
+            )
+            generated_image = generated_image.resize(
+                base_image.size, Image.Resampling.LANCZOS
+            )
         
         # Save debug image for generated image (before compositing)
         if debug_session is not None:
@@ -857,13 +1191,17 @@ def execute_insertion_pipeline(
             )
         
         # Step 6: Composite final result
-        final_image = composite_final_result(generated_image, base_image, positioned_mask_R)
+        final_image = composite_final_result(
+            generated_image, base_image, positioned_mask_R
+        )
         
         logger.info("✅ Reference-guided insertion pipeline completed successfully")
         
         return final_image, positioned_mask_R
         
     except Exception as e:
-        logger.error(f"❌ Reference-guided insertion pipeline failed: {e}", exc_info=True)
+        logger.error(
+            f"❌ Reference-guided insertion pipeline failed: {e}",
+            exc_info=True
+        )
         raise
-

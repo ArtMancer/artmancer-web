@@ -5,178 +5,145 @@ interface ImageDimensions {
   height: number;
 }
 
+interface UseViewportControlsParams {
+  imageDimensions: ImageDimensions | null;
+  setTransform?: React.Dispatch<React.SetStateAction<{ scale: number }>>;
+}
+
+const MIN_ZOOM = 0.1; // 10%
+const MAX_ZOOM = 10; // 1000%
+const ZOOM_STEP = 0.1; // Button zoom step
+const SCROLL_ZOOM_FACTOR = 0.001; // Scroll sensitivity
+
 export function useViewportControls(
-  imageDimensions?: ImageDimensions | null,
-  displayScale?: number
+  params: UseViewportControlsParams
 ) {
-  // Viewport state (zoom only)
+  const { imageDimensions, setTransform } = params;
+
   const [viewportZoom, setViewportZoom] = useState(1);
-  const [isDragging, setIsDragging] = useState(false);
   
-  // Refs for performance
   const imageContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const viewportZoomRef = useRef(1); // Keep ref in sync with state
+  const transformSetterRef = useRef<typeof setTransform>(setTransform);
 
-  // Calculate optimal initial zoom based on image dimensions
-  const calculateOptimalZoom = useCallback((dimensions: ImageDimensions, scale: number) => {
-    if (!containerRef.current) return 1;
+  useEffect(() => {
+    transformSetterRef.current = setTransform;
+  }, [setTransform]);
 
-    // Get available viewport space (accounting for padding)
-    const containerWidth = containerRef.current.clientWidth - 64; // 2rem padding each side
-    const containerHeight = containerRef.current.clientHeight - 64;
-    
-    // Calculate actual image display size
-    const actualImageWidth = dimensions.width * scale;
-    const actualImageHeight = dimensions.height * scale;
-    
-    // Calculate what zoom would make the image fit nicely in the viewport
-    const zoomToFitWidth = containerWidth / actualImageWidth;
-    const zoomToFitHeight = containerHeight / actualImageHeight;
-    const zoomToFit = Math.min(zoomToFitWidth, zoomToFitHeight);
-    
-    // Smart zoom logic:
-    // - If image is much larger than viewport, zoom out to fit (max 0.8 of fit)
-    // - If image is smaller than viewport, zoom in slightly (max 1.5)
-    // - Keep reasonable bounds
-    if (zoomToFit < 0.7) {
-      // Large image - zoom out to show more
-      return Math.max(zoomToFit * 0.8, 0.3);
-    } else if (zoomToFit > 1.5) {
-      // Small image - zoom in to make it more visible
-      return Math.min(zoomToFit * 0.7, 1.5);
-    } else {
-      // Good size - minor adjustment
-      return Math.max(0.8, Math.min(zoomToFit, 1.2));
-    }
+  const clampZoom = useCallback((zoom: number) => {
+    return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
   }, []);
 
-  // Auto-adjust zoom when image changes
+  // Sync viewportZoom to external transform scale (TransformLayer)
   useEffect(() => {
-    if (imageDimensions && displayScale) {
-      // Small delay to ensure container ref is ready
-      const timer = setTimeout(() => {
-        if (containerRef.current) {
-          const optimalZoom = calculateOptimalZoom(imageDimensions, displayScale);
-          setViewportZoom(optimalZoom);
-        }
-      }, 100);
-      
-      return () => clearTimeout(timer);
+    if (transformSetterRef.current) {
+      transformSetterRef.current(() => ({ scale: viewportZoom }));
     }
-  }, [imageDimensions, displayScale, calculateOptimalZoom]);
-
-  // RAF ref for throttling zoom updates (batch updates to 60fps)
-  const rafIdRef = useRef<number | null>(null);
-
-  // Keep ref in sync with state
-  useEffect(() => {
-    viewportZoomRef.current = viewportZoom;
   }, [viewportZoom]);
 
-  // Zoom functionality - zooms the viewport with RAF throttling
-  // Use native event listener to allow preventDefault
-  const handleWheelNative = useCallback((e: WheelEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    // Use 5% increments instead of multiplicative factors
-    const zoomIncrement = 0.05; // 5% increment
-    
-    // Calculate new zoom value from ref (always up-to-date)
-    let newZoom;
-    if (e.deltaY > 0) {
-      // Zoom out
-      newZoom = viewportZoomRef.current - zoomIncrement;
-    } else {
-      // Zoom in
-      newZoom = viewportZoomRef.current + zoomIncrement;
-    }
-    
-    // Clamp to bounds and round to nearest 5%
-    newZoom = Math.max(0.05, Math.min(3, newZoom));
-    newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
-    
-    // Update ref immediately for next calculation
-    viewportZoomRef.current = newZoom;
-    
-    // Schedule RAF update if not already scheduled (throttle to 60fps)
-    if (rafIdRef.current === null) {
-      rafIdRef.current = requestAnimationFrame(() => {
-        setViewportZoom(viewportZoomRef.current);
-        rafIdRef.current = null;
+  // Reset zoom when image is cleared
+  useEffect(() => {
+    if (!imageDimensions) {
+      queueMicrotask(() => {
+        setViewportZoom(1);
+        if (transformSetterRef.current) {
+          transformSetterRef.current(() => ({ scale: 1 }));
+        }
       });
     }
-  }, []);
+  }, [imageDimensions]);
 
-  // React event handler for compatibility (won't preventDefault but will still work)
+  const applyZoom = useCallback(
+    (deltaY: number) => {
+      setViewportZoom((prev) => {
+        const zoomAmount = deltaY * -SCROLL_ZOOM_FACTOR;
+        const nextZoom = clampZoom(prev + zoomAmount);
+        if (transformSetterRef.current) {
+          transformSetterRef.current(() => ({ scale: nextZoom }));
+        }
+        return nextZoom;
+      });
+    },
+    [clampZoom]
+  );
+
+  // React synthetic wheel event listeners có thể bị đánh dấu passive trong một số môi trường,
+  // dẫn tới warning "Unable to preventDefault inside passive event listener invocation".
+  // Để đảm bảo preventDefault hoạt động hợp lệ, ta gắn native wheel listener với { passive: false }.
   const handleWheel = useCallback((e: React.WheelEvent) => {
-    // Don't call preventDefault here - use native listener instead
-    // Use 5% increments instead of multiplicative factors
-    const zoomIncrement = 0.05; // 5% increment
-    setViewportZoom(prevZoom => {
-      let newZoom;
-      if (e.deltaY > 0) {
-        // Zoom out
-        newZoom = prevZoom - zoomIncrement;
-      } else {
-        // Zoom in
-        newZoom = prevZoom + zoomIncrement;
-      }
-      
-      // Clamp to bounds and round to nearest 5%
-      newZoom = Math.max(0.05, Math.min(3, newZoom));
-      newZoom = Math.round(newZoom * 20) / 20; // Round to nearest 0.05 (5%)
-      return newZoom;
-    });
-  }, []);
+    // Giữ handler React làm "no-op" (tránh gọi preventDefault trong listener có thể passive).
+    if (!imageDimensions) {
+      return;
+    }
 
-  // Register native wheel event listener with passive: false
+    if (e.ctrlKey || e.metaKey) {
+      return;
+    }
+    // Không gọi e.preventDefault() ở đây để tránh warning.
+  }, [imageDimensions]);
+
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || !imageDimensions) {
+      return;
+    }
 
-    container.addEventListener('wheel', handleWheelNative, { passive: false });
+    const wheelListener = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      // Native listener với passive:false nên có thể preventDefault hợp lệ
+      event.preventDefault();
+
+      const deltaY = event.deltaY;
+      applyZoom(deltaY);
+    };
+
+    container.addEventListener("wheel", wheelListener, { passive: false });
 
     return () => {
-      container.removeEventListener('wheel', handleWheelNative);
-      // Cleanup RAF if component unmounts
-      if (rafIdRef.current) {
-        cancelAnimationFrame(rafIdRef.current);
-        rafIdRef.current = null;
-      }
+      container.removeEventListener("wheel", wheelListener);
     };
-  }, [handleWheelNative]);
+  }, [imageDimensions, applyZoom]);
 
-  // Viewport zoom functions
   const zoomViewportIn = useCallback(() => {
-    setViewportZoom(prevZoom => {
-      const newZoom = prevZoom + 0.05; // 5% increment
-      const clampedZoom = Math.min(newZoom, 3); // Max 3x zoom
-      return Math.round(clampedZoom * 20) / 20; // Round to nearest 5%
+    if (!imageDimensions) return;
+    setViewportZoom((prev) => {
+      const next = clampZoom(prev + ZOOM_STEP);
+      if (transformSetterRef.current) {
+        transformSetterRef.current(() => ({ scale: next }));
+      }
+      return next;
     });
-  }, []);
+  }, [clampZoom, imageDimensions]);
 
   const zoomViewportOut = useCallback(() => {
-    setViewportZoom(prevZoom => {
-      const newZoom = prevZoom - 0.05; // 5% decrement
-      const clampedZoom = Math.max(newZoom, 0.05); // Min 5% zoom
-      return Math.round(clampedZoom * 20) / 20; // Round to nearest 5%
+    if (!imageDimensions) return;
+    setViewportZoom((prev) => {
+      const next = clampZoom(prev - ZOOM_STEP);
+      if (transformSetterRef.current) {
+        transformSetterRef.current(() => ({ scale: next }));
+      }
+      return next;
     });
-  }, []);
+  }, [clampZoom, imageDimensions]);
 
   const resetViewportZoom = useCallback(() => {
+    if (!imageDimensions) return;
     setViewportZoom(1);
-  }, []);
+    if (transformSetterRef.current) {
+      transformSetterRef.current(() => ({ scale: 1 }));
+    }
+  }, [imageDimensions]);
 
-  // Dummy mouse handlers (no functionality, just for compatibility)
+  // Dummy mouse handlers preserved for compatibility
   const handleMouseDown = useCallback(() => {}, []);
   const handleMouseMove = useCallback(() => {}, []);
   const handleMouseUp = useCallback(() => {}, []);
 
   return {
     viewportZoom,
-    isDragging,
     imageContainerRef,
     containerRef,
     handleWheel,
@@ -185,6 +152,6 @@ export function useViewportControls(
     handleMouseUp,
     zoomViewportIn,
     zoomViewportOut,
-    resetViewportZoom
+    resetViewportZoom,
   };
 }

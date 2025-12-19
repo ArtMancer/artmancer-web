@@ -1,5 +1,10 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { apiService, GenerationRequest, GenerationResponse, ModelSettings, WhiteBalanceRequest, WhiteBalanceResponse, TaskType } from '@/services/api';
+import useImageFetcher from '@/hooks/useImageFetcher';
+
+// Global singleton to track active generation and prevent duplicate calls
+// This is necessary because React dev mode can mount components twice
+let activeGenerationController: AbortController | null = null;
 
 // Map UI task types to backend task types
 const mapUITaskTypeToBackend = (uiTaskType: "white-balance" | "object-insert" | "object-removal"): TaskType => {
@@ -29,7 +34,10 @@ export function useImageGeneration() {
   const [lastGeneration, setLastGeneration] = useState<GenerationResponse | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const currentTaskIdRef = useRef<string | null>(null); // Track task_id for async generation
-  const eventSourceRef = useRef<EventSource | null>(null); // Track SSE connection
+  const isGeneratingRef = useRef<boolean>(false); // Ref to track generation state across renders
+
+  // Dùng chung hook fetch ảnh blob → Object URL (tự cleanup)
+  const { fetchImage } = useImageFetcher();
 
   const generateImage = useCallback(async (
     prompt: string,
@@ -39,8 +47,32 @@ export function useImageGeneration() {
     referenceImage?: string | null,
     referenceMaskR?: string | null,
     taskType?: "white-balance" | "object-insert" | "object-removal",
-    onProgress?: (progress: { current_step?: number; total_steps?: number; status: string; progress: number }) => void
+    onProgress?: (progress: { current_step?: number; total_steps?: number; status: string; progress: number }) => void,
+    maskToolType?: "brush" | "box",
+    enableMaeRefinement?: boolean,
+    enableDebug?: boolean
   ): Promise<GenerationResponse | null> => {
+    // 🔍 DEBUG: Log call stack to see who's calling this
+    console.log("🎯 [useImageGeneration] generateImage called", {
+      timestamp: new Date().toISOString(),
+      isGeneratingRef: isGeneratingRef.current,
+      activeController: !!activeGenerationController,
+      stackTrace: new Error().stack?.split('\n').slice(2, 5).join('\n'),
+    });
+
+    // 🛡️ CRITICAL: Synchronous lock to prevent race conditions
+    // Check AND set in single synchronous operation
+    if (isGeneratingRef.current || activeGenerationController) {
+      console.error("🚫 [useImageGeneration] BLOCKED: Already generating!", {
+        isGeneratingRef: isGeneratingRef.current,
+        hasActiveController: !!activeGenerationController,
+      });
+      return null;
+    }
+    
+    // IMMEDIATELY mark as generating (synchronous, no gap for race condition)
+    isGeneratingRef.current = true;
+
     // Prompt is optional for white balance
     if (taskType !== "white-balance" && !prompt.trim()) {
       setError('Please enter a prompt');
@@ -58,12 +90,16 @@ export function useImageGeneration() {
       return null;
     }
 
+    // At this point, lock is acquired (isGeneratingRef.current = true)
     setIsGenerating(true);
     setError(null);
 
     // Create new AbortController for this request
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+    activeGenerationController = abortController; // Store globally
+    
+    console.log("✅ [useImageGeneration] Lock acquired, generation starting");
 
     try {
       // Convert data URL to base64 if needed
@@ -137,6 +173,9 @@ export function useImageGeneration() {
         input_quality: settings?.input_quality,
         // Low-end optimization flags
         enable_flowmatch_scheduler: settings?.enable_flowmatch_scheduler,
+        mask_tool_type: maskToolType, // Mask creation tool type: "brush" or "box"
+        enable_mae_refinement: enableMaeRefinement, // Enable MAE refinement (default: true)
+        enable_debug: enableDebug, // Enable debug mode (default: false)
       };
 
       // Debug logging
@@ -152,40 +191,222 @@ export function useImageGeneration() {
         usingTwoSourceMasks: !!(request.reference_image && request.reference_mask_R),
       });
 
-      // Track task_id if async mode is detected
-      // We need to intercept the response to get task_id before generateImageAsync is called
-      // For now, we'll track it in generateImageAsync callback
-      const response = await apiService.generateImage(
-        request, 
-        abortController.signal, 
-        onProgress,
-        (taskId: string, eventSource: EventSource) => {
-          // Callback when async mode is detected
-          console.log(`📝 [useImageGeneration] Tracking task_id: ${taskId}`);
-          currentTaskIdRef.current = taskId;
-          eventSourceRef.current = eventSource;
+      // Two-step flow: 
+      // 1. POST /api/generate/async → get task_id
+      // 2. GET /api/generate/stream/{task_id} → SSE stream for progress
+      const baseUrl = apiService.getBaseUrl();
+
+      console.log("🌐 [useImageGeneration] Submitting generation job...");
+
+      // Step 1: Submit job and get task_id
+      const submitResponse = await fetch(`${baseUrl}/api/generate/async`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(request),
+        signal: abortController.signal,
+      });
+
+      if (!submitResponse.ok) {
+        const errorText = await submitResponse.text();
+        throw new Error(
+          JSON.stringify({
+            status: submitResponse.status,
+            error: `HTTP ${submitResponse.status}: ${errorText || submitResponse.statusText || "Submit failed"}`,
+            endpoint: "/api/generate/async",
+          })
+        );
+      }
+
+      const submitResult = await submitResponse.json() as { task_id?: string; status?: string; message?: string };
+      const taskIdFromSubmit = submitResult.task_id;
+
+      if (!taskIdFromSubmit) {
+        throw new Error(
+          JSON.stringify({
+            status: 500,
+            error: "No task_id returned from /api/generate/async",
+            endpoint: "/api/generate/async",
+          })
+        );
+      }
+
+      currentTaskIdRef.current = taskIdFromSubmit;
+      console.log("📝 [useImageGeneration] Got task_id:", taskIdFromSubmit);
+
+      // Step 2: Connect to SSE stream for progress updates
+      const streamUrl = `${baseUrl}/api/generate/stream/${taskIdFromSubmit}`;
+      console.log("🌐 [useImageGeneration] Connecting to SSE stream:", streamUrl, {
+        taskId: taskIdFromSubmit,
+        timestamp: new Date().toISOString(),
+        abortSignal: abortController.signal,
+      });
+
+      const streamResponse = await fetch(streamUrl, {
+        method: "GET",
+        headers: {
+          "Accept": "text/event-stream",
+        },
+        signal: abortController.signal,
+      });
+
+      if (!streamResponse.ok || !streamResponse.body) {
+        throw new Error(
+          JSON.stringify({
+            status: streamResponse.status,
+            error: `HTTP ${streamResponse.status}: ${streamResponse.statusText || "Stream failed"}`,
+            endpoint: `/api/generate/stream/${taskIdFromSubmit}`,
+          })
+        );
+      }
+
+      const reader = streamResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      // Read SSE stream with persistent buffer
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        let separatorIndex = buffer.indexOf("\n\n");
+        while (separatorIndex !== -1) {
+          const rawEvent = buffer.slice(0, separatorIndex).trim();
+          buffer = buffer.slice(separatorIndex + 2);
+
+          if (rawEvent.startsWith("data:")) {
+            const jsonStr = rawEvent.replace(/^data:\s*/, "");
+            try {
+              const data = JSON.parse(jsonStr) as {
+                task_id?: string;
+                status?: string;
+                progress?: number;
+                current_step?: number | null;
+                total_steps?: number | null;
+                error?: string | null;
+                loading_message?: string | null;
+              };
+
+              if (onProgress && data.status) {
+                onProgress({
+                  status: data.status,
+                  progress: data.progress ?? 0,
+                  current_step: data.current_step ?? undefined,
+                  total_steps: data.total_steps ?? undefined,
+                });
+              }
+
+              if (data.status === "error" || data.status === "cancelled") {
+                throw new Error(
+                  JSON.stringify({
+                    status: 500,
+                    error:
+                      data.error ||
+                      `Generation ${data.status === "cancelled" ? "cancelled" : "failed"}`,
+                    endpoint: `/api/generate/stream/${taskIdFromSubmit}`,
+                  })
+                );
+              }
+
+              if (data.status === "done") {
+                // Stream is finished; break outer loops
+                separatorIndex = -1;
+                buffer = "";
+                break;
+              }
+            } catch (parseErr) {
+              console.error("❌ [useImageGeneration] Failed to parse SSE event:", {
+                error: parseErr,
+                raw: jsonStr,
+              });
+            }
+          }
+
+          separatorIndex = buffer.indexOf("\n\n");
         }
+      }
+
+      const taskIdFromStream = taskIdFromSubmit;
+
+      // Sau khi SSE hoàn tất, fetch ảnh + debug info SONG SONG để tăng tốc
+      console.log(
+        "📥 [useImageGeneration] Fetching final result (image + debug) for task_id:",
+        taskIdFromStream
       );
-      setLastGeneration(response);
-      // Clear task_id tracking only after successful completion
-      console.log(`✅ [useImageGeneration] Generation completed successfully, clearing task_id`);
-      const completedTaskId = currentTaskIdRef.current;
+      
+      const [imageObjectUrl, finalResultDebug] = await Promise.all([
+        fetchImage({
+          url: `${baseUrl}/api/generate/result-image/${taskIdFromStream}`,
+        }),
+        apiService.getGenerationResult(taskIdFromStream),
+      ]);
+
+      if (!imageObjectUrl) {
+        throw new Error(
+          JSON.stringify({
+            status: 500,
+            error: "Failed to fetch binary image result",
+            endpoint: `/api/generate/result-image/${taskIdFromStream}`,
+          })
+        );
+      }
+
+      const wrappedResponse: GenerationResponse = {
+        success: true,
+        // image giờ là Object URL (blob:...) dùng trực tiếp cho <img src>
+        image: imageObjectUrl,
+        generation_time: 0,
+        model_used: "qwen-image-edit",
+        parameters_used: {},
+        request_id: taskIdFromStream,
+        debug_info: finalResultDebug.debug_info,
+      };
+
+      setLastGeneration(wrappedResponse);
+      console.log(
+        "✅ [useImageGeneration] Generation completed successfully, clearing task_id"
+      );
       currentTaskIdRef.current = null;
-      eventSourceRef.current = null;
-      return response;
+      // Clear global controller on success
+      if (activeGenerationController === abortController) {
+        activeGenerationController = null;
+      }
+
+      return wrappedResponse;
     } catch (err) {
       // Check if request was cancelled
       let errorMessage = 'Failed to generate image';
       let isCancelled = false;
 
       try {
-        // Try to parse error message as JSON (from makeRequest)
+        // Handle AbortError (user cancellation) explicitly
+        if (err instanceof DOMException && err.name === "AbortError") {
+          isCancelled = true;
+          errorMessage = "Generation cancelled";
+          console.log("🚫 [useImageGeneration] Request aborted by user");
+          return null;
+        }
+
+        // Try to parse error message as JSON
         const errorMessageStr = (err as Error).message || String(err);
-        let errorData: any = null;
+        
+        // Define error data type
+        interface ParsedErrorData {
+          error_type?: string;
+          error?: string;
+          status?: number;
+          detail?: string | { error?: string };
+        }
+        
+        let errorData: ParsedErrorData | null = null;
         
         try {
-          errorData = JSON.parse(errorMessageStr);
-        } catch (parseErr) {
+          const parsed = JSON.parse(errorMessageStr);
+          errorData = parsed as ParsedErrorData;
+        } catch {
           // If not JSON, treat as plain error message
           errorMessage = errorMessageStr;
         }
@@ -262,7 +483,6 @@ export function useImageGeneration() {
       if (!isCancelled) {
         console.log('❌ [useImageGeneration] Generation failed, clearing task_id');
         currentTaskIdRef.current = null;
-        eventSourceRef.current = null;
       } else {
         console.log('🚫 [useImageGeneration] Generation cancelled, task_id will be cleared in cancelGeneration');
       }
@@ -276,9 +496,15 @@ export function useImageGeneration() {
       // 3. User cancels (in cancelGeneration function)
       // This ensures task_id is available for cancellation even if generation is in progress
       setIsGenerating(false);
+      isGeneratingRef.current = false; // Clear ref guard
+      
+      // Clear global controller on cleanup
+      if (activeGenerationController === abortController) {
+        activeGenerationController = null;
+      }
       abortControllerRef.current = null;
     }
-  }, []);
+  }, [fetchImage]);
 
   const applyWhiteBalance = useCallback(async (
     file: File,
@@ -333,12 +559,6 @@ export function useImageGeneration() {
       console.warn('⚠️ [useImageGeneration] No task_id found to cancel');
     }
     
-    // Close SSE connection if open (async mode)
-    if (eventSourceRef.current) {
-      console.log('🔌 [useImageGeneration] Closing SSE connection...');
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
     
     // Cancel HTTP request
     if (abortControllerRef.current) {
@@ -352,6 +572,19 @@ export function useImageGeneration() {
     
     setIsGenerating(false);
     setError(null);
+  }, []);
+
+  // 🧹 Cleanup effect: abort any active generation when component unmounts
+  // Critical for React 18 Strict Mode which mounts components twice in dev mode
+  useEffect(() => {
+    return () => {
+      if (activeGenerationController) {
+        console.log("🧹 [useImageGeneration] Component unmounting, aborting active generation (React Strict Mode cleanup)");
+        activeGenerationController.abort();
+        activeGenerationController = null;
+      }
+      isGeneratingRef.current = false; // Reset ref guard on unmount
+    };
   }, []);
 
   return {

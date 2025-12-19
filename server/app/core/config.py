@@ -64,6 +64,55 @@ class Settings(BaseSettings):
         default=3.0, alias="SCHEDULER_SHIFT", ge=0.0, le=10.0,
         description="Shift parameter for FlowMatch scheduler"
     )
+    
+    # Adapter loading optimization
+    enable_memory_aware_unloading: bool = Field(
+        default=False, alias="ENABLE_MEMORY_AWARE_UNLOADING",
+        description="Enable memory-aware adapter unloading (unload least-recently-used adapter when GPU memory is low). Default: False for H200 80GB."
+    )
+    gpu_memory_unload_threshold_mb: int = Field(
+        default=50000, alias="GPU_MEMORY_UNLOAD_THRESHOLD_MB", ge=10000,
+        description="Unload adapters if free GPU memory falls below this threshold (MB). Default: 50000 (50GB) for H200."
+    )
+    
+    # MAE (Masked Autoencoder) configuration
+    mae_model_size: str = Field(
+        default="large", alias="MAE_MODEL_SIZE",
+        description="ViT-MAE model size: 'base', 'large', or 'huge'. Larger models provide better reconstruction but use more memory. Default: 'large'."
+    )
+    mae_reconstruction_strength: float = Field(
+        default=1.5, alias="MAE_RECONSTRUCTION_STRENGTH", ge=0.0, le=2.0,
+        description="Strength of MAE reconstruction blending (0.0 = original only, 1.0 = full MAE, 2.0 = enhanced MAE). Default: 1.5 (enhanced mode)."
+    )
+    mae_use_enhanced_blending: bool = Field(
+        default=True, alias="MAE_USE_ENHANCED_BLENDING",
+        description="Use enhanced blending with edge-aware smoothing for better MAE reconstruction. Default: True."
+    )
+    # Custom MAE decoder configuration
+    mae_decoder_dim: int = Field(
+        default=512, alias="MAE_DECODER_DIM", ge=128, le=2048,
+        description="Decoder dimension for custom MAE. Default: 512."
+    )
+    mae_decoder_depth: int = Field(
+        default=1, alias="MAE_DECODER_DEPTH", ge=1, le=12,
+        description="Decoder depth (number of transformer blocks). Default: 1."
+    )
+    mae_decoder_heads: int = Field(
+        default=8, alias="MAE_DECODER_HEADS", ge=1, le=32,
+        description="Number of attention heads in decoder. Default: 8."
+    )
+    mae_decoder_dim_head: int = Field(
+        default=64, alias="MAE_DECODER_DIM_HEAD", ge=32, le=256,
+        description="Dimension per attention head in decoder. Default: 64."
+    )
+    mae_masking_ratio: float = Field(
+        default=0.75, alias="MAE_MASKING_RATIO", ge=0.1, le=0.95,
+        description="Masking ratio for MAE (fraction of patches to mask). Default: 0.75."
+    )
+    mae_use_user_mask_guidance: bool = Field(
+        default=True, alias="MAE_USE_USER_MASK_GUIDANCE",
+        description="Guide masking by user mask (prioritize masking patches in user mask region). Default: True."
+    )
 
     @field_validator("input_quality", mode="before")
     @classmethod
@@ -76,6 +125,20 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Invalid INPUT_QUALITY '{value}'. "
                 f"Valid options: {', '.join(INPUT_QUALITY_PRESETS.keys())}"
+            )
+        return normalized
+    
+    @field_validator("mae_model_size", mode="before")
+    @classmethod
+    def validate_mae_model_size(cls, value: str) -> str:
+        """Normalize and validate MAE model size."""
+        if not value:
+            return "large"
+        normalized = value.strip().lower()
+        if normalized not in ["base", "large", "huge"]:
+            raise ValueError(
+                f"Invalid MAE_MODEL_SIZE '{value}'. "
+                "Valid options: 'base', 'large', 'huge'"
             )
         return normalized
 

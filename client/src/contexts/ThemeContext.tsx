@@ -1,8 +1,8 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-type Theme = 'light' | 'dark';
+type Theme = "light" | "dark";
 
 interface ThemeContextType {
   theme: Theme;
@@ -13,30 +13,23 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>('dark');
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-    const saved = localStorage.getItem('artmancer-theme') as Theme;
-    if (saved && (saved === 'light' || saved === 'dark')) {
-      setThemeState(saved);
-    } else {
-      // Default to system preference
-      const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      setThemeState(systemPrefersDark ? 'dark' : 'light');
-    }
+  const initialTheme = useMemo<Theme>(() => {
+    if (typeof window === "undefined") return "dark";
+    const saved = localStorage.getItem("artmancer-theme") as Theme;
+    if (saved === "light" || saved === "dark") return saved;
+    const systemPrefersDark = window.matchMedia(
+      "(prefers-color-scheme: dark)"
+    ).matches;
+    return systemPrefersDark ? "dark" : "light";
   }, []);
 
+  const [theme, setThemeState] = useState<Theme>(initialTheme);
+
   useEffect(() => {
-    if (mounted) {
-      localStorage.setItem('artmancer-theme', theme);
-      document.documentElement.setAttribute('data-theme', theme);
-      
-      // Apply theme class to body
-      document.body.className = theme;
-    }
-  }, [theme, mounted]);
+    localStorage.setItem("artmancer-theme", theme);
+    document.documentElement.setAttribute("data-theme", theme);
+    document.body.className = theme;
+  }, [theme]);
 
   const toggleTheme = () => {
     setThemeState(prev => prev === 'light' ? 'dark' : 'light');
@@ -45,10 +38,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const setTheme = (newTheme: Theme) => {
     setThemeState(newTheme);
   };
-
-  if (!mounted) {
-    return null;
-  }
 
   return (
     <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>

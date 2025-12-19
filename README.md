@@ -108,21 +108,21 @@ Artmancer follows a microservices architecture deployed on Modal:
 
 #### 1. Clone the repository
 
-```bash
-git clone https://github.com/nxank4/artmancer-web.git
-cd artmancer-web
-```
+   ```bash
+   git clone https://github.com/nxank4/artmancer-web.git
+   cd artmancer-web
+   ```
 
 #### 2. Frontend Setup
 
-```bash
-cd client
-npm install
-```
+   ```bash
+   cd client
+   npm install
+   ```
 
 #### 3. Backend Setup
 
-```bash
+   ```bash
 cd server
 uv sync
 ```
@@ -161,8 +161,8 @@ MODAL_TOKEN_SECRET=your_modal_token_secret
 **Frontend:**
 ```bash
 cd client
-npm run dev
-```
+   npm run dev
+   ```
 
 **Backend (Local):**
 ```bash
@@ -178,7 +178,7 @@ modal deploy modal_app.py
 
 #### 6. Open your browser
 
-Navigate to [http://localhost:3000](http://localhost:3000)
+   Navigate to [http://localhost:3000](http://localhost:3000)
 
 ## 🛠️ Development
 
@@ -492,27 +492,27 @@ uv run pytest
 
 #### 1. Port already in use
 
-```bash
+   ```bash
 # Frontend
-npx kill-port 3000
-npm run dev
+   npx kill-port 3000
+   npm run dev
 
 # Backend
 npx kill-port 8080
 uv run uvicorn main:app --reload --port 8080
-```
+   ```
 
 #### 2. Node modules issues
 
-```bash
+   ```bash
 cd client
-rm -rf node_modules package-lock.json
-npm install
-```
+   rm -rf node_modules package-lock.json
+   npm install
+   ```
 
 #### 3. Python dependencies issues
 
-```bash
+   ```bash
 cd server
 rm -rf .venv uv.lock
 uv sync

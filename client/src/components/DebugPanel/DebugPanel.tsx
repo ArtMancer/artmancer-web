@@ -13,7 +13,6 @@ import {
   Loader2,
 } from "lucide-react";
 import type { DebugInfo } from "@/services/api";
-import { apiService } from "@/services/api";
 
 interface DebugPanelProps {
   debugInfo: DebugInfo | null;
@@ -35,55 +34,11 @@ export default function DebugPanel({
   const [activeTab, setActiveTab] = useState<TabType>("images");
   const [downloadingImages, setDownloadingImages] = useState<Set<string>>(new Set()); // Track which images are downloading
   const [isDownloadingMetadata, setIsDownloadingMetadata] = useState(false);
-  const [sessionExists, setSessionExists] = useState<boolean | null>(null); // null = not checked yet
-  interface SessionDetails {
-    session_name: string;
-    metadata: Record<string, unknown>;
-    lora_log: string;
-    image_files: string[];
-  }
-  const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
 
-  // Extract session name from debug_path or use session_name
-  const getSessionName = (): string | null => {
-    if (debugInfo?.session_name) {
-      return debugInfo.session_name;
-    }
-    if (debugInfo?.debug_path) {
-      // Extract session name from path (e.g., "debug_output/20241206_123456_abc12345" -> "20241206_123456_abc12345")
-      const pathParts = debugInfo.debug_path.split("/");
-      return pathParts[pathParts.length - 1] || null;
-    }
-    return null;
-  };
-
-  const sessionName = getSessionName();
-
-  // Check if session exists and fetch session details when sessionName changes
-  useEffect(() => {
-    if (!sessionName) {
-      setSessionExists(null);
-      setSessionDetails(null);
-      return;
-    }
-
-    // Check if session exists by trying to fetch session details
-    const checkSessionExists = async () => {
-      try {
-        const details = await apiService.getDebugSession(sessionName);
-        setSessionExists(true);
-        setSessionDetails(details);
-      } catch {
-        // Session doesn't exist or error occurred
-        setSessionExists(false);
-        setSessionDetails(null);
-      }
-    };
-
-    // Debounce check to avoid too many requests
-    const timeoutId = setTimeout(checkSessionExists, 500);
-    return () => clearTimeout(timeoutId);
-  }, [sessionName]);
+  // Note: We no longer fetch session details from API endpoint
+  // All debug info is already available in debugInfo from generation response
+  // This avoids 404 errors since debug sessions are container-local to H200 workers
+  // and not accessible from Job Manager Service
 
   // Download individual image
   const handleDownloadImage = (imageName: string, label: string, base64Data?: string) => {
@@ -130,15 +85,14 @@ export default function DebugPanel({
   };
 
   // Download metadata as JSON (frontend-only, no backend call)
+  // Uses only debugInfo from generation response (no API call needed)
   const handleDownloadMetadata = () => {
     setIsDownloadingMetadata(true);
     try {
       const metadata = {
-        session_name: sessionDetails?.session_name ?? debugInfo?.session_name ?? "debug_session",
-        metadata: sessionDetails?.metadata,
-        lora_log: sessionDetails?.lora_log,
-        image_files: sessionDetails?.image_files,
-        frontend_info: debugInfo
+        session_name: debugInfo?.session_name ?? "debug_session",
+        debug_path: debugInfo?.debug_path,
+        debug_info: debugInfo
           ? {
               original_prompt: debugInfo.original_prompt,
               refined_prompt: debugInfo.refined_prompt,
@@ -148,11 +102,13 @@ export default function DebugPanel({
               lora_adapter: debugInfo.lora_adapter,
               loaded_adapters: debugInfo.loaded_adapters,
               conditional_labels: debugInfo.conditional_labels,
-              original_image: debugInfo.original_image,
-              mask_A: debugInfo.mask_A,
-              reference_image: debugInfo.reference_image,
-              reference_mask_R: debugInfo.reference_mask_R,
-              positioned_mask_R: debugInfo.positioned_mask_R,
+              conditional_images_count: debugInfo.conditional_images?.length || 0,
+              has_original_image: !!debugInfo.original_image,
+              has_mask_A: !!debugInfo.mask_A,
+              has_reference_image: !!debugInfo.reference_image,
+              has_reference_mask_R: !!debugInfo.reference_mask_R,
+              has_positioned_mask_R: !!debugInfo.positioned_mask_R,
+              has_mask_mae_dilated: !!debugInfo.mask_mae_dilated,
             }
           : undefined,
       };
@@ -205,9 +161,11 @@ export default function DebugPanel({
   if (!isVisible || !debugInfo) return null;
 
   const conditionalImages = debugInfo.conditional_images || [];
-  // Default labels - should match backend order:
-  // - Insertion: [ref_img, mask, masked_bg]
-  // - Removal: [original, mask, mae]
+  // Default labels - must match backend order defined in GenerationService:
+  // - White-balance: [input, canny]
+  // - Removal: [masked_bg, mask, mae]
+  // - Insertion (standard): [ref_img, mask, masked_bg]
+  // - Insertion (reference-guided): [original, mask_A, masked_R, reference_image, positioned_mask_R]
   const labels = debugInfo.conditional_labels || [
     "ref_img",
     "mask",
@@ -222,6 +180,7 @@ export default function DebugPanel({
     { label: "reference_image", data: debugInfo.reference_image },
     { label: "reference_mask_R", data: debugInfo.reference_mask_R },
     { label: "positioned_mask_R", data: debugInfo.positioned_mask_R },
+    { label: "mask_mae_dilated", data: debugInfo.mask_mae_dilated },
   ].filter((item) => !!item.data);
   const debugLabels = new Set(debugImages.map((d) => d.label));
 
@@ -298,6 +257,7 @@ export default function DebugPanel({
                                   })
                                 }
                               >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                   src={`data:image/png;base64,${item.data}`}
                                   alt={label}
@@ -343,7 +303,7 @@ export default function DebugPanel({
                           if (debugLabels.has(label)) {
                             return null;
                           }
-                          const imageName = sessionDetails?.image_files?.[index] || `${label}.png`;
+                          const imageName = `${label}.png`;
                           const isDownloading = downloadingImages.has(imageName);
                           
                           return (
@@ -360,6 +320,7 @@ export default function DebugPanel({
                                   })
                                 }
                               >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                   src={`data:image/png;base64,${img}`}
                                   alt={label}
@@ -510,6 +471,8 @@ export default function DebugPanel({
             <div className="text-center mb-2 text-white font-medium">
               {selectedImage.label}
             </div>
+            
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={selectedImage.src}
               alt={selectedImage.label}

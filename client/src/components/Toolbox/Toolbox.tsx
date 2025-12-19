@@ -1,4 +1,6 @@
-import { Box, Slider } from "@mui/material";
+import { Slider } from "radix-ui";
+import { CircleHelp } from "lucide-react";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 interface ToolboxProps {
   // Visibility
@@ -9,13 +11,6 @@ interface ToolboxProps {
   modifiedImage: string | null;
   comparisonSlider: number;
   onComparisonSliderChange: (value: number) => void;
-  
-  // History controls
-  historyIndex: number;
-  historyStackLength: number;
-  onUndo: () => void;
-  onRedo: () => void;
-  onDownload: () => void;
   
   // Viewport controls
   viewportZoom: number;
@@ -34,11 +29,6 @@ export default function Toolbox({
   modifiedImage,
   comparisonSlider,
   onComparisonSliderChange,
-  historyIndex,
-  historyStackLength,
-  onUndo,
-  onRedo,
-  onDownload,
   viewportZoom,
   onZoomViewportIn,
   onZoomViewportOut,
@@ -46,45 +36,41 @@ export default function Toolbox({
   isHelpOpen,
   onToggleHelp
 }: ToolboxProps) {
+  const { t } = useLanguage();
+
   return (
     <>
       {/* Main Toolbox - Bottom Center - Only show when image has been generated/modified */}
       {uploadedImage && modifiedImage && originalImage !== modifiedImage && (
-        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-[var(--secondary-bg)] border border-[var(--primary-accent)] rounded-lg px-6 py-3 z-50 shadow-xl min-w-fit">
+        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-secondary-bg border border-primary-accent rounded-lg px-6 py-3 z-50 shadow-xl min-w-fit">
           <div className="flex items-center justify-center space-x-6">
             {/* Comparison Slider */}
             <div className="flex items-center space-x-3">
-              <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">
-                Modified
+              <span className="text-xs text-text-secondary whitespace-nowrap">
+                {t("toolbox.original")}
               </span>
-              <Box sx={{ width: 96 }}>
-                <Slider
-                  value={comparisonSlider}
-                  onChange={(_, value) =>
-                    onComparisonSliderChange(value as number)
-                  }
+              <div className="w-24">
+                <Slider.Root
                   min={0}
                   max={100}
                   step={1}
-                  sx={{
-                    color: "var(--primary-accent)",
-                    "& .MuiSlider-thumb": {
-                      backgroundColor: "var(--primary-accent)",
-                      "&:hover": {
-                        boxShadow: "0 0 0 8px rgba(0, 0, 0, 0.16)",
-                      },
-                    },
-                    "& .MuiSlider-track": {
-                      backgroundColor: "var(--primary-accent)",
-                    },
-                    "& .MuiSlider-rail": {
-                      backgroundColor: "var(--border-color)",
-                    },
-                  }}
-                />
-              </Box>
-              <span className="text-xs text-[var(--text-secondary)] whitespace-nowrap">
-                Original
+                  value={[comparisonSlider]}
+                  onValueChange={([value]: [number]) =>
+                    onComparisonSliderChange(value)
+                  }
+                  className="relative flex h-5 w-full touch-none select-none items-center"
+                >
+                  <Slider.Track className="relative h-1 w-full rounded-full bg-border-color">
+                  <Slider.Range className="absolute h-1 rounded-full bg-primary-accent" />
+                  </Slider.Track>
+                  <Slider.Thumb className="block h-4 w-4 rounded-full bg-primary-accent shadow transition-transform duration-100 ease-out focus:outline-none focus:ring-2 focus:ring-primary-accent" />
+                </Slider.Root>
+              </div>
+              <span className="text-xs font-mono text-text-secondary w-10 text-center">
+                {Math.round(comparisonSlider * 10) / 10}%
+              </span>
+              <span className="text-xs text-text-secondary whitespace-nowrap">
+                {t("toolbox.modified")}
               </span>
             </div>
           </div>
@@ -92,43 +78,50 @@ export default function Toolbox({
       )}
 
       {/* Viewport Zoom Controls - Top Right Corner */}
-      <div className="absolute top-8 right-8 flex flex-col gap-2 z-30">
-        <button
-          onClick={onZoomViewportIn}
-          className="bg-[var(--secondary-bg)] border border-[var(--primary-accent)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded-lg w-10 h-10 flex items-center justify-center transition-all duration-200 shadow-lg"
-          title="Zoom In Viewport"
-        >
-          <span className="text-lg font-bold">+</span>
-        </button>
-        <button
-          onClick={onZoomViewportOut}
-          className="bg-[var(--secondary-bg)] border border-[var(--primary-accent)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded-lg w-10 h-10 flex items-center justify-center transition-all duration-200 shadow-lg"
-          title="Zoom Out Viewport"
-        >
-          <span className="text-lg font-bold">−</span>
-        </button>
-        {viewportZoom !== 1 && (
+      <div className="absolute top-8 right-8 z-30">
+        <div className="flex flex-col gap-1 bg-secondary-bg border border-primary-accent rounded-xl p-1 shadow-lg backdrop-blur-sm">
           <button
-            onClick={onResetViewportZoom}
-            className="bg-[var(--secondary-bg)] border border-[var(--primary-accent)] hover:bg-[var(--primary-accent)] text-[var(--text-primary)] hover:text-white rounded-lg w-10 h-10 flex items-center justify-center transition-all duration-200 shadow-lg text-xs"
-            title="Reset Viewport Zoom"
+            onClick={onZoomViewportIn}
+            className="btn-interactive rounded-lg w-10 h-10 flex items-center justify-center text-text-primary hover:bg-primary-accent hover:text-white transition-colors duration-150"
+            title={t("toolbox.zoomIn")}
           >
-            1:1
+            <span className="text-lg font-bold">+</span>
           </button>
-        )}
+          <button
+            onClick={onZoomViewportOut}
+            className="btn-interactive rounded-lg w-10 h-10 flex items-center justify-center text-text-primary hover:bg-primary-accent hover:text-white transition-colors duration-150"
+            title={t("toolbox.zoomOut")}
+          >
+            <span className="text-lg font-bold">−</span>
+          </button>
+          {viewportZoom !== 1 && (
+            <>
+              <div className="px-2 py-1 text-xs text-text-secondary text-center border-t border-border-color mt-1 pt-1">
+                {Math.round(viewportZoom * 1000) / 10}%
+              </div>
+              <button
+                onClick={onResetViewportZoom}
+                className="btn-interactive rounded-lg w-10 h-10 flex items-center justify-center text-text-primary hover:bg-primary-accent hover:text-white transition-colors duration-150 text-xs"
+                title={t("toolbox.resetZoom")}
+              >
+                1:1
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Help Button - Fixed position in lower left */}
       <button
         onClick={onToggleHelp}
-        className={`fixed bottom-4 left-4 rounded-full w-12 h-12 flex items-center justify-center shadow-lg transition-all duration-200 z-30 ${
+        className={`btn-interactive btn-primary-hover fixed bottom-4 left-4 rounded-full w-12 h-12 flex items-center justify-center shadow-lg transition-all duration-200 z-30 ${
           isHelpOpen
-            ? "bg-[var(--highlight-accent)] text-white"
-            : "bg-[var(--primary-accent)] hover:bg-[var(--highlight-accent)] text-white"
+            ? "bg-highlight-accent text-white"
+            : "bg-primary-accent hover:bg-highlight-accent text-white"
         }`}
-        title="Help & Controls"
+        title={t("toolbox.help")}
       >
-        <span className="text-lg font-bold">?</span>
+        <CircleHelp size={18} />
       </button>
     </>
   );

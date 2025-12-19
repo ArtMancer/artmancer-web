@@ -31,7 +31,7 @@ export default function LoadingOverlayLayer({
     >
       <div className="flex flex-col items-center gap-3">
         {/* Spinner */}
-        <div className="w-12 h-12 border-4 border-white/30 border-t-white rounded-full animate-spin" />
+        <div className="spinner-smooth w-12 h-12 border-4 border-white/30 border-t-white rounded-full" />
         {/* Text */}
         <span className="text-white text-sm font-medium bg-black/50 px-4 py-2 rounded">
           Đang tạo smart mask...

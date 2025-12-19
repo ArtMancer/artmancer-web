@@ -7,6 +7,7 @@ import logging
 import zipfile
 import io
 from typing import Any, Dict
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -16,6 +17,48 @@ from ...services.debug_service import debug_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
+
+
+def _read_metadata(session_dir: Path) -> Dict[str, Any]:
+    """
+    Read metadata.json from session directory.
+    
+    Args:
+        session_dir: Path to session directory
+    
+    Returns:
+        Metadata dictionary (empty dict if not found or invalid)
+    """
+    metadata_path = session_dir / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_lora_log(session_dir: Path) -> str:
+    """
+    Read lora_debug.log from session directory.
+    
+    Args:
+        session_dir: Path to session directory
+    
+    Returns:
+        Log content as string (empty if not found)
+    """
+    lora_log_path = session_dir / "lora_debug.log"
+    if not lora_log_path.exists():
+        return ""
+    
+    try:
+        with open(lora_log_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 
 @router.get("/sessions")
@@ -34,16 +77,7 @@ async def list_debug_sessions() -> Dict[str, Any]:
             if not session_dir.is_dir():
                 continue
             
-            # Read metadata if available
-            metadata_path = session_dir / "metadata.json"
-            metadata = {}
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path, "r", encoding="utf-8") as f:
-                        metadata = json.load(f)
-                except Exception:
-                    pass
-            
+            metadata = _read_metadata(session_dir)
             sessions.append({
                 "session_name": session_dir.name,
                 "created_at": metadata.get("created_at", ""),
@@ -66,38 +100,54 @@ async def list_debug_sessions() -> Dict[str, Any]:
 
 @router.get("/sessions/{session_name}")
 async def get_debug_session(session_name: str) -> Dict[str, Any]:
-    """Get details of a specific debug session."""
+    """
+    Get details of a specific debug session.
+    
+    ⚠️ IMPORTANT: Debug sessions are created in H200 worker containers and stored on
+    local filesystem. They are NOT accessible from Job Manager Service (different container).
+    
+    This endpoint will only return sessions that were created in the same container
+    instance as this Job Manager Service. Most debug sessions are created in H200
+    worker containers and will return 404.
+    
+    To access debug sessions from H200 workers, you would need to:
+    1. Store sessions in Modal Volume (shared storage)
+    2. Or access them directly from H200 worker container
+    """
     if not debug_service.enabled:
-        raise HTTPException(status_code=404, detail="Debug service is not enabled")
+        raise HTTPException(
+            status_code=404, 
+            detail="Debug service is not enabled"
+        )
     
     try:
         session_dir = debug_service.base_dir / session_name
         if not session_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Session {session_name} not found")
+            raise HTTPException(
+                status_code=404, 
+                detail=(
+                    f"Debug session '{session_name}' not found. "
+                    "Debug sessions are created in H200 worker containers and stored on local filesystem. "
+                    "They are not accessible from Job Manager Service (different container). "
+                    "This is expected behavior - debug sessions are container-local."
+                )
+            )
         
-        # Read metadata
-        metadata_path = session_dir / "metadata.json"
-        if not metadata_path.exists():
-            raise HTTPException(status_code=404, detail=f"Metadata for session {session_name} not found")
+        metadata = _read_metadata(session_dir)
+        if not metadata:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Metadata for session {session_name} not found"
+            )
         
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        
-        # Read LoRA log
-        lora_log_path = session_dir / "lora_debug.log"
-        lora_log = ""
-        if lora_log_path.exists():
-            with open(lora_log_path, "r", encoding="utf-8") as f:
-                lora_log = f.read()
-        
-        # List all image files
-        image_files = [f.name for f in session_dir.iterdir() if f.suffix == ".png"]
+        lora_log = _read_lora_log(session_dir)
+        image_files = sorted([f.name for f in session_dir.iterdir() if f.suffix == ".png"])
         
         return {
             "session_name": session_name,
             "metadata": metadata,
             "lora_log": lora_log,
-            "image_files": sorted(image_files),
+            "image_files": image_files,
         }
     
     except HTTPException:
@@ -116,7 +166,10 @@ async def get_debug_image(session_name: str, image_name: str):
     try:
         image_path = debug_service.base_dir / session_name / image_name
         if not image_path.exists():
-            raise HTTPException(status_code=404, detail=f"Image {image_name} not found in session {session_name}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Image {image_name} not found in session {session_name}"
+            )
         
         return FileResponse(image_path, media_type="image/png")
     
@@ -148,20 +201,19 @@ async def cleanup_debug_sessions(keep_last_n: int = 50) -> Dict[str, Any]:
 @router.get("/status")
 async def get_debug_status() -> Dict[str, Any]:
     """Get debug service status."""
-    status = {
+    status: Dict[str, Any] = {
         "enabled": debug_service.enabled,
         "base_dir": str(debug_service.base_dir) if debug_service.enabled else None,
     }
     
     if debug_service.enabled and debug_service.base_dir.exists():
-        sessions = list(debug_service.base_dir.iterdir())
-        status["total_sessions"] = len([s for s in sessions if s.is_dir()])
+        sessions = [s for s in debug_service.base_dir.iterdir() if s.is_dir()]
+        status["total_sessions"] = len(sessions)
         
         # Calculate total disk usage
         total_size = sum(
             f.stat().st_size
             for session_dir in sessions
-            if session_dir.is_dir()
             for f in session_dir.rglob("*")
             if f.is_file()
         )
@@ -185,10 +237,7 @@ async def download_debug_session(session_name: str):
             raise HTTPException(status_code=404, detail=f"Session {session_name} is not a directory")
         
         # Collect all files in session directory
-        files_to_add = []
-        for file_path in session_dir.rglob("*"):
-            if file_path.is_file():
-                files_to_add.append(file_path)
+        files_to_add = [f for f in session_dir.rglob("*") if f.is_file()]
         
         if not files_to_add:
             raise HTTPException(status_code=404, detail=f"No files found in session {session_name}")
@@ -199,10 +248,8 @@ async def download_debug_session(session_name: str):
         zip_buffer = io.BytesIO()
         try:
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                # Add all files in session directory
                 for file_path in files_to_add:
                     try:
-                        # Use relative path within ZIP
                         arcname = file_path.relative_to(session_dir)
                         zip_file.write(file_path, arcname)
                         logger.debug(f"Added to ZIP: {arcname} ({file_path.stat().st_size} bytes)")
@@ -210,8 +257,6 @@ async def download_debug_session(session_name: str):
                         logger.warning(f"Failed to add {file_path} to ZIP: {e}")
                         # Continue with other files even if one fails
             
-            # ZIP file is automatically closed when exiting the 'with' block
-            # Now get the ZIP data
             zip_buffer.seek(0)
             zip_data = zip_buffer.getvalue()
             
@@ -220,7 +265,6 @@ async def download_debug_session(session_name: str):
             
             logger.info(f"✅ Created ZIP archive: {len(zip_data)} bytes")
             
-            # Return ZIP file as response
             return Response(
                 content=zip_data,
                 media_type="application/zip",
@@ -237,4 +281,3 @@ async def download_debug_session(session_name: str):
     except Exception as exc:
         logger.exception("Failed to download debug session")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-

@@ -9,25 +9,11 @@ import {
   Trash2,
   Plus,
   Square,
+  Eraser,
+  Eye,
+  EyeOff,
 } from "lucide-react";
-import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  IconButton,
-  Button,
-  ButtonGroup,
-  Box,
-  Slider,
-  Typography,
-  Tooltip,
-  Divider,
-  TextField,
-  ToggleButton,
-  ToggleButtonGroup,
-  CircularProgress,
-} from "@mui/material";
+import { Dialog, Slider, ToggleGroup, Checkbox, Tooltip } from "radix-ui";
 
 interface ReferenceImageEditorProps {
   isOpen: boolean;
@@ -39,6 +25,9 @@ interface ReferenceImageEditorProps {
   onModelTypeChange?: (modelType: "segmentation" | "birefnet") => void; // Callback for model type change
   borderAdjustment?: number; // Border adjustment for mask detection
   onBorderAdjustmentChange?: (value: number) => void; // Callback for border adjustment change
+  enableSmartMasking?: boolean; // Whether smart masking is enabled
+  onSmartMaskingChange?: (enabled: boolean) => void; // Callback for smart masking toggle
+  onNotification?: (type: "success" | "error" | "info" | "warning", message: string) => void; // Notification callback
 }
 
 export default function ReferenceImageEditor({
@@ -46,11 +35,14 @@ export default function ReferenceImageEditor({
   imageData,
   onClose,
   onSubmit,
-  initialMaskData,
+  initialMaskData: _initialMaskData,
   modelType = "segmentation",
   onModelTypeChange,
   borderAdjustment: propBorderAdjustment = 0,
   onBorderAdjustmentChange,
+  enableSmartMasking: propEnableSmartMasking = true,
+  onSmartMaskingChange,
+  onNotification,
 }: ReferenceImageEditorProps) {
   // Canvas refs
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -64,7 +56,7 @@ export default function ReferenceImageEditor({
   const cursorRef = useRef<HTMLDivElement | null>(null); // Ref for cursor element to update directly
 
   // Box drawing state
-  const [toolType, setToolType] = useState<"brush" | "box">("brush");
+  const [toolType, setToolType] = useState<"brush" | "box" | "eraser">("brush");
   const boxStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const boxCurrentPosRef = useRef<{ x: number; y: number } | null>(null);
   const initialBoxStateRef = useRef<ImageData | null>(null);
@@ -76,12 +68,16 @@ export default function ReferenceImageEditor({
   } | null>(null);
   const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [brushSize, setBrushSize] = useState(30); // UI value 0-100
+  const [brushSize, setBrushSize] = useState(30); // UI value 1-100
   const [hasMask, setHasMask] = useState(false);
   const [hasPendingBrush, setHasPendingBrush] = useState(false); // Track if user drew new strokes (brush or box)
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
-  const [extractedObject, setExtractedObject] = useState<string | null>(null);
+  const [, setExtractedObject] = useState<string | null>(null);
+  const [isMaskVisible, setIsMaskVisible] = useState(true);
+
+  // Keep _initialMaskData for potential future use (e.g., loading existing mask)
+  void _initialMaskData;
   // Use prop borderAdjustment if provided, otherwise use local state
   const [localBorderAdjustment, setLocalBorderAdjustment] = useState(0);
   const borderAdjustment =
@@ -90,6 +86,14 @@ export default function ReferenceImageEditor({
       : localBorderAdjustment;
   const setBorderAdjustment =
     onBorderAdjustmentChange || setLocalBorderAdjustment;
+  // Use prop enableSmartMasking if provided, otherwise use local state (default: true)
+  const [localEnableSmartMasking, setLocalEnableSmartMasking] = useState(true);
+  const enableSmartMasking =
+    propEnableSmartMasking !== undefined
+      ? propEnableSmartMasking
+      : localEnableSmartMasking;
+  const setEnableSmartMasking =
+    onSmartMaskingChange || setLocalEnableSmartMasking;
 
   // Helper: get current combined mask (confirmed + pending) as binary PNG (data URL)
   const getCurrentMaskDataUrl = useCallback((): string | null => {
@@ -145,6 +149,45 @@ export default function ReferenceImageEditor({
     return (brushSize / 100) * (baseImageSize / 5);
   }, [brushSize, imageDimensions]);
 
+  // Cleanup state when dialog closes
+  useEffect(() => {
+    if (!isOpen) {
+      // Reset all state when dialog closes
+      setIsDrawing(false);
+      setHasMask(false);
+      setHasPendingBrush(false);
+      setIsLoading(false);
+      setLoadingMessage("");
+      setIsMaskVisible(true);
+      setBrushSize(30);
+      setToolType("brush");
+      
+      // Clear refs
+      lastPointRef.current = null;
+      mousePositionRef.current = null;
+      boxStartPosRef.current = null;
+      boxCurrentPosRef.current = null;
+      initialBoxStateRef.current = null;
+      confirmedMaskRef.current = null;
+      
+      // Clear canvases
+      const maskCanvas = maskCanvasRef.current;
+      const pendingCanvas = pendingBrushCanvasRef.current;
+      if (maskCanvas) {
+        const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+        if (maskCtx) {
+          maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+        }
+      }
+      if (pendingCanvas) {
+        const pendingCtx = pendingCanvas.getContext("2d", { willReadFrequently: true });
+        if (pendingCtx) {
+          pendingCtx.clearRect(0, 0, pendingCanvas.width, pendingCanvas.height);
+        }
+      }
+    }
+  }, [isOpen]);
+
   // Load image first (only dimensions)
   useEffect(() => {
     if (!isOpen || !imageData) return;
@@ -163,9 +206,12 @@ export default function ReferenceImageEditor({
     };
     img.onerror = () => {
       console.error("Failed to load image");
+      if (onNotification) {
+        onNotification("error", "Failed to load image");
+      }
     };
     img.src = imageData;
-  }, [isOpen, imageData]);
+  }, [isOpen, imageData, onNotification]);
 
   // Draw image to canvas after canvas is mounted
   useEffect(() => {
@@ -223,8 +269,8 @@ export default function ReferenceImageEditor({
     ctx.lineWidth = actualBrushSize;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
-    ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+    ctx.strokeStyle = "rgba(255, 0, 0, 0.3)";
+    ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1.0;
     ctx.imageSmoothingEnabled = true;
@@ -312,11 +358,44 @@ export default function ReferenceImageEditor({
     [imageDimensions]
   );
 
+  // Normalize mask opacity to ensure consistent rgba(255, 0, 0, 0.3) display (same as main canvas)
+  const normalizeMaskOpacity = useCallback(() => {
+    const maskCanvas = maskCanvasRef.current;
+    if (!maskCanvas) return;
+
+    const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+    if (!maskCtx) return;
+
+    // Get current image data
+    const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    const data = imageData.data;
+
+    // Normalize opacity: any pixel with alpha > 0 should be set to rgba(255, 0, 0, 0.3)
+    // Opacity mờ hơn (0.3 thay vì 0.5) để dễ nhìn ảnh phía sau
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] > 0) {
+        // Pixel has been drawn - normalize to consistent opacity
+        data[i] = 255; // R
+        data[i + 1] = 0; // G
+        data[i + 2] = 0; // B
+        data[i + 3] = 76; // A (0.3 opacity = 76/255)
+      }
+    }
+
+    // Put normalized data back
+    maskCtx.putImageData(imageData, 0, 0);
+  }, []);
+
   // Helper: Update display canvas with combined mask (confirmed + pending)
   const updateDisplayCanvas = useCallback(() => {
     const maskCanvas = maskCanvasRef.current;
     const pendingCanvas = pendingBrushCanvasRef.current;
     if (!maskCanvas || !pendingCanvas || !imageDimensions) return;
+
+    // If eraser is being used, don't update display canvas (eraser draws directly on maskCanvas)
+    if (toolType === "eraser" && isDrawing) {
+      return;
+    }
 
     const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
     if (!maskCtx) return;
@@ -331,7 +410,10 @@ export default function ReferenceImageEditor({
 
     // Draw pending brush on top (with source-over to add)
     maskCtx.drawImage(pendingCanvas, 0, 0);
-  }, [imageDimensions]);
+
+    // Note: Don't normalize opacity here in RAF loop for performance
+    // Normalize only when needed (after merge, after SAM detection, etc.)
+  }, [imageDimensions, toolType, isDrawing]);
 
   // RAF loop for display canvas updates - batches all updates to avoid lag
   useEffect(() => {
@@ -386,9 +468,6 @@ export default function ReferenceImageEditor({
       const coords = getCanvasCoordinates(e);
       if (!coords) return;
 
-      const ctx = ctxRef.current; // This is pending brush canvas context
-      if (!ctx) return;
-
       setIsDrawing(true);
 
       if (toolType === "box") {
@@ -411,20 +490,58 @@ export default function ReferenceImageEditor({
             );
           }
         }
+      } else if (toolType === "eraser") {
+        // Eraser mode: draw directly on maskCanvas to erase confirmed mask
+        const maskCanvas = maskCanvasRef.current;
+        if (!maskCanvas) return;
+        
+        const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+        if (!maskCtx) return;
+        
+        lastPointRef.current = coords;
+
+        // Setup eraser properties
+        const actualBrushSize = getActualBrushSize();
+        maskCtx.globalAlpha = 1.0;
+        maskCtx.lineWidth = actualBrushSize;
+        maskCtx.lineCap = "round";
+        maskCtx.lineJoin = "round";
+        maskCtx.imageSmoothingEnabled = true;
+        maskCtx.imageSmoothingQuality = "high";
+        maskCtx.globalCompositeOperation = "destination-out";
+
+        // Start path for continuous stroke
+        maskCtx.beginPath();
+        maskCtx.moveTo(coords.x, coords.y);
+        
+        // Also erase from pending canvas if it has content
+        const pendingCtx = ctxRef.current;
+        if (pendingCtx) {
+          pendingCtx.globalCompositeOperation = "destination-out";
+          pendingCtx.globalAlpha = 1.0;
+          pendingCtx.lineWidth = actualBrushSize;
+          pendingCtx.lineCap = "round";
+          pendingCtx.lineJoin = "round";
+          pendingCtx.beginPath();
+          pendingCtx.moveTo(coords.x, coords.y);
+        }
       } else {
-        // Brush mode: start path (same logic as main canvas)
+        // Brush mode: start path on pending canvas
+        const ctx = ctxRef.current; // This is pending brush canvas context
+        if (!ctx) return;
+        
         lastPointRef.current = coords;
 
         // Setup brush properties
         const actualBrushSize = getActualBrushSize();
-        ctx.globalCompositeOperation = "source-over";
         ctx.globalAlpha = 1.0;
         ctx.lineWidth = actualBrushSize;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
-        ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
+        ctx.globalCompositeOperation = "source-over";
+        ctx.strokeStyle = "rgba(255, 0, 0, 0.3)";
 
         // Start path for continuous stroke (no initial dot, same as main canvas)
         ctx.beginPath();
@@ -448,12 +565,12 @@ export default function ReferenceImageEditor({
       const coords = getCanvasCoordinates(e);
       if (!coords) return;
 
-      const ctx = ctxRef.current;
-      const pendingCanvas = pendingBrushCanvasRef.current;
-      if (!ctx || !pendingCanvas) return;
-
       if (toolType === "box") {
         // Box mode: draw preview box
+        const ctx = ctxRef.current;
+        const pendingCanvas = pendingBrushCanvasRef.current;
+        if (!ctx || !pendingCanvas) return;
+        
         boxCurrentPosRef.current = coords;
 
         // Restore initial state and draw preview box
@@ -473,24 +590,47 @@ export default function ReferenceImageEditor({
 
           ctx.globalCompositeOperation = "source-over";
           ctx.globalAlpha = 1.0;
-          ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+          ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
           ctx.strokeStyle = "rgba(255, 0, 0, 0.8)";
           ctx.lineWidth = 2;
 
           ctx.fillRect(startX, startY, width, height);
           ctx.strokeRect(startX, startY, width, height);
         }
+      } else if (toolType === "eraser") {
+        // Eraser mode: draw directly on maskCanvas to erase confirmed mask
+        const maskCanvas = maskCanvasRef.current;
+        if (!maskCanvas) return;
+        
+        const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+        if (!maskCtx) return;
+        
+        // Continue eraser path on maskCanvas
+        maskCtx.lineTo(coords.x, coords.y);
+        maskCtx.stroke();
+        
+        // Also erase from pending canvas if it has content
+        const pendingCtx = ctxRef.current;
+        if (pendingCtx) {
+          pendingCtx.lineTo(coords.x, coords.y);
+          pendingCtx.stroke();
+        }
+
+        lastPointRef.current = coords;
       } else {
-        // Brush mode: continue drawing path (same logic as main canvas)
+        // Brush mode: continue drawing path on pending canvas
+        const ctx = ctxRef.current;
+        if (!ctx) return;
+        
         // Ensure brush properties are set for round, smooth brush
-        ctx.globalCompositeOperation = "source-over";
         ctx.globalAlpha = 1.0;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
+        ctx.globalCompositeOperation = "source-over";
         if (!ctx.strokeStyle || ctx.strokeStyle === "rgba(0, 0, 0, 0)") {
-          ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
+          ctx.strokeStyle = "rgba(255, 0, 0, 0.3)";
         }
 
         // Continue path (no beginPath/moveTo, just lineTo and stroke)
@@ -523,7 +663,7 @@ export default function ReferenceImageEditor({
 
             ctx.globalCompositeOperation = "source-over";
             ctx.globalAlpha = 1.0;
-            ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+            ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
             ctx.strokeStyle = "rgba(255, 0, 0, 0.8)";
             ctx.lineWidth = 2;
 
@@ -534,15 +674,73 @@ export default function ReferenceImageEditor({
         boxStartPosRef.current = null;
         boxCurrentPosRef.current = null;
         initialBoxStateRef.current = null;
+      } else if (toolType === "eraser") {
+        // Eraser mode: eraser was drawn directly on maskCanvas, so confirmed mask is already updated
+        // Just need to update confirmedMaskRef from current maskCanvas state
+        const maskCanvas = maskCanvasRef.current;
+        if (maskCanvas) {
+          const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+          if (maskCtx) {
+            // Update confirmed mask ref from current maskCanvas state
+            confirmedMaskRef.current = maskCtx.getImageData(
+              0,
+              0,
+              maskCanvas.width,
+              maskCanvas.height
+            );
+          }
+        }
+        // Clear pending canvas (eraser strokes are already applied to maskCanvas)
+        const pendingCtx = ctxRef.current;
+        if (pendingCtx) {
+          const pendingCanvas = pendingBrushCanvasRef.current;
+          if (pendingCanvas) {
+            pendingCtx.clearRect(0, 0, pendingCanvas.width, pendingCanvas.height);
+          }
+        }
+        lastPointRef.current = null;
       } else {
         // Brush mode
         lastPointRef.current = null;
       }
 
+      // CRITICAL: Merge pending canvas to display canvas one final time before normalizing
+      // This ensures all strokes are on display canvas
+      const maskCanvas = maskCanvasRef.current;
+      const pendingCanvas = pendingBrushCanvasRef.current;
+      if (maskCanvas && pendingCanvas && hasPendingBrush) {
+        const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+        if (maskCtx) {
+          // Merge pending brush/box into display canvas
+          maskCtx.globalCompositeOperation = "source-over";
+          maskCtx.globalAlpha = 1.0;
+          maskCtx.drawImage(pendingCanvas, 0, 0);
+          
+          // Update confirmed mask ref
+          confirmedMaskRef.current = maskCtx.getImageData(
+            0,
+            0,
+            maskCanvas.width,
+            maskCanvas.height
+          );
+          
+          // Clear pending canvas
+          const pendingCtx = ctxRef.current;
+          if (pendingCtx) {
+            pendingCtx.clearRect(0, 0, pendingCanvas.width, pendingCanvas.height);
+          }
+          
+          setHasPendingBrush(false);
+        }
+      }
+
+      // NOW normalize mask opacity on the merged display canvas
+      normalizeMaskOpacity();
+
       // Hide cursor when mouse is released (same behavior as main canvas)
       mousePositionRef.current = null;
     }
-  }, [isDrawing, toolType]);
+  }, [isDrawing, toolType, normalizeMaskOpacity, hasPendingBrush]);
 
   // Handle mouse move for brush preview - only update ref, no state updates
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
@@ -846,6 +1044,9 @@ export default function ReferenceImageEditor({
             if (maskCtx) {
               maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
               maskCtx.putImageData(newMaskData, 0, 0);
+              
+              // Normalize opacity to ensure consistent display (same as main canvas)
+              normalizeMaskOpacity();
             }
           }
           setHasMask(true);
@@ -853,11 +1054,20 @@ export default function ReferenceImageEditor({
         maskImg.src = `data:image/png;base64,${maskBase64}`;
       } else if (data.error) {
         console.error("Smart mask error:", data.error);
-        alert(`Failed to detect object: ${data.error}`);
+        if (onNotification) {
+          onNotification("error", `Failed to detect object: ${data.error}`);
+        } else {
+          alert(`Failed to detect object: ${data.error}`);
+        }
       }
     } catch (error) {
       console.error("Segmentation detection failed:", error);
-      alert("Failed to detect object. Please try again.");
+      const errorMessage = error instanceof Error ? error.message : "Failed to detect object. Please try again.";
+      if (onNotification) {
+        onNotification("error", errorMessage);
+      } else {
+        alert(errorMessage);
+      }
     } finally {
       setIsLoading(false);
       setLoadingMessage("");
@@ -869,6 +1079,8 @@ export default function ReferenceImageEditor({
     borderAdjustment,
     modelType,
     toolType,
+    normalizeMaskOpacity,
+    onNotification,
   ]);
 
   // Extract object (remove background)
@@ -975,7 +1187,12 @@ export default function ReferenceImageEditor({
       }
     } catch (error) {
       console.error("Object extraction failed:", error);
-      alert("Failed to extract object. Using original image.");
+      const errorMessage = "Failed to extract object. Using original image.";
+      if (onNotification) {
+        onNotification("warning", errorMessage);
+      } else {
+        alert(errorMessage);
+      }
       onSubmit(imageData, getCurrentMaskDataUrl());
       onClose();
     } finally {
@@ -989,6 +1206,7 @@ export default function ReferenceImageEditor({
     onSubmit,
     onClose,
     getCurrentMaskDataUrl,
+    onNotification,
   ]);
 
   // Handle submit
@@ -1005,664 +1223,422 @@ export default function ReferenceImageEditor({
 
   if (!isOpen) return null;
 
+  // Calculate display scale to fit within dialog (accounting for toolbar and padding)
   const displayScale = imageDimensions
-    ? Math.min(600 / imageDimensions.width, 500 / imageDimensions.height, 1)
+    ? Math.min(
+        (typeof window !== "undefined" ? window.innerWidth * 0.9 : 1200) / imageDimensions.width,
+        (typeof window !== "undefined" ? window.innerHeight * 0.85 : 800) / imageDimensions.height,
+        1
+      )
     : 1;
 
   return (
-    <Dialog
-      open={isOpen}
-      onClose={onClose}
-      maxWidth="lg"
-      fullWidth
-      fullScreen={false}
-      disableEnforceFocus={false}
-      disableAutoFocus={false}
-      disableScrollLock={false}
-      PaperProps={{
-        sx: {
-          bgcolor: "var(--secondary-bg)",
-          color: "var(--text-primary)",
-          maxHeight: { xs: "95vh", sm: "90vh" },
-          borderRadius: { xs: 0, sm: 2 },
-          m: { xs: 0, sm: 2 },
-          width: { xs: "100%", sm: "auto" },
-        },
-      }}
-    >
-      <DialogTitle
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          pb: 1,
-          borderBottom: 1,
-          borderColor: "var(--border-color)",
-          color: "var(--text-primary)",
-        }}
-      >
-        Edit Reference Image
-        <IconButton
-          onClick={onClose}
-          size="small"
-          sx={{ color: "var(--text-secondary)" }}
-        >
-          <X size={18} />
-        </IconButton>
-      </DialogTitle>
-
-      <DialogContent
-        sx={{
-          p: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        {/* Toolbar - Compact and responsive */}
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            gap: { xs: 1, sm: 1.5 },
-            px: { xs: 1, sm: 2 },
-            py: { xs: 1, sm: 1.5 },
-            borderBottom: 1,
-            borderColor: "var(--border-color)",
-            bgcolor: "var(--primary-bg)",
-            flexWrap: "wrap",
-          }}
-        >
-          {/* Tool selection */}
-          <ToggleButtonGroup
-            value={toolType}
-            exclusive
-            onChange={(_, value) => value && setToolType(value)}
-            size="small"
-            sx={{
-              "& .MuiToggleButton-root": {
-                borderColor: "var(--border-color)",
-                color: "var(--text-secondary)",
-                "&.Mui-selected": {
-                  bgcolor: "var(--primary-accent)",
-                  color: "white",
-                  "&:hover": {
-                    bgcolor: "var(--primary-accent)",
-                  },
-                },
-              },
-            }}
-          >
-            <Tooltip title="Brush tool">
-              <span>
-                <ToggleButton value="brush" disabled={isLoading}>
-                  <Paintbrush size={16} />
-                </ToggleButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="Box tool">
-              <span>
-                <ToggleButton value="box" disabled={isLoading}>
-                  <Square size={16} />
-                </ToggleButton>
-              </span>
-            </Tooltip>
-          </ToggleButtonGroup>
-
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{ borderColor: "var(--border-color)" }}
-          />
-
-          {/* Brush size (only show for brush tool) */}
-          {toolType === "brush" && (
-            <>
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  minWidth: { xs: 100, sm: 120 },
-                }}
+    <Dialog.Root open={isOpen} onOpenChange={(open: boolean) => !open && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay fixed inset-0 bg-black/50 backdrop-blur z-[1300]" />
+        <Dialog.Content className="dialog-content fixed inset-2 sm:inset-4 bg-secondary-bg text-text-primary max-h-[calc(100vh-1rem)] sm:max-h-[calc(100vh-2rem)] max-w-[calc(100vw-1rem)] sm:max-w-[calc(100vw-2rem)] rounded-lg flex flex-col overflow-hidden z-[1301]">
+          <div className="flex items-center justify-between border-b border-border-color px-3 py-2">
+            <Dialog.Title className="text-sm font-semibold text-text-primary">
+              Edit Reference Image
+            </Dialog.Title>
+            <Dialog.Close asChild>
+              <button
+                onClick={onClose}
+                className="p-1 text-text-secondary hover:text-text-primary transition-colors"
+                aria-label="Close"
               >
-                <Paintbrush
-                  size={14}
-                  style={{ color: "var(--text-secondary)" }}
-                />
-                <Slider
-                  value={brushSize}
-                  onChange={(_, value) => setBrushSize(value as number)}
-                  min={5}
-                  max={100}
-                  size="small"
-                  sx={{
-                    width: { xs: 60, sm: 80 },
-                    color: "var(--primary-accent)",
-                    "& .MuiSlider-thumb": {
-                      backgroundColor: "var(--primary-accent)",
-                    },
-                    "& .MuiSlider-track": {
-                      backgroundColor: "var(--primary-accent)",
-                    },
-                    "& .MuiSlider-rail": {
-                      backgroundColor: "var(--border-color)",
-                    },
-                  }}
-                />
-                <Typography
-                  variant="caption"
-                  sx={{
-                    color: "var(--text-secondary)",
-                    minWidth: { xs: 28, sm: 32 },
-                    fontSize: { xs: "0.65rem", sm: "0.75rem" },
-                  }}
-                >
-                  {brushSize}px
-                </Typography>
-              </Box>
-              <Divider
-                orientation="vertical"
-                flexItem
-                sx={{
-                  borderColor: "var(--border-color)",
-                  display: { xs: "none", sm: "block" },
-                }}
-              />
-            </>
-          )}
+                <X size={18} />
+              </button>
+            </Dialog.Close>
+          </div>
 
-          {/* Border Adjustment */}
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              minWidth: { xs: 120, sm: 140 },
-            }}
-          >
-            <Typography
-              variant="caption"
-              sx={{
-                color: "var(--text-secondary)",
-                whiteSpace: "nowrap",
-                fontSize: { xs: "0.65rem", sm: "0.75rem" },
-                display: { xs: "none", sm: "block" },
-              }}
-            >
-              Border:
-            </Typography>
-            <TextField
-              type="number"
-              value={borderAdjustment}
-              onChange={(e) => {
-                const value = parseInt(e.target.value);
-                if (!isNaN(value) && value >= -10 && value <= 10) {
-                  setBorderAdjustment(value);
-                }
-              }}
-              onBlur={(e) => {
-                const value = parseInt(e.target.value);
-                if (isNaN(value) || value < -10) {
-                  setBorderAdjustment(-10);
-                } else if (value > 10) {
-                  setBorderAdjustment(10);
-                }
-              }}
-              size="small"
-              inputProps={{
-                min: -10,
-                max: 10,
-                style: { textAlign: "center", padding: "4px 8px" },
-              }}
-              sx={{
-                width: { xs: 45, sm: 50 },
-                "& .MuiOutlinedInput-root": {
-                  bgcolor: "var(--primary-bg)",
-                  borderColor: "var(--border-color)",
-                  "& fieldset": {
-                    borderColor: "var(--border-color)",
-                  },
-                  "&:hover fieldset": {
-                    borderColor: "var(--primary-accent)",
-                  },
-                  "&.Mui-focused fieldset": {
-                    borderColor: "var(--primary-accent)",
-                  },
-                },
-                "& .MuiInputBase-input": {
-                  color: "var(--text-primary)",
-                  fontSize: { xs: "0.7rem", sm: "0.75rem" },
-                },
-              }}
-            />
-            <Box sx={{ width: { xs: 60, sm: 80 } }}>
-              <Slider
-                value={borderAdjustment}
-                onChange={(_, value) => setBorderAdjustment(value as number)}
-                min={-10}
-                max={10}
-                step={1}
-                size="small"
-                valueLabelDisplay="auto"
-                sx={{
-                  color: "var(--primary-accent)",
-                  "& .MuiSlider-thumb": {
-                    backgroundColor: "var(--primary-accent)",
-                  },
-                  "& .MuiSlider-track": {
-                    backgroundColor: "var(--primary-accent)",
-                  },
-                  "& .MuiSlider-rail": {
-                    backgroundColor: "var(--border-color)",
-                  },
-                }}
-              />
-            </Box>
-          </Box>
-
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{
-              borderColor: "var(--border-color)",
-              display: { xs: "none", sm: "block" },
-            }}
-          />
-
-          {/* Model Type Selection */}
-          {onModelTypeChange && (
-            <>
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  flexWrap: { xs: "wrap", sm: "nowrap" },
-                }}
+          <div className="flex flex-col overflow-hidden">
+            {/* Toolbar */}
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border-color bg-primary-bg">
+              <ToggleGroup.Root
+                type="single"
+                value={toolType}
+                onValueChange={(value: string) => value && setToolType(value as "brush" | "box" | "eraser")}
+                className="inline-flex rounded-md border border-border-color overflow-hidden"
               >
-                <Typography
-                  variant="caption"
-                  sx={{
-                    color: "var(--text-secondary)",
-                    whiteSpace: "nowrap",
-                    fontSize: { xs: "0.65rem", sm: "0.75rem" },
-                    display: { xs: "none", sm: "block" },
-                  }}
-                >
-                  Model:
-                </Typography>
-                <ButtonGroup size="small" sx={{ height: 28 }}>
-                  <Button
-                    onClick={() => onModelTypeChange("segmentation")}
-                    disabled={isLoading}
-                    variant={
-                      modelType === "segmentation" ? "contained" : "outlined"
-                    }
-                    sx={{
-                      minWidth: { xs: 60, sm: 70 },
-                      fontSize: { xs: "0.65rem", sm: "0.7rem" },
-                      bgcolor:
-                        modelType === "segmentation"
-                          ? "var(--primary-accent)"
-                          : "transparent",
-                      color:
-                        modelType === "segmentation"
-                          ? "white"
-                          : "var(--text-secondary)",
-                      borderColor: "var(--border-color)",
-                      "&:hover": {
-                        bgcolor:
-                          modelType === "segmentation"
-                            ? "var(--primary-accent)"
-                            : "var(--hover-bg)",
-                        borderColor: "var(--primary-accent)",
-                      },
-                    }}
-                  >
-                    FastSAM
-                  </Button>
-                  <Button
-                    onClick={() => onModelTypeChange("birefnet")}
-                    disabled={isLoading}
-                    variant={
-                      modelType === "birefnet" ? "contained" : "outlined"
-                    }
-                    sx={{
-                      minWidth: { xs: 60, sm: 70 },
-                      fontSize: { xs: "0.65rem", sm: "0.7rem" },
-                      bgcolor:
-                        modelType === "birefnet"
-                          ? "var(--primary-accent)"
-                          : "transparent",
-                      color:
-                        modelType === "birefnet"
-                          ? "white"
-                          : "var(--text-secondary)",
-                      borderColor: "var(--border-color)",
-                      "&:hover": {
-                        bgcolor:
-                          modelType === "birefnet"
-                            ? "var(--primary-accent)"
-                            : "var(--hover-bg)",
-                        borderColor: "var(--primary-accent)",
-                      },
-                    }}
-                  >
-                    BiRefNet
-                  </Button>
-                </ButtonGroup>
-              </Box>
-              <Divider
-                orientation="vertical"
-                flexItem
-                sx={{
-                  borderColor: "var(--border-color)",
-                  display: { xs: "none", sm: "block" },
-                }}
-              />
-            </>
-          )}
-
-          {/* Action buttons */}
-          <Box
-            sx={{
-              display: "flex",
-              gap: { xs: 0.5, sm: 1 },
-              ml: { xs: "auto", sm: "auto" },
-            }}
-          >
-            <Tooltip
-              title={
-                hasMask && !hasPendingBrush
-                  ? "Add object"
-                  : hasPendingBrush
-                  ? toolType === "box"
-                    ? "Detect from box"
-                    : "Detect from brush"
-                  : "Auto detect"
-              }
-            >
-              <span>
-                <Button
-                  onClick={detectWithSAM}
+                <ToggleGroup.Item
+                  value="brush"
                   disabled={isLoading}
-                  size="small"
-                  startIcon={
-                    hasMask && !hasPendingBrush ? (
-                      <Plus size={14} />
-                    ) : (
-                      <Wand2 size={14} />
-                    )
-                  }
-                  sx={{
-                    bgcolor: "var(--primary-accent)",
-                    color: "white",
-                    "&:hover": {
-                      bgcolor: "var(--highlight-accent)",
-                    },
-                    fontSize: { xs: "0.7rem", sm: "0.75rem" },
-                    px: { xs: 1, sm: 1.5 },
-                    minWidth: { xs: "auto", sm: "auto" },
-                  }}
+                  title="Brush tool"
+                  className={`tool-item px-2 py-1 text-sm flex items-center justify-center border-r border-border-color transition-all duration-150 ${
+                    toolType === "brush"
+                      ? "tool-item-active bg-primary-accent text-white"
+                      : "bg-secondary-bg text-text-secondary hover:bg-[var(--hover-bg)]"
+                  } ${isLoading ? "opacity-60 cursor-not-allowed" : ""}`}
                 >
+                  <Paintbrush size={16} className={toolType === "brush" ? "tool-icon-rotate" : ""} data-active={toolType === "brush"} />
+                </ToggleGroup.Item>
+                <ToggleGroup.Item
+                  value="box"
+                  disabled={isLoading}
+                  title="Box tool"
+                  className={`tool-item px-2 py-1 text-sm flex items-center justify-center border-r border-border-color transition-all duration-150 ${
+                    toolType === "box"
+                      ? "tool-item-active bg-primary-accent text-white"
+                      : "bg-secondary-bg text-text-secondary hover:bg-[var(--hover-bg)]"
+                  } ${isLoading ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  <Square size={16} />
+                </ToggleGroup.Item>
+                <ToggleGroup.Item
+                  value="eraser"
+                  disabled={isLoading}
+                  title="Eraser tool"
+                  className={`tool-item px-2 py-1 text-sm flex items-center justify-center transition-all duration-150 ${
+                    toolType === "eraser"
+                      ? "tool-item-active bg-primary-accent text-white"
+                      : "bg-secondary-bg text-text-secondary hover:bg-[var(--hover-bg)]"
+                  } ${isLoading ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  <Eraser size={16} className={toolType === "eraser" ? "tool-icon-rotate" : ""} data-active={toolType === "eraser"} />
+                </ToggleGroup.Item>
+              </ToggleGroup.Root>
+
+              <div className="hidden sm:block h-6 w-px bg-border-color" />
+
+              {(toolType === "brush" || toolType === "eraser") && (
+                <>
+                  <div className="flex items-center gap-2 min-w-[120px]">
+                    {toolType === "brush" ? (
+                      <Paintbrush size={14} className="text-text-secondary" />
+                    ) : (
+                      <Eraser size={14} className="text-text-secondary" />
+                    )}
+                    <Slider.Root
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={[brushSize]}
+                      onValueChange={([value]: number[]) => setBrushSize(value)}
+                      className="relative flex h-5 w-[80px] touch-none select-none items-center"
+                    >
+                      <Slider.Track className="relative h-1 w-full rounded-full bg-border-color">
+                        <Slider.Range className="absolute h-1 rounded-full bg-primary-accent" />
+                      </Slider.Track>
+                      <Slider.Thumb className="block h-4 w-4 rounded-full bg-primary-accent shadow transition-transform focus:outline-none focus:ring-2 focus:ring-primary-accent" />
+                    </Slider.Root>
+                    <span className="text-[0.75rem] text-text-secondary min-w-[32px]">
+                      {brushSize}px
+                    </span>
+                  </div>
+                  <div className="hidden sm:block h-6 w-px bg-border-color" />
+                </>
+              )}
+
+              {/* Smart Masking Toggle */}
+              <label className="flex items-center gap-2 text-text-primary text-sm cursor-pointer">
+                <Checkbox.Root
+                  checked={enableSmartMasking}
+                  onCheckedChange={(checked: boolean | "indeterminate") =>
+                    setEnableSmartMasking(!!checked)
+                  }
+                  disabled={isLoading}
+                  className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                    enableSmartMasking
+                      ? "bg-primary-accent border-primary-accent"
+                      : "bg-transparent border-border-color"
+                  } ${isLoading ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
+                >
+                  <Checkbox.Indicator>
+                    <Check size={12} strokeWidth={3} className="text-white" />
+                  </Checkbox.Indicator>
+                </Checkbox.Root>
+                <span className="text-[0.75rem] text-text-secondary whitespace-nowrap">
+                  Smart Masking
+                </span>
+              </label>
+
+              {enableSmartMasking && onModelTypeChange && (
+                <>
+                  <div className="hidden sm:block h-6 w-px bg-border-color" />
+                  <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                    <span className="hidden sm:inline text-[0.75rem] text-text-secondary whitespace-nowrap">
+                      Model:
+                    </span>
+                    <div className="inline-flex rounded border border-border-color overflow-hidden">
+                      <button
+                        onClick={() => {
+                          onModelTypeChange("segmentation");
+                        }}
+                        disabled={isLoading}
+                        className={`px-3 py-1 text-[0.7rem] ${
+                          modelType === "segmentation"
+                            ? "bg-primary-accent text-white"
+                            : "bg-transparent text-text-secondary hover:bg-[var(--hover-bg)]"
+                        } ${isLoading ? "opacity-60 cursor-not-allowed" : ""}`}
+                      >
+                        FastSAM
+                      </button>
+                      <button
+                        onClick={() => {
+                          onModelTypeChange("birefnet");
+                        }}
+                        disabled={isLoading}
+                        className={`px-3 py-1 text-[0.7rem] border-l border-border-color ${
+                          modelType === "birefnet"
+                            ? "bg-primary-accent text-white"
+                            : "bg-transparent text-text-secondary hover:bg-[var(--hover-bg)]"
+                        } ${isLoading ? "opacity-60 cursor-not-allowed" : ""}`}
+                      >
+                        BiRefNet
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {enableSmartMasking && (
+                <>
+                  <div className="hidden sm:block h-6 w-px bg-border-color" />
+                  <div className="flex items-center gap-2 min-w-[140px]">
+                    <span className="hidden sm:inline text-[0.75rem] text-text-secondary whitespace-nowrap">
+                      Border:
+                    </span>
+                    <input
+                      type="number"
+                      min={-10}
+                      max={10}
+                      value={borderAdjustment}
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value, 10);
+                        if (!Number.isNaN(value) && value >= -10 && value <= 10) {
+                          setBorderAdjustment(value);
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const value = parseInt(e.target.value, 10);
+                        if (Number.isNaN(value) || value < -10) {
+                          setBorderAdjustment(-10);
+                        } else if (value > 10) {
+                          setBorderAdjustment(10);
+                        }
+                      }}
+                      className="w-14 rounded border border-border-color bg-primary-bg text-text-primary text-[0.7rem] px-2 py-1 text-center"
+                    />
+                    <div className="w-[80px]">
+                      <Slider.Root
+                        min={-10}
+                        max={10}
+                        step={1}
+                        value={[borderAdjustment]}
+                        onValueChange={([value]: number[]) => setBorderAdjustment(value)}
+                        className="relative flex h-5 w-full touch-none select-none items-center"
+                      >
+                        <Slider.Track className="relative h-1 w-full rounded-full bg-border-color">
+                          <Slider.Range className="absolute h-1 rounded-full bg-primary-accent" />
+                        </Slider.Track>
+                        <Slider.Thumb className="block h-4 w-4 rounded-full bg-primary-accent shadow transition-transform focus:outline-none focus:ring-2 focus:ring-primary-accent" />
+                      </Slider.Root>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Mask Visibility Toggle */}
+              {(hasMask || hasPendingBrush) && (
+                <>
+                  <div className="hidden sm:block h-6 w-px bg-border-color" />
+                  <Tooltip.Root delayDuration={300}>
+                    <Tooltip.Trigger asChild>
+                      <button
+                        onClick={() => setIsMaskVisible(!isMaskVisible)}
+                        className={`btn-interactive p-2 rounded border transition-colors ${
+                          isMaskVisible
+                            ? "bg-secondary-bg hover:bg-primary-accent text-text-primary hover:text-white border-border-color"
+                            : "bg-primary-accent hover:bg-[var(--highlight-accent)] text-white border-primary-accent"
+                        }`}
+                      >
+                        {isMaskVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content className="bg-secondary-bg border border-border-color text-text-primary px-2 py-1 rounded text-xs shadow-lg" sideOffset={5}>
+                        {isMaskVisible ? "Hide mask" : "Show mask"}
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </>
+              )}
+
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  onClick={detectWithSAM}
+                  disabled={isLoading || !enableSmartMasking}
+                  title={
+                    !enableSmartMasking
+                      ? "Enable Smart Masking to use auto detect"
+                      : hasMask && !hasPendingBrush
+                      ? "Add object"
+                      : hasPendingBrush
+                      ? toolType === "box"
+                        ? "Detect from box"
+                        : "Detect from brush"
+                      : "Auto detect"
+                  }
+                  className={`inline-flex items-center gap-1 rounded px-3 py-2 text-xs font-medium transition-colors ${
+                    isLoading || !enableSmartMasking
+                      ? "opacity-60 cursor-not-allowed bg-primary-accent text-white"
+                      : "bg-primary-accent text-white hover:bg-[var(--highlight-accent)]"
+                  }`}
+                >
+                  {hasMask && !hasPendingBrush ? (
+                    <Plus size={14} />
+                  ) : (
+                    <Wand2 size={14} />
+                  )}
                   {hasMask && !hasPendingBrush
                     ? "Add"
                     : hasPendingBrush
                     ? "Detect"
                     : "Auto"}
-                </Button>
-              </span>
-            </Tooltip>
-            <Tooltip title="Clear mask">
-              <span>
-                <IconButton
+                </button>
+                <button
                   onClick={clearMask}
                   disabled={isLoading || !hasMask}
-                  size="small"
-                  sx={{
-                    color: "var(--text-secondary)",
-                    "&:hover": {
-                      bgcolor: "var(--hover-bg)",
-                      color: "var(--text-primary)",
-                    },
-                  }}
+                  title="Clear mask"
+                  className={`p-2 rounded border border-border-color text-text-secondary hover:bg-[var(--hover-bg)] transition-colors ${
+                    isLoading || !hasMask ? "opacity-50 cursor-not-allowed" : ""
+                  }`}
                 >
                   <Trash2 size={16} />
-                </IconButton>
-              </span>
-            </Tooltip>
-          </Box>
-        </Box>
+                </button>
+              </div>
+            </div>
 
-        {/* Canvas area */}
-        <Box
-          ref={containerRef}
-          sx={{
-            flex: 1,
-            overflow: "auto",
-            p: 2,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            bgcolor: "var(--primary-bg)",
-            position: "relative",
-            minHeight: 400,
-          }}
-        >
-          {isLoading && (
-            <Box
-              sx={{
-                position: "absolute",
-                inset: 0,
-                bgcolor: "rgba(0, 0, 0, 0.5)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 10,
-              }}
+            {/* Canvas area */}
+            <div
+              ref={containerRef}
+              className="flex-1 overflow-auto p-4 flex items-center justify-center bg-primary-bg relative min-h-[400px]"
             >
-              <Box sx={{ textAlign: "center" }}>
-                <CircularProgress
-                  size={32}
-                  sx={{
-                    color: "var(--primary-accent)",
-                    mb: 1,
-                  }}
-                />
-                <Typography
-                  variant="body2"
-                  sx={{ color: "var(--text-secondary)" }}
-                >
-                  {loadingMessage}
-                </Typography>
-              </Box>
-            </Box>
-          )}
-
-          {!imageDimensions && (
-            <Typography variant="body2" sx={{ color: "var(--text-secondary)" }}>
-              Loading image...
-            </Typography>
-          )}
-
-          {/* Hidden canvas for pending brush strokes */}
-          <canvas ref={pendingBrushCanvasRef} className="hidden" />
-
-          {imageDimensions && (
-            <Box
-              sx={{
-                position: "relative",
-                border: 1,
-                borderColor: "var(--border-color)",
-                borderRadius: 1,
-                overflow: "hidden",
-                width: Math.max(imageDimensions.width * displayScale, 200),
-                height: Math.max(imageDimensions.height * displayScale, 200),
-              }}
-            >
-              {/* Main image canvas */}
-              <canvas
-                ref={canvasRef}
-                className="absolute inset-0 rounded-lg"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  imageRendering: "auto",
-                }}
-              />
-
-              {/* Mask overlay canvas */}
-              <canvas
-                ref={maskCanvasRef}
-                className="absolute inset-0 rounded-lg cursor-none"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  imageRendering: "auto",
-                  touchAction: "none",
-                }}
-                onMouseDown={startDrawing}
-                onMouseMove={handleCanvasMouseMove}
-                onMouseUp={stopDrawing}
-                onMouseLeave={handleCanvasMouseLeave}
-                onTouchStart={startDrawing}
-                onTouchMove={draw}
-                onTouchEnd={stopDrawing}
-              />
-
-              {/* Brush preview cursor - updated via RAF loop, no React state */}
-              {imageDimensions && (
-                <div
-                  ref={cursorRef}
-                  className="pointer-events-none absolute"
-                  style={{
-                    display: "none",
-                    transform: "translate(-50%, -50%)",
-                  }}
-                >
-                  {/* Outer ring - black border */}
-                  <div
-                    className="absolute rounded-full border-2 border-black/70"
-                    style={{
-                      width: getActualBrushSize() * displayScale,
-                      height: getActualBrushSize() * displayScale,
-                      transform: "translate(-50%, -50%)",
-                      left: "50%",
-                      top: "50%",
-                    }}
-                  />
-                  {/* Inner ring - white */}
-                  <div
-                    className="absolute rounded-full border border-white/90"
-                    style={{
-                      width: getActualBrushSize() * displayScale - 2,
-                      height: getActualBrushSize() * displayScale - 2,
-                      transform: "translate(-50%, -50%)",
-                      left: "50%",
-                      top: "50%",
-                    }}
-                  />
-                  {/* Center dot */}
-                  <div
-                    className="absolute w-1 h-1 bg-white rounded-full border border-black/50"
-                    style={{
-                      transform: "translate(-50%, -50%)",
-                      left: "50%",
-                      top: "50%",
-                    }}
-                  />
+              {isLoading && (
+                <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center z-10">
+                  <div className="h-8 w-8 rounded-full border-2 border-primary-accent border-t-transparent animate-spin mb-2" />
+                  <p className="text-text-secondary text-sm">{loadingMessage}</p>
                 </div>
               )}
-            </Box>
-          )}
-        </Box>
-      </DialogContent>
 
-      {/* Footer */}
-      <DialogActions
-        sx={{
-          px: { xs: 1.5, sm: 2 },
-          py: { xs: 1, sm: 1.5 },
-          borderTop: 1,
-          borderColor: "var(--border-color)",
-          bgcolor: "var(--primary-bg)",
-          justifyContent: "space-between",
-          flexDirection: { xs: "column", sm: "row" },
-          gap: { xs: 1.5, sm: 2 },
-          alignItems: { xs: "stretch", sm: "center" },
-        }}
-      >
-        <Typography
-          variant="caption"
-          sx={{
-            color: "var(--text-secondary)",
-            flex: { xs: 0, sm: 1 },
-            fontSize: { xs: "0.65rem", sm: "0.75rem" },
-            textAlign: { xs: "center", sm: "left" },
-            lineHeight: 1.4,
-            wordWrap: "break-word",
-            overflowWrap: "break-word",
-            maxWidth: "100%",
-            minWidth: 0,
-            px: { xs: 0.5, sm: 0 },
-          }}
-        >
-          {hasMask
-            ? "Object selected. Click Submit to extract."
-            : "Draw on image to select object, or click Auto detect. Submit without selection to use original image."}
-        </Typography>
-        <Box
-          sx={{
-            display: "flex",
-            gap: { xs: 1, sm: 1.5 },
-            width: { xs: "100%", sm: "auto" },
-            justifyContent: { xs: "stretch", sm: "flex-end" },
-            flexShrink: 0,
-            minWidth: 0,
-          }}
-        >
-          <Button
-            onClick={onClose}
-            disabled={isLoading}
-            size="small"
-            sx={{
-              color: "var(--text-secondary)",
-              flex: { xs: 1, sm: 0 },
-              minWidth: { xs: 0, sm: 64 },
-              whiteSpace: "nowrap",
-              "&:hover": {
-                bgcolor: "var(--hover-bg)",
-                color: "var(--text-primary)",
-              },
-            }}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={isLoading}
-            variant="contained"
-            size="small"
-            startIcon={<Check size={14} />}
-            sx={{
-              bgcolor: "var(--primary-accent)",
-              color: "white",
-              flex: { xs: 1, sm: 0 },
-              minWidth: { xs: 0, sm: 80 },
-              whiteSpace: "nowrap",
-              "&:hover": {
-                bgcolor: "var(--highlight-accent)",
-              },
-              "& .MuiButton-startIcon": {
-                marginRight: { xs: 0.5, sm: 1 },
-              },
-            }}
-          >
-            Submit
-          </Button>
-        </Box>
-      </DialogActions>
-    </Dialog>
+              {!imageDimensions && (
+                <p className="text-text-secondary text-sm">Loading image...</p>
+              )}
+
+              <canvas ref={pendingBrushCanvasRef} className="hidden" />
+
+              {imageDimensions && (
+                <div
+                  className="relative border border-border-color rounded-md overflow-hidden"
+                  style={{
+                    width: Math.max(imageDimensions.width * displayScale, 200),
+                    height: Math.max(imageDimensions.height * displayScale, 200),
+                  }}
+                >
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      imageRendering: "auto",
+                    }}
+                  />
+
+                  <canvas
+                    ref={maskCanvasRef}
+                    className="absolute inset-0 rounded-lg cursor-none transition-opacity duration-200"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      imageRendering: "auto",
+                      touchAction: "none",
+                      opacity: isMaskVisible ? 1 : 0,
+                    }}
+                    onMouseDown={startDrawing}
+                    onMouseMove={handleCanvasMouseMove}
+                    onMouseUp={stopDrawing}
+                    onMouseLeave={handleCanvasMouseLeave}
+                    onTouchStart={startDrawing}
+                    onTouchMove={draw}
+                    onTouchEnd={stopDrawing}
+                  />
+
+                  {imageDimensions && (
+                    <div
+                      ref={cursorRef}
+                      className="pointer-events-none absolute"
+                      style={{
+                        display: "none",
+                        transform: "translate(-50%, -50%)",
+                      }}
+                    >
+                      <div
+                        className="absolute rounded-full border-2 border-black/70"
+                        style={{
+                          width: getActualBrushSize() * displayScale,
+                          height: getActualBrushSize() * displayScale,
+                          transform: "translate(-50%, -50%)",
+                          left: "50%",
+                          top: "50%",
+                        }}
+                      />
+                      <div
+                        className="absolute rounded-full border border-white/90"
+                        style={{
+                          width: getActualBrushSize() * displayScale - 2,
+                          height: getActualBrushSize() * displayScale - 2,
+                          transform: "translate(-50%, -50%)",
+                          left: "50%",
+                          top: "50%",
+                        }}
+                      />
+                      <div
+                        className="absolute w-1 h-1 bg-white rounded-full border border-black/50"
+                        style={{
+                          transform: "translate(-50%, -50%)",
+                          left: "50%",
+                          top: "50%",
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="px-4 py-3 border-t border-border-color bg-primary-bg flex flex-col sm:flex-row gap-3 sm:gap-4 items-stretch sm:items-center justify-between">
+            <p className="text-text-secondary text-[0.75rem] leading-relaxed sm:flex-1 text-center sm:text-left">
+              {hasMask
+                ? "Object selected. Click Submit to extract."
+                : "Draw on image to select object, or click Auto detect. Submit without selection to use original image."}
+            </p>
+            <div className="flex gap-2 w-full sm:w-auto justify-stretch sm:justify-end">
+              <button
+                onClick={onClose}
+                disabled={isLoading}
+                className={`flex-1 sm:flex-none rounded border border-border-color px-3 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--hover-bg)] transition-colors ${
+                  isLoading ? "opacity-60 cursor-not-allowed" : ""
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={isLoading}
+                className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded bg-primary-accent text-white px-4 py-2 text-sm font-medium transition-colors ${
+                  isLoading ? "opacity-60 cursor-not-allowed" : "hover:bg-[var(--highlight-accent)]"
+                }`}
+              >
+                <Check size={14} />
+                Submit
+              </button>
+            </div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

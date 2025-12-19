@@ -35,5 +35,5 @@ export default function MaskCanvasLayer({
     // Transform is already applied by TransformLayer parent, so we don't need it here
   };
 
-  return <canvas ref={maskCanvasRef} style={style} />;
+  return <canvas ref={maskCanvasRef} className="transition-opacity duration-200" style={style} />;
 }

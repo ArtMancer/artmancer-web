@@ -29,20 +29,20 @@ export function useImageUpload() {
   // Update display scale when image dimensions or window size changes
   useEffect(() => {
     if (!imageDimensions) {
-      setDisplayScale(1);
+      queueMicrotask(() => setDisplayScale(1));
       return;
     }
-    
+
     const updateScale = () => {
       const newScale = calculateDisplayScale(imageDimensions);
-      setDisplayScale(newScale);
+      queueMicrotask(() => setDisplayScale(newScale));
     };
-    
+
     updateScale();
-    window.addEventListener('resize', updateScale);
-    
+    window.addEventListener("resize", updateScale);
+
     return () => {
-      window.removeEventListener('resize', updateScale);
+      window.removeEventListener("resize", updateScale);
     };
   }, [imageDimensions, calculateDisplayScale]);
 

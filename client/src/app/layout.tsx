@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { ThemeProvider, LanguageProvider, ServerProvider } from "@/contexts";
-import MuiThemeProviderWrapper from "@/components/MuiThemeProvider";
+import { ThemeProvider, ServerProvider } from "@/contexts";
+import { Tooltip } from "radix-ui";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -42,15 +42,15 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <ServerProvider>
-        <ThemeProvider>
-          <LanguageProvider>
-              <MuiThemeProviderWrapper>
+        <div className="root">
+          <ServerProvider>
+            <ThemeProvider>
+              <Tooltip.Provider delayDuration={300} skipDelayDuration={100}>
                 {children}
-              </MuiThemeProviderWrapper>
-          </LanguageProvider>
-        </ThemeProvider>
-        </ServerProvider>
+              </Tooltip.Provider>
+            </ThemeProvider>
+          </ServerProvider>
+        </div>
       </body>
     </html>
   );

@@ -20,6 +20,7 @@ const ViewportLayer = memo(function ViewportLayer({
         transform: `scale(${viewportZoom}) translateZ(0)`,
         transformOrigin: 'center center',
         willChange: 'transform',
+        transition: 'transform 80ms ease-out',
         backfaceVisibility: 'hidden',
         WebkitBackfaceVisibility: 'hidden',
       }}
